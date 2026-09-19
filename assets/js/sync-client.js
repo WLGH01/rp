@@ -24,19 +24,22 @@
     // 需要一并同步的 localStorage 键（应用自己的小配置）
     const LOCAL_KEYS = ['ai_chargen_api', 'ai_chargen_options', 'ai_chargen_active_index', 'roleplay_hub_update_id'];
 
-    // 刻意「只留本机、不进同步」的键。
-    // rp_hub_generated_images_cache 是生图回显缓存，条目里存的是生成图的 base64 原图，
-    // 单台设备累积几十张就有上百 MB —— 实测会把整份快照从 58MB 顶到 160MB，
-    // 同时超过 nginx 的 client_max_body_size 与同步服务的 MAX_BODY_BYTES（都是 128MB），
-    // 表现就是同步上传直接 413。它只是本机显示用的派生数据，需要时可由生图服务重建，
-    // 因此收集与写入两端都跳过。
-    const LOCAL_ONLY_KEYS = new Set([`${STORAGE_PREFIX}generated_images_cache`]);
+    // 生图回显缓存：现在是「prompt tag → 服务端短地址」，条目只有几十字节，
+    // 随快照同步后换设备也能直接看到旧图，不必各自重跑一遍。
+    // 其中仍然存着整张 base64 的老条目会被剔除（见 compactImageCacheForSync）——
+    // 那部分单张 1–2MB，正是当初把快照顶到 160MB、撞上 128MB 上限报 413 的原因。
+    const IMAGE_CACHE_KEY = `${STORAGE_PREFIX}generated_images_cache`;
 
-    const isOurKey = key => {
-        const name = String(key);
-        if (LOCAL_ONLY_KEYS.has(name)) return false;
-        return name.startsWith(STORAGE_PREFIX) || name.startsWith(LEGACY_PREFIX);
+    const compactImageCache = (value) => {
+        const { entries, dropped } = window.RPHubImageUtils?.compactImageCacheForSync?.(value)
+            || { entries: value || {}, dropped: 0 };
+        if (dropped) {
+            console.warn(`同步快照跳过了 ${dropped} 张仍以 base64 存在本机的生图，它们只在各自设备上按需重跑。`);
+        }
+        return entries;
     };
+
+    const isOurKey = key => String(key).startsWith(STORAGE_PREFIX) || String(key).startsWith(LEGACY_PREFIX);
 
     // 服务端两道 128MB 限制之下留一点余量：超了就别白跑一趟 413。
     const MAX_PUSH_BYTES = 127 * 1024 * 1024;
@@ -73,17 +76,20 @@
         const db = await openDb(DB_NAME);
         try {
             if (!db.objectStoreNames.contains('store')) return {};
-            return await new Promise((resolve, reject) => {
-                const out = {};
+            const out = await new Promise((resolve, reject) => {
+                const collected = {};
                 const request = db.transaction(['store'], 'readonly').objectStore('store').openCursor();
                 request.onsuccess = () => {
                     const cursor = request.result;
-                    if (!cursor) return resolve(out);
-                    if (isOurKey(cursor.key)) out[String(cursor.key)] = cursor.value;
+                    if (!cursor) return resolve(collected);
+                    if (isOurKey(cursor.key)) collected[String(cursor.key)] = cursor.value;
                     cursor.continue();
                 };
                 request.onerror = () => reject(request.error);
             });
+            // 生图缓存只带上「短地址」那部分（老条目的 base64 留在本机，见 compactImageCache）。
+            if (out[IMAGE_CACHE_KEY]) out[IMAGE_CACHE_KEY] = compactImageCache(out[IMAGE_CACHE_KEY]);
+            return out;
         } finally {
             db.close();
         }
@@ -154,13 +160,12 @@
     // 对 main 里的 settings 做保护：剔除指向已移除网关的字段。
     const sanitizeMainEntries = (entries) => {
         if (!entries || typeof entries !== 'object') return entries;
-        // 老快照可能夹带着本机专用的派生缓存（含 base64 原图），写入前先摘掉，
-        // 否则一次拉取又会把 100MB 级的图片灌回本机。
-        const dropped = Object.keys(entries).filter(key => LOCAL_ONLY_KEYS.has(key));
-        const kept = dropped.length
-            ? Object.fromEntries(Object.entries(entries).filter(([key]) => !LOCAL_ONLY_KEYS.has(key)))
-            : entries;
-        if (dropped.length) console.warn(`同步快照里的本机专用键已跳过：${dropped.join(', ')}`);
+        // 老快照里的生图缓存可能还夹着整张 base64（单张 1–2MB）：写入前先摘掉那部分，
+        // 否则一次拉取又会把上百 MB 的图片灌回本机。
+        let kept = entries;
+        if (kept[IMAGE_CACHE_KEY]) {
+            kept = { ...kept, [IMAGE_CACHE_KEY]: compactImageCache(kept[IMAGE_CACHE_KEY]) };
+        }
         const settings = kept[`${STORAGE_PREFIX}settings`];
         if (!settings || typeof settings !== 'object') return kept;
         const cleaned = { ...settings };
@@ -189,6 +194,13 @@
             return await new Promise((resolve, reject) => {
                 const tx = db.transaction([storeName], 'readwrite');
                 const store = tx.objectStore(storeName);
+                // 生图缓存单独处理（见下），其余键照常先清后写。
+                const incomingImages = entries[IMAGE_CACHE_KEY];
+                const otherKeys = keys.filter(key => key !== IMAGE_CACHE_KEY);
+                let localImages = null;
+                store.get(IMAGE_CACHE_KEY).onsuccess = (event) => {
+                    localImages = event.target.result || null;
+                };
                 // 先清掉本应用的旧键，再写入快照，避免残留已删除的数据。
                 const cursorRequest = store.openCursor();
                 cursorRequest.onsuccess = () => {
@@ -198,7 +210,12 @@
                         cursor.continue();
                         return;
                     }
-                    keys.forEach(key => store.put(entries[key], key));
+                    otherKeys.forEach(key => store.put(entries[key], key));
+                    // 生图缓存与快照合并而不是覆盖：本机那些「还没归档的 base64 原图」要保住，
+                    // 否则一次拉取就把它们抹掉，下次看图又得白跑一遍。
+                    const merged = { ...(localImages && typeof localImages === 'object' ? localImages : {}) };
+                    if (incomingImages && typeof incomingImages === 'object') Object.assign(merged, incomingImages);
+                    if (Object.keys(merged).length) store.put(merged, IMAGE_CACHE_KEY);
                 };
                 tx.oncomplete = () => resolve(keys.length);
                 tx.onerror = () => reject(tx.error);
@@ -364,6 +381,16 @@
         return body;
     };
 
+    // 归档成功后的图片地址：
+    //   url    —— 站点同源静态路径（nginx 把 /data/images 挂到 /images/，最快）
+    //   apiUrl —— 走同步服务本体的同源接口（没配 nginx 静态路径时的兜底）
+    // 后端返回的 file 形如 images/2026-09-19/abcd1234.png。
+    const imageAddressesOf = (file) => {
+        const rest = String(file || '').replace(/^images\//, '');
+        if (!rest) return { url: '', apiUrl: '' };
+        return { url: `/images/${rest}`, apiUrl: `${API_URL}/v1/images/${rest}` };
+    };
+
     /**
      * 归档一张图片。
      * @param {object} options
@@ -385,13 +412,13 @@
             try {
                 const result = await postArchive(body);
                 if (result?.hash) rememberArchivedHash(result.hash);
-                return { ok: true, deduplicated: !!result?.deduplicated, file: result?.file, hash: result?.hash };
+                return { ok: true, deduplicated: !!result?.deduplicated, file: result?.file, hash: result?.hash, ...imageAddressesOf(result?.file) };
             } catch (firstError) {
                 // 静默重试一次
                 await new Promise(resolve => setTimeout(resolve, 1200));
                 const result = await postArchive(body);
                 if (result?.hash) rememberArchivedHash(result.hash);
-                return { ok: true, deduplicated: !!result?.deduplicated, file: result?.file, hash: result?.hash, retried: true };
+                return { ok: true, deduplicated: !!result?.deduplicated, file: result?.file, hash: result?.hash, retried: true, ...imageAddressesOf(result?.file) };
             }
         } catch (error) {
             // 归档失败不影响聊天与看图

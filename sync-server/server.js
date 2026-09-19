@@ -14,8 +14,13 @@
 //   HOST      监听地址（默认 0.0.0.0；与 nginx 同容器时建议 127.0.0.1）
 //   DATA_DIR  数据目录（默认 /data），存放 state.json 与 backups/
 //
-// 另外提供生图归档：生成的图片在返回浏览器时同步 POST 到 /v1/images，
-// 按内容 hash 去重、按日期分目录落到 DATA_DIR/images/。
+// 另外提供生图归档：
+//   POST /v1/images                 生成的图片落盘（内容 hash 去重、按日期分目录）
+//   GET  /v1/images                 归档统计
+//   GET  /v1/images/<day>/<file>    读取原图（供任何设备直接显示，不必本机存 base64）
+// 读取接口是「同源通道」，不需要额外配置；若 nginx 上再加一条
+//   location ^~ /images/ { alias /data/images/; }
+// 就能走静态文件（更快），前端会优先用那条路径、失败再退回本接口。
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -156,6 +161,25 @@ const EXT_BY_MIME = {
     'image/avif': 'avif'
 };
 
+const MIME_BY_EXT = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    avif: 'image/avif'
+};
+
+// 归档图片的对外地址：
+//   url    —— 站点同源静态路径（nginx alias 到 /data/images/）
+//   apiUrl —— 走同步服务本体的同源接口，任何部署方式都可用
+// file 形如 images/2026-09-19/abcd1234.png（相对 DATA_DIR）。
+const imageUrlsOf = (file) => {
+    const rest = String(file || '').replace(/^images\//, '');
+    if (!rest) return { url: '', apiUrl: '' };
+    return { url: `/images/${rest}`, apiUrl: `/api/v1/images/${rest}` };
+};
+
 // 同时兼容 data URL 与裸 base64。
 const decodeImagePayload = (raw) => {
     const text = String(raw || '');
@@ -182,7 +206,7 @@ const archiveImage = async ({ data, character, prompt, model, size, source, jobI
         index.items[hash].lastSeenAt = new Date().toISOString();
         index.items[hash].hits = (index.items[hash].hits || 1) + 1;
         await saveImageIndex();
-        return { deduplicated: true, hash, file: index.items[hash].file, bytes: buffer.length };
+        return { deduplicated: true, hash, file: index.items[hash].file, bytes: buffer.length, ...imageUrlsOf(index.items[hash].file) };
     }
 
     const day = new Date().toISOString().slice(0, 10);
@@ -208,7 +232,40 @@ const archiveImage = async ({ data, character, prompt, model, size, source, jobI
         jobId: String(jobId || '').slice(0, 100)
     };
     await saveImageIndex();
-    return { deduplicated: false, hash, file: index.items[hash].file, bytes: buffer.length };
+    return { deduplicated: false, hash, file: index.items[hash].file, bytes: buffer.length, ...imageUrlsOf(index.items[hash].file) };
+};
+
+// 读取已归档的原图。
+// 路径只接受 <年-月-日>/<hash>.<ext>：日期必须是合法日期串，文件名必须是十六进制 hash，
+// 二者都做白名单校验，再加上一次「必须落在 IMAGE_DIR 内」的兜底，杜绝目录穿越。
+const ARCHIVED_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const ARCHIVED_FILE_PATTERN = /^[a-f0-9]{8,64}\.(?:png|jpe?g|webp|gif|avif)$/;
+
+const sendArchivedImage = async (res, rest) => {
+    const [day, file, ...trailing] = String(rest || '').split('/');
+    if (trailing.length || !ARCHIVED_DAY_PATTERN.test(day || '') || !ARCHIVED_FILE_PATTERN.test(file || '')) {
+        return sendJson(res, 400, { ok: false, error: '图片路径不合法' });
+    }
+    const full = path.join(IMAGE_DIR, day, file);
+    if (!full.startsWith(IMAGE_DIR + path.sep)) {
+        return sendJson(res, 400, { ok: false, error: '图片路径不合法' });
+    }
+    let stat;
+    try {
+        stat = await fs.stat(full);
+    } catch {
+        return sendJson(res, 404, { ok: false, error: '图片不存在' });
+    }
+    if (!stat.isFile()) return sendJson(res, 404, { ok: false, error: '图片不存在' });
+
+    // 文件名即内容 hash，内容不会变，可以放心长缓存。
+    res.writeHead(200, {
+        'Content-Type': MIME_BY_EXT[path.extname(file).slice(1).toLowerCase()] || 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Cache-Control': 'public, max-age=604800, immutable',
+        'Access-Control-Allow-Origin': '*'
+    });
+    createReadStream(full).pipe(res);
 };
 
 const imageStats = async () => {
@@ -297,6 +354,11 @@ const server = http.createServer(async (req, res) => {
         } catch (error) {
             return sendJson(res, 500, { ok: false, error: error.message });
         }
+    }
+
+    // 生图归档：读取原图（同源通道；nginx 配了 /images/ 静态路径时前端会优先走那条）
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/images/')) {
+        return sendArchivedImage(res, url.pathname.slice('/v1/images/'.length));
     }
 
     // 生图归档：接收图片（base64 或 data URL）

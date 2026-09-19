@@ -210,8 +210,57 @@ assertEqual('残缺 profile 不影响其他字段', live.sdSteps, 40);
 assertEqual('空 profile 返回 false（调用方据此补基线）', imageUtils.applyImageProfile(live, {}), false);
 assertEqual('null profile 返回 false', imageUtils.applyImageProfile(live, null), false);
 
-// --- 8. 接线检查：app.js 确实用了上面这套逻辑 ---
-section('8) 接线检查（防止页面里又走回旧实现）');
+// --- 8. 归档后缓存只留服务端短地址 ---
+section('8) 归档：缓存里只留短地址，本机不再堆 base64');
+const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+const sdEntry = { status: 'done', directImage: true, imageUrl: dataUrl, width: 1024, height: 1536, sizeLabel: '竖图' };
+const archived = imageUtils.promoteImageJobToServer(sdEntry, { url: '/images/2026-09-19/abc12345.png', apiUrl: '/api/v1/images/2026-09-19/abc12345.png' });
+assertEqual('本地 base64 被丢掉', archived.imageUrl, undefined);
+assertEqual('resolvedUrl 指向服务端原图', archived.resolvedUrl, '/images/2026-09-19/abc12345.png');
+assertEqual('尺寸信息保留（卡片宽高比还要用）', [archived.width, archived.height, archived.sizeLabel], [1024, 1536, '竖图']);
+assertEqual('原条目不被就地改写', sdEntry.imageUrl, dataUrl);
+assertEqual('只有 apiUrl 时退回它', imageUtils.promoteImageJobToServer(sdEntry, { apiUrl: '/api/v1/images/2026-09-19/abc12345.png' }).resolvedUrl, '/api/v1/images/2026-09-19/abc12345.png');
+assertEqual('归档没给地址 → 原样返回（宁可留本地）', imageUtils.promoteImageJobToServer(sdEntry, { ok: false }), sdEntry);
+assertEqual('archive 为空 → 原样返回', imageUtils.promoteImageJobToServer(sdEntry, null), sdEntry);
+
+const naiEntry = { status: 'done', id: 'job-1', imageUrl: '/api/jobs/job-1/content', resolvedUrl: 'http://nai-a.local/api/jobs/job-1/content?token=t' };
+const naiPromoted = imageUtils.promoteImageJobToServer(naiEntry, { url: '/images/2026-09-19/nai00001.png' });
+assertEqual('NAI 条目改为指向归档图', naiPromoted.resolvedUrl, '/images/2026-09-19/nai00001.png');
+assertEqual('NAI 条目保留原 job 链接', naiPromoted.imageUrl, '/api/jobs/job-1/content');
+assertEqual('渲染时 resolvedUrl 优先于 imageUrl', imageUtils.resolveGeneratedImageUrl({ resolvedUrl: '/images/x.png', imageUrl: 'data:image/png;base64,AAA', directImage: true }, {}), '/images/x.png');
+
+section('8b) 静态路径不可用时的兜底地址');
+assertEqual('→ 换同步服务接口', imageUtils.resolveArchivedImageFallbackUrl('/images/2026-09-19/abc.png', '/api'), '/api/v1/images/2026-09-19/abc.png');
+assertEqual('apiUrl 是绝对地址也正确', imageUtils.resolveArchivedImageFallbackUrl('http://host/images/2026-09-19/abc.png', 'http://host:18082'), 'http://host:18082/v1/images/2026-09-19/abc.png');
+assertEqual('apiUrl 尾部斜杠被规范化', imageUtils.resolveArchivedImageFallbackUrl('/images/2026-09-19/abc.png', '/api/'), '/api/v1/images/2026-09-19/abc.png');
+assertEqual('非归档地址不兜底', imageUtils.resolveArchivedImageFallbackUrl(dataUrl, '/api'), '');
+assertEqual('没配同步服务时不兜底', imageUtils.resolveArchivedImageFallbackUrl('/images/a/b.png', ''), '');
+assertEqual('base64 老条目被识别', imageUtils.isLocalBase64ImageJob(sdEntry), true);
+assertEqual('已归档条目不算老条目', imageUtils.isLocalBase64ImageJob(archived), false);
+assertEqual('地址类条目不算老条目', imageUtils.isLocalBase64ImageJob(naiEntry), false);
+
+// 归档后的 SD 条目只剩 resolvedUrl，重载时不能被当成"空条目"丢掉（丢了图会白重生一次）
+assertEqual('只有 resolvedUrl 的归档条目仍可回显', imageUtils.isRenderableImageJob({ status: 'done', resolvedUrl: '/images/a.png' }), true);
+assertEqual('base64 条目可回显', imageUtils.isRenderableImageJob({ status: 'done', imageUrl: 'data:image/png;base64,AAA' }), true);
+assertEqual('没有地址的条目不回显', imageUtils.isRenderableImageJob({ status: 'done' }), false);
+assertEqual('未完成的条目不回显', imageUtils.isRenderableImageJob({ status: 'running', resolvedUrl: '/images/a.png' }), false);
+assertEqual('空条目不回显', imageUtils.isRenderableImageJob(null), false);
+
+section('8c) 同步用的缓存整理：短地址随快照走，base64 只留本机');
+const mixedCache = {
+    'tag-archived': { status: 'done', resolvedUrl: '/images/2026-09-19/a.png', width: 1024, height: 1536 },
+    'tag-url': { status: 'done', imageUrl: '/api/jobs/job-1/content' },
+    'tag-local': { status: 'done', directImage: true, imageUrl: 'data:image/png;base64,AAAA' }
+};
+const compacted = imageUtils.compactImageCacheForSync(mixedCache);
+assertEqual('短地址条目保留（换设备靠它看图）', Object.keys(compacted.entries), ['tag-archived', 'tag-url']);
+assertEqual('仍存 base64 的老条目被剔除', compacted.dropped, 1);
+assertEqual('被剔除的条目确实不在结果里', compacted.entries['tag-local'], undefined);
+assertEqual('空输入返回空表', imageUtils.compactImageCacheForSync(null), { entries: {}, dropped: 0 });
+assertEqual('全空对象也安全', imageUtils.compactImageCacheForSync({}), { entries: {}, dropped: 0 });
+
+// --- 9. 接线检查：app.js 确实用了上面这套逻辑 ---
+section('9) 接线检查（防止页面里又走回旧实现）');
 const appSource = readFileSync(join(root, 'assets/js/app.js'), 'utf8');
 assertTrue('app.js 使用 RPHubImageUtils', appSource.includes('window.RPHubImageUtils'));
 assertTrue('缓存写入时固化 resolvedUrl', /cacheCompletedImageJob[\s\S]{0,600}resolvedUrl/.test(appSource));
@@ -224,8 +273,24 @@ assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,
 assertTrue('启动时为老预设补 profile', appSource.includes('seedEndpointProfiles(settings.savedImageEndpoints, settings)'));
 
 const syncSource = readFileSync(join(root, 'assets/js/sync-client.js'), 'utf8');
-assertTrue('生图回显缓存不进同步（413 修复）', syncSource.includes('LOCAL_ONLY_KEYS'));
+assertTrue('快照里剔除以 base64 存的生图（413 防线）', syncSource.includes('compactImageCache'));
+assertTrue('生图短地址随快照同步（换设备直接看图）', syncSource.includes('IMAGE_CACHE_KEY'));
+assertTrue('拉取时合并而非抹掉本机生图缓存', /localImages[\s\S]{0,500}IMAGE_CACHE_KEY/.test(syncSource));
 assertTrue('上传前做体积预检', syncSource.includes('MAX_PUSH_BYTES'));
+
+section('9b) 归档链路的接线与部署配置');
+assertTrue('归档成功后把缓存条目换成短地址', appSource.includes('promoteCachedImageToServer'));
+assertTrue('缓存加载器接受只有 resolvedUrl 的归档条目（漏了会白重生一次）', appSource.includes('isRenderableImageJob(v)'));
+assertTrue('老 base64 条目按需补传归档', appSource.includes('upgradeLegacyCachedImage'));
+assertTrue('静态路径失败时退回同步接口', appSource.includes('resolveArchivedImageFallbackUrl'));
+assertTrue('sync-client 回传归档地址', syncSource.includes('imageAddressesOf'));
+const nginxConf = readFileSync(join(root, 'docker/default.conf'), 'utf8');
+assertTrue('nginx 用 ^~ 提供 /images/（否则被静态后缀正则抢先）',
+    /\^\~\s*\/images\//.test(nginxConf) && nginxConf.includes('alias /data/images/'));
+const serverSource = readFileSync(join(root, 'sync-server/server.js'), 'utf8');
+assertTrue('同步服务提供读图路由', serverSource.includes("url.pathname.startsWith('/v1/images/')"));
+assertTrue('读图路由有文件名白名单校验', serverSource.includes('ARCHIVED_FILE_PATTERN'));
+assertTrue('归档响应带 url / apiUrl', serverSource.includes('imageUrlsOf'));
 
 assertTrue('index.html 暴露自定义分辨率 UI',
     readFileSync(join(root, 'index.html'), 'utf8').includes('settings.sdCustomSizeEnabled'));

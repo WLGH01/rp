@@ -14,6 +14,36 @@ RP-Hub 是纯前端应用：数据只存在**各自浏览器**的 IndexedDB 里�
 | GET | `/v1/state` | 拉取完整状态快照 |
 | POST | `/v1/state` | 推送状态快照 |
 | GET | `/v1/status` | 仅返回摘要，用于排查 |
+| GET | `/v1/images` | 生图归档统计（张数 / 占用 / 最近时间） |
+| POST | `/v1/images` | 归档一张图（`data` 传 data URL 或 base64；也可传 `url`，由浏览器先取回再上传） |
+| GET | `/v1/images/<日期>/<hash>.<ext>` | **读取归档原图**（内容 hash 命名，可长期缓存） |
+
+### 生图归档：为什么需要读接口
+
+本地 Forge（sdapi）是**一次性把 base64 塞在响应里**返回的，服务端不提供可指向的图片地址。
+早先的做法是把整张 base64 存在浏览器里，于是一台设备攒 100 张就有上百 MB，
+换设备看图还得各自重跑一遍生图。
+
+现在：生成完成即归档到 `DATA_DIR/images/<日期>/<hash 前16位>.<ext>`（内容 SHA-256 去重），
+浏览器缓存里只留一个几十字节的地址。换任何设备都能直接取到这张图，本机不再囤积图片。
+
+读取有两条路，前端优先走静态、失败自动退回接口：
+
+```nginx
+# 1) 静态（快）：把归档目录直接暴露在站点同源路径下
+location ^~ /images/ {
+    alias /data/images/;
+    autoindex off;
+    add_header Cache-Control "public, max-age=604800, immutable";
+}
+```
+
+```text
+# 2) 接口（任何部署都可用，不需要上面那段 nginx 配置）
+GET /api/v1/images/<日期>/<hash>.<ext>
+```
+
+> 路径只接受 `<年-月-日>/<十六进制 hash>.<图片后缀>`，其余（含 `..`、索引文件、脚本后缀）一律拒绝。
 
 ### 冲突策略：最后写入者胜（LWW）
 
@@ -40,9 +70,10 @@ RP-Hub 是纯前端应用：数据只存在**各自浏览器**的 IndexedDB 里�
 ## 数据落盘
 
 - `state.json`：原子写（先写临时文件再 rename），避免崩溃留下半截文件。
+- `images/`：生图归档（`<日期>/<hash16>.<ext>` + `index.json` 记录角色/提示词/模型/尺寸/hits）。
 - `backups/state-<时间戳>.json`：每次写入前轮换备份，**双重上限**保护磁盘：
-  - 份数上限 `MAX_BACKUPS`（默认 **5**）
-  - 总大小上限 `MAX_BACKUP_BYTES`（默认 **300 MB**）
+  - 份数上限 `MAX_BACKUPS`（默认 **3**）
+  - 总大小上限 `MAX_BACKUP_BYTES`（默认 **10 GB**）
   - 两者都从**最旧**的开始清理，且**至少保留 1 份**。
 - 写入串行化，避免并发写坏文件。
 
@@ -54,9 +85,9 @@ RP-Hub 是纯前端应用：数据只存在**各自浏览器**的 IndexedDB 里�
 | --- | --- | --- |
 | `PORT` | `3000` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址；与 nginx 同容器时用 `127.0.0.1` |
-| `DATA_DIR` | `/data` | 数据目录，存放 `state.json` 与 `backups/` |
-| `MAX_BACKUPS` | `5` | 备份保留份数（最小 1） |
-| `MAX_BACKUP_BYTES` | `314572800`（300MB） | 备份目录总占用上限；设为 `0` 表示不限制 |
+| `DATA_DIR` | `/data` | 数据目录，存放 `state.json`、`backups/` 与 `images/` |
+| `MAX_BACKUPS` | `3` | 备份保留份数（最小 1） |
+| `MAX_BACKUP_BYTES` | `10737418240`（10GB） | 备份目录总占用上限；设为 `0` 表示不限制 |
 
 ## 安全说明
 

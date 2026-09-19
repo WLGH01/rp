@@ -1851,7 +1851,9 @@ let removedProviderConfigCleared = false;
                     if (savedImageCache && typeof savedImageCache === 'object') {
                         let pruned = false;
                         Object.entries(savedImageCache).forEach(([k, v]) => {
-                            if (!v || v.status !== 'done' || !v.imageUrl) return;
+                            // 归档后的 SD 条目只有 resolvedUrl（base64 已被服务端地址替换），
+                            // 因此这里判「有没有地址」，不能判「有没有 imageUrl」。
+                            if (!imageUtils.isRenderableImageJob(v)) return;
                             // 早期版本把同一份 base64 存了 imageUrl + resolvedUrl 两遍，
                             // 这里顺手清掉重复字段，避免本机缓存白白翻倍。
                             const entry = { ...v };
@@ -2161,22 +2163,31 @@ let removedProviderConfigCleared = false;
             // 缓存回放依赖的是「生成当时那个服务」的地址；若该服务已下线，图会加载失败。
             // 这里给一个可见的失败态与出路，而不是留一张空白卡片。
             image.onerror = null;
+            // 记下本次渲染的地址：下面的 onerror 只有在地址没被后续渲染替换时才处理。
+            image.dataset.src = imageUrl;
             if (isCached) {
-                const cachedUrl = imageUrl;
                 image.onerror = () => {
-                    if (image.getAttribute('src') !== cachedUrl) return;
+                    const attempted = image.getAttribute('src') || '';
+                    if (image.dataset.src !== attempted) return;
+                    // 归档图的静态路径不可用（部署没配 nginx 的 /images/）→ 退回同步服务接口再试一次。
+                    const fallback = imageUtils.resolveArchivedImageFallbackUrl(attempted, window.RPHubSync?.apiUrl || '');
+                    if (fallback && fallback !== attempted) {
+                        image.dataset.src = fallback;
+                        image.src = fallback;
+                        return;
+                    }
                     card.classList.add('is-generation-error');
                     card.dataset.imageJobState = 'failed';
-                    if (label) label.textContent = '原图已不可达（生图服务已切换或已清理），点右上角 ↻ 重新生成';
+                    if (label) label.textContent = '原图已不可达（生图服务已切换或归档已清理），点右上角 ↻ 重新生成';
                 };
             }
             image.src = imageUrl;
             card.classList.remove('is-generating', 'is-generation-error', 'is-waiting');
             card.dataset.imageJobState = job.status;
 
-            // 图片生成完成：同源转发一份到 unraid 归档（去重 + 按日期分目录）。
-            // 静默处理，失败重试一次后忽略，不打断聊天。
-            // 从缓存回显的已完成图片无需重复调用归档。
+            // 图片生成完成：同源转发一份到服务端归档（去重 + 按日期分目录），
+            // 成功后缓存里只留一个短地址，任何设备都能直接取到原图。
+            // 静默处理，失败重试一次后忽略，不打断聊天；从缓存回显的图无需重复归档。
             if (!isCached) {
                 archiveGeneratedImage({
                     imageUrl,
@@ -2191,10 +2202,31 @@ let removedProviderConfigCleared = false;
         // 正在归档的地址集合，避免同一个卡片重复触发。
         const archivingImageUrls = new Set();
 
-        const archiveGeneratedImage = async ({ imageUrl, task, card, data, job }) => {
+        // 归档成功后，把缓存条目里的「整张图」换成服务端地址。
+        const promoteCachedImageToServer = (tagKey, archive) => {
+            if (!tagKey || !archive) return;
+            const entry = completedImageJobsByTag.get(tagKey);
+            if (!entry) return;
+            const promoted = imageUtils.promoteImageJobToServer(entry, archive);
+            if (promoted === entry) return;
+            completedImageJobsByTag.set(tagKey, promoted);
+            persistCompletedImageJob();
+        };
+
+        // 从任务地址里取回 prompt tag，作为缓存条目的 key（与 cacheCompletedImageJob 一致）。
+        const imageTagKeyOfTask = (task) => {
+            try {
+                const raw = new URL(task?.requestUrl || '', window.location.href).searchParams.get('tag') || '';
+                return normalizeImageTagKey(raw);
+            } catch {
+                return '';
+            }
+        };
+
+        const archiveGeneratedImage = async ({ imageUrl, task, card, data, job, tagKey }) => {
             const api = typeof window.RPHubSync !== 'undefined' ? window.RPHubSync : null;
-            if (!api?.archiveImage || !api.apiUrl) return;
-            if (archivingImageUrls.has(imageUrl)) return;
+            if (!api?.archiveImage || !api.apiUrl) return null;
+            if (!imageUrl || archivingImageUrls.has(imageUrl)) return null;
             archivingImageUrls.add(imageUrl);
             try {
                 const character = currentCharacter.value?.name || '';
@@ -2203,21 +2235,43 @@ let removedProviderConfigCleared = false;
                 const size = Number(job?.width) && Number(job?.height)
                     ? `${job.width}x${job.height}`
                     : settings.imageSize;
-                await api.archiveImage({
+                const result = await api.archiveImage({
                     url: data ? undefined : imageUrl,
                     data,
                     character,
                     prompt,
                     model: settings.imageModel,
                     size,
-                    source: String(imageUrl).slice(0, 300),
+                    // data URL 直接当来源会把 base64 前缀写进索引，这里只留标记。
+                    source: String(imageUrl).startsWith('data:') ? 'local-cache' : String(imageUrl).slice(0, 300),
                     jobId: String(card?.dataset?.imageJobId || '')
                 });
+                if (result?.ok && (result.url || result.apiUrl)) {
+                    promoteCachedImageToServer(tagKey || imageTagKeyOfTask(task), result);
+                }
+                return result;
             } catch (error) {
                 console.warn('生图归档异常（已忽略）:', error?.message);
+                return null;
             } finally {
                 archivingImageUrls.delete(imageUrl);
             }
+        };
+
+        // 升级前生成的图，缓存里还存着整张 base64。用户真正看到它时再补传到服务端，
+        // 成功后条目只剩短地址——本机占用随之释放，别的设备也能直接看到这张图。
+        const legacyImageUpgradesQueued = new Set();
+        const upgradeLegacyCachedImage = (tagKey, cachedJob, card) => {
+            if (!imageUtils.isLocalBase64ImageJob(cachedJob)) return;
+            if (legacyImageUpgradesQueued.has(tagKey)) return;
+            legacyImageUpgradesQueued.add(tagKey);
+            archiveGeneratedImage({
+                imageUrl: cachedJob.imageUrl,
+                data: cachedJob.imageUrl,
+                card,
+                job: cachedJob,
+                tagKey
+            });
         };
 
         // ===== Stable Diffusion（Forge / A1111 sdapi）=====
@@ -2643,6 +2697,8 @@ let removedProviderConfigCleared = false;
                 // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。
                 applyGeneratedImageCardAspect(card, { requestUrl, job: cachedJob });
                 renderGeneratedImageJob(card, { baseUrl: parsedUrl.origin }, cachedJob, true);
+                // 老条目（升级前生成的）里还存着整张 base64：按需补传到服务端并换回短地址。
+                upgradeLegacyCachedImage(tagKey, cachedJob, card);
                 return Promise.resolve(cachedJob);
             }
 

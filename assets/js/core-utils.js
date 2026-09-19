@@ -1203,6 +1203,59 @@ window.RPHubUtils = {
         return seeded;
     };
 
+    // 缓存条目升级：归档成功后，把「图片本体」换成服务端地址。
+    // 之前每台设备各自扛一份 base64 原图（SD 图 1–2MB/张，100 条就是上百 MB），
+    // 换地址看别处的图还得重跑；换成短地址后，任何设备都直接取服务器上那一份。
+    // 归档没给地址（服务不可用等）时原样返回，宁可继续留本地，也不让图片变成需要重新生成。
+    const promoteImageJobToServer = (job, archive) => {
+        if (!job || !archive) return job;
+        const resolvedUrl = archive.url || archive.apiUrl;
+        if (!resolvedUrl) return job;
+        const next = { ...job, resolvedUrl };
+        // SD 的整张图原本就存在 imageUrl 里（data URL），换成地址后本地不必再留着。
+        if (typeof next.imageUrl === 'string' && next.imageUrl.startsWith('data:')) delete next.imageUrl;
+        return next;
+    };
+
+    // 静态路径取不到图时（部署没配 nginx 的 /images/ 静态路径），退回同步服务的同源接口。
+    // 入参是刚加载失败的那个地址；换不出更合适的地址就返回空串。
+    const resolveArchivedImageFallbackUrl = (failedUrl, apiUrl) => {
+        const match = String(failedUrl || '').match(/\/images\/([A-Za-z0-9._/-]+)$/);
+        if (!match || !apiUrl) return '';
+        return `${String(apiUrl).replace(/\/+$/, '')}/v1/images/${match[1]}`;
+    };
+
+    // 缓存里是否还留着「整张图」（base64）：用于把老条目按需补传到服务端。
+    const isLocalBase64ImageJob = (job) => typeof job?.imageUrl === 'string' && job.imageUrl.startsWith('data:');
+
+    // 缓存条目是否可以拿来直接回显。
+    // 注意：归档后的 SD 条目只有 resolvedUrl（base64 已被替换掉），
+    // 所以判断条件必须是「有地址」而不是「有 imageUrl」——否则重载后条目被丢掉，图会白白重生一次。
+    const isRenderableImageJob = (job) => {
+        if (!job || job.status !== 'done') return false;
+        const hasResolved = typeof job.resolvedUrl === 'string' && job.resolvedUrl !== '';
+        const hasInline = typeof job.imageUrl === 'string' && job.imageUrl !== '';
+        return hasResolved || hasInline;
+    };
+
+    // 同步用的生图缓存整理：条目里只剩服务端短地址（几十字节）时可以随快照走，
+    // 这样换设备也能直接看到旧图，不用各自重跑一遍；
+    // 但升级前的老条目里是整张 base64（单张 1–2MB，100 张能顶到上百 MB，还撞过 128MB 的 413），
+    // 这些一律只留本机、不进快照。
+    const compactImageCacheForSync = (value) => {
+        if (!value || typeof value !== 'object') return { entries: {}, dropped: 0 };
+        const entries = {};
+        let dropped = 0;
+        for (const [tag, entry] of Object.entries(value)) {
+            if (typeof entry?.imageUrl === 'string' && entry.imageUrl.startsWith('data:')) {
+                dropped += 1;
+                continue;
+            }
+            entries[tag] = entry;
+        }
+        return { entries, dropped };
+    };
+
     window.RPHubImageUtils = Object.freeze({
         IMAGE_PROFILE_FIELDS,
         normalizeSdDimension,
@@ -1212,7 +1265,12 @@ window.RPHubUtils = {
         resolveSdSizePreset,
         captureImageProfile,
         applyImageProfile,
-        seedEndpointProfiles
+        seedEndpointProfiles,
+        promoteImageJobToServer,
+        resolveArchivedImageFallbackUrl,
+        isLocalBase64ImageJob,
+        isRenderableImageJob,
+        compactImageCacheForSync
     });
 })();
 
