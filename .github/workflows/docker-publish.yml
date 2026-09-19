@@ -1,0 +1,108 @@
+# 每次推送到 main（或打 tag / 手动触发）就构建镜像并发布到 GitHub Container Registry。
+#
+# 拉取与运行（公开包可匿名拉取）：
+#   docker pull ghcr.io/wlgh01/rp:latest
+#   docker run -d --name rp-hub -p 18080:80 \
+#     -v /path/to/data:/data \
+#     ghcr.io/wlgh01/rp:latest
+#
+# 说明：
+#   - 使用仓库自带的 GITHUB_TOKEN 登录 ghcr.io，不需要配置任何额外 Secret。
+#   - 镜像名由 docker/metadata-action 自动转小写（GHCR 要求全小写）。
+#   - GHCR 新包的可见性默认是 Private（可见性不会从仓库继承）。要让别人能匿名 docker pull，
+#     需要改一次为 Public：GitHub 右上角头像 → Your profile → Packages → rp →
+#     Package settings → Danger Zone → Change visibility → Public。
+#     下面的“尝试把包设为公开”步骤会顺便用 API 试一次，失败不影响构建。
+
+name: Build & publish Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=RP-Hub
+            org.opencontainers.image.description=本地化角色扮演工具 + 跨设备同步服务（单容器、单端口）
+            org.opencontainers.image.licenses=CC-BY-NC-4.0
+
+      - name: 构建并推送（linux/amd64 + linux/arm64）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 关掉 provenance 证明，避免老版本 Docker 在拉取时看到 unknown/unknown 平台告警。
+          provenance: false
+
+      - name: 尝试把包设为公开（可选）
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "尝试将容器包 rp 设为 public ..."
+          gh api --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/rp" \
+            -f visibility=public \
+            && echo "已设为 public。" \
+            || echo "自动改可见性失败（GITHUB_TOKEN 通常没有该权限）。请在包设置里手动改为 Public。"
+
+# ── 如果还想同时推到 Docker Hub，取消下面的注释并配置两个 Secret ──────────────
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+#
+#      - name: 登录 Docker Hub
+#        uses: docker/login-action@v4
+#        with:
+#          username: ${{ secrets.DOCKERHUB_USERNAME }}
+#          password: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+#   并把 metadata-action 的 images 改成两行：
+#          images: |
+#            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+#            docker.io/<你的DockerHub用户名>/rp

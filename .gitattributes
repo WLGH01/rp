@@ -1,0 +1,16 @@
+# 仓库统一使用 LF。
+# 项目最终跑在 Linux 容器里：docker/entrypoint.sh 若被检出成 CRLF，容器启动会直接失败
+# （exec /entrypoint.sh: no such file or directory），所以显式钉死行尾。
+* text=auto eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

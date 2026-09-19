@@ -1,0 +1,12 @@
+# 构建上下文里不需要的东西（镜像只 COPY 站点文件、nginx 配置与同步服务）
+.git
+.github
+docs
+tools
+docker/unraid
+sync-server/README.md
+README.md
+LICENSE
+.gitignore
+.DS_Store
+Thumbs.db

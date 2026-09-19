@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>RP-Hub</Name>
+  <Repository>ghcr.io/wlgh01/rp:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <MyMAC/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/WLGH01/rp/issues</Support>
+  <Project>https://github.com/WLGH01/rp</Project>
+  <ReadMe>https://github.com/WLGH01/rp/blob/main/README.md</ReadMe>
+  <Overview>Roleplay Hub&#xFF08;RP-Hub&#xFF09;&#x672C;&#x5730;&#x5316;&#x90E8;&#x7F72;&#xFF1A;nginx &#x9759;&#x6001;&#x7AD9;&#x70B9;&#x4E0E;&#x8DE8;&#x8BBE;&#x5907;&#x540C;&#x6B65;&#x670D;&#x52A1;&#x5DF2;&#x5408;&#x5E76;&#x4E3A;&#x5355;&#x4E2A;&#x5BB9;&#x5668;&#xFF0C;&#x53EA;&#x66B4;&#x9732;&#x4E00;&#x4E2A;&#x7AEF;&#x53E3;&#x3002;&#13;
+&#13;
+&#x3010;&#x67B6;&#x6784;&#x3011;&#13;
+- &#x7AD9;&#x70B9;&#x9875;&#x9762;&#x4E0E; /api &#x540C;&#x6B65;&#x63A5;&#x53E3;&#x5171;&#x7528;&#x540C;&#x4E00;&#x4E2A;&#x7AEF;&#x53E3;&#xFF0C;&#x65E0;&#x9700;&#x7B2C;&#x4E8C;&#x4E2A;&#x7AEF;&#x53E3;&#x3002;&#13;
+- &#x540C;&#x6B65;&#x670D;&#x52A1;&#x4EC5;&#x5728;&#x5BB9;&#x5668;&#x5185;&#x90E8;&#x76D1;&#x542C; 127.0.0.1:3000&#xFF0C;&#x7531; nginx &#x53CD;&#x4EE3; /api &#x8BBF;&#x95EE;&#xFF0C;&#x4E0D;&#x5BF9;&#x5916;&#x66B4;&#x9732;&#xFF0C;&#x4E5F;&#x6CA1;&#x6709;&#x8DE8;&#x57DF;&#x95EE;&#x9898;&#x3002;&#13;
+- &#x5168;&#x90E8;&#x524D;&#x7AEF;&#x8D44;&#x6E90;&#x5DF2;&#x672C;&#x5730;&#x5316;&#x5230; assets/vendor&#xFF0C;&#x9875;&#x9762;&#x4E0D;&#x52A0;&#x8F7D;&#x4EFB;&#x4F55;&#x8FDC;&#x7A0B; CDN&#xFF1B;&#x552F;&#x4E00;&#x8054;&#x7F51;&#x70B9;&#x662F;&#x4F60;&#x5728;&#x8BBE;&#x7F6E;&#x91CC;&#x81EA;&#x5DF1;&#x586B;&#x5199;&#x7684; API &#x5730;&#x5740;&#x3002;&#13;
+&#13;
+&#x3010;&#x6570;&#x636E;&#x6301;&#x4E45;&#x5316;&#x3011;&#13;
+- &#x7528;&#x6237;&#x6570;&#x636E;&#x9ED8;&#x8BA4;&#x5B58;&#x5728;&#x5404;&#x81EA;&#x6D4F;&#x89C8;&#x5668;&#x7684; IndexedDB &#x4E2D;&#x3002;&#13;
+- &#x540C;&#x6B65;&#x5FEB;&#x7167;&#x6301;&#x4E45;&#x5316;&#x5728; /mnt/user/appdata/rp-hub/data&#xFF08;&#x5373; Sync Data &#x6302;&#x8F7D;&#xFF09;&#xFF0C;&#x5BB9;&#x5668;&#x5220;&#x9664;&#x91CD;&#x5EFA;&#x4E5F;&#x4E0D;&#x4F1A;&#x4E22;&#x5931;&#x3002;&#13;
+- &#x4F7F;&#x7528;&#x65B9;&#x5F0F;&#xFF1A;&#x7F51;&#x9875;&#x5185;&#x300C;&#x8BBE;&#x7F6E; &#x2192; &#x8DE8;&#x8BBE;&#x5907;&#x540C;&#x6B65;&#x300D;&#xFF0C;&#x53EF;&#x9009; &#x7ACB;&#x5373;&#x540C;&#x6B65; / &#x4ECE;&#x670D;&#x52A1;&#x5668;&#x62C9;&#x53D6; / &#x4EE5;&#x672C;&#x673A;&#x4E3A;&#x51C6;&#x8986;&#x76D6;&#x3002;&#13;
+&#13;
+&#x3010;&#x672C;&#x6A21;&#x677F;&#x4F7F;&#x7528;&#x672C;&#x5730;&#x955C;&#x50CF; ghcr.io/wlgh01/rp:latest&#x3011;&#13;
+&#x82E5;&#x63D0;&#x793A;&#x955C;&#x50CF;&#x4E0D;&#x5B58;&#x5728;&#xFF0C;&#x8BF7;&#x5148;&#x5728; Unraid &#x7EC8;&#x7AEF;&#x6784;&#x5EFA;&#xFF1A;&#13;
+cd /mnt/user/appdata/rp-hub/src &#x7136;&#x540E;&#x6267;&#x884C; docker build -f docker/Dockerfile -t ghcr.io/wlgh01/rp:latest .&#13;
+&#13;
+&#x3010;&#x66F4;&#x65B0;&#x7AD9;&#x70B9;&#x6587;&#x4EF6;&#x3011;&#13;
+cd /mnt/user/appdata/rp-hub/src &#x5E76; git pull&#xFF0C;&#x518D;&#x540C;&#x6B65;&#x5230; www &#x76EE;&#x5F55;&#x5373;&#x53EF;&#xFF1B;&#x4EC5;&#x66F4;&#x65B0;&#x9759;&#x6001;&#x6587;&#x4EF6;&#x65F6;&#x65E0;&#x9700;&#x91CD;&#x5EFA;&#x5BB9;&#x5668;&#x3002;&#13;
+&#x82E5;&#x4FEE;&#x6539;&#x4E86;&#x540C;&#x6B65;&#x670D;&#x52A1;&#x4EE3;&#x7801;&#xFF0C;&#x9700;&#x91CD;&#x65B0; docker build &#x5E76;&#x91CD;&#x5EFA;&#x5BB9;&#x5668;&#x3002;&#13;
+&#13;
+&#x3010;&#x5B50;&#x9875;&#x9762;&#x3011;&#13;
+/character/ &#x89D2;&#x8272;&#x5361;&#x751F;&#x6210;&#x3001;/novel/ &#x58A8;&#x97F5;&#xB7;&#x9020;&#x68A6;&#x3002;&#13;
+&#13;
+&#x3010;&#x8BF4;&#x660E;&#x3011;&#13;
+&#x540C;&#x6B65;&#x670D;&#x52A1;&#x672A;&#x5185;&#x7F6E;&#x8BA4;&#x8BC1;&#xFF0C;&#x4EC5;&#x5EFA;&#x8BAE;&#x5185;&#x7F51;&#x4F7F;&#x7528;&#xFF1B;&#x5982;&#x9700;&#x516C;&#x7F51;&#x8BBF;&#x95EE;&#xFF0C;&#x8BF7;&#x5728;&#x524D;&#x7F6E;&#x53CD;&#x5411;&#x4EE3;&#x7406;&#x4E0A;&#x53E6;&#x884C;&#x542F;&#x7528;&#x8BA4;&#x8BC1;&#x3002;&#13;
+&#x955C;&#x50CF;&#x57FA;&#x4E8E; nginx:alpine&#xFF0C;&#x5BB9;&#x5668;&#x542F;&#x52A8;&#x65F6;&#x7531; entrypoint &#x540C;&#x65F6;&#x62C9;&#x8D77;&#x540C;&#x6B65;&#x670D;&#x52A1;&#x4E0E; nginx&#x3002;</Overview>
+  <Category>Tools:Other</Category>
+  <WebUI>http://[IP]:[PORT:18080]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://github.com/WLGH01.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled>1789780863</DateInstalled>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Web Port" Target="80" Default="18080" Mode="tcp" Description="Web &#x8BBF;&#x95EE;&#x7AEF;&#x53E3;&#xFF1A;&#x5BBF;&#x4E3B;&#x673A; 18080 &#x6620;&#x5C04;&#x5230;&#x5BB9;&#x5668; 80&#x3002;&#x7AD9;&#x70B9;&#x9875;&#x9762;&#x4E0E; /api &#x540C;&#x6B65;&#x63A5;&#x53E3;&#x5171;&#x7528;&#x6B64;&#x7AEF;&#x53E3;&#xFF0C;&#x65E0;&#x9700;&#x989D;&#x5916;&#x5F00;&#x653E;&#x7AEF;&#x53E3;&#x3002;" Type="Port" Display="always" Required="true" Mask="false">18080</Config>
+  <Config Name="Web Root" Target="/usr/share/nginx/html" Default="/mnt/user/appdata/rp-hub/www" Mode="ro" Description="RP-Hub &#x9759;&#x6001;&#x7AD9;&#x70B9;&#x6839;&#x76EE;&#x5F55;&#xFF08;&#x53EA;&#x8BFB;&#xFF09;&#x3002;&#x4EC5;&#x5305;&#x542B;&#x7F51;&#x9875;&#x6587;&#x4EF6;&#xFF0C;&#x4E0D;&#x542B; tools&#x3001;sync-server &#x7B49;&#x6E90;&#x7801;&#x76EE;&#x5F55;&#x3002;" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/rp-hub/www</Config>
+  <Config Name="Sync Data" Target="/data" Default="/mnt/user/appdata/rp-hub/data" Mode="rw" Description="&#x8DE8;&#x8BBE;&#x5907;&#x540C;&#x6B65;&#x7684;&#x6570;&#x636E;&#x76EE;&#x5F55;&#xFF08;&#x53EF;&#x8BFB;&#x5199;&#xFF09;&#xFF1A;state.json &#x4E0E; backups &#x5907;&#x4EFD;&#x90FD;&#x843D;&#x5728;&#x8FD9;&#x91CC;&#x3002;&#x8FD9;&#x662F;&#x7528;&#x6237;&#x6570;&#x636E;&#x6301;&#x4E45;&#x5316;&#x7684;&#x5173;&#x952E;&#x6302;&#x8F7D;&#xFF0C;&#x5BB9;&#x5668;&#x5220;&#x9664;&#x91CD;&#x5EFA;&#x540E;&#x6570;&#x636E;&#x4ECD;&#x7136;&#x4FDD;&#x7559;&#xFF0C;&#x8BF7;&#x52FF;&#x5220;&#x9664;&#x6B64;&#x76EE;&#x5F55;&#x3002;" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/rp-hub/data</Config>
+  <Config Name="Nginx Config" Target="/etc/nginx/conf.d/default.conf" Default="/mnt/user/appdata/rp-hub/nginx/default.conf" Mode="ro" Description="nginx &#x7AD9;&#x70B9;&#x914D;&#x7F6E;&#xFF08;&#x53EA;&#x8BFB;&#xFF09;&#x3002;&#x5176;&#x4E2D;&#x5305;&#x542B;&#x628A; /api &#x53CD;&#x4EE3;&#x5230;&#x5BB9;&#x5668;&#x5185;&#x540C;&#x6B65;&#x670D;&#x52A1;&#x7684;&#x89C4;&#x5219;&#xFF0C;&#x4EE5;&#x53CA;&#x5C4F;&#x853D; tools &#x4E0E; sync-server &#x76EE;&#x5F55;&#x7684;&#x89C4;&#x5219;&#x3002;" Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/rp-hub/nginx/default.conf</Config>
+  <Config Name="TZ" Target="TZ" Default="Asia/Shanghai" Mode="" Description="&#x5BB9;&#x5668;&#x65F6;&#x533A;&#x3002;" Type="Variable" Display="advanced" Required="false" Mask="false">Asia/Shanghai</Config>
+  <Config Name="SYNC_PORT" Target="SYNC_PORT" Default="3000" Mode="" Description="&#x540C;&#x6B65;&#x670D;&#x52A1;&#x5728;&#x5BB9;&#x5668;&#x5185;&#x7684;&#x76D1;&#x542C;&#x7AEF;&#x53E3;&#xFF0C;&#x4EC5;&#x7ED1;&#x5B9A;&#x56DE;&#x73AF;&#x5730;&#x5740;&#xFF0C;&#x4E0D;&#x9700;&#x8981;&#x5BF9;&#x5916;&#x6620;&#x5C04;&#xFF0C;&#x901A;&#x5E38;&#x65E0;&#x9700;&#x4FEE;&#x6539;&#x3002;" Type="Variable" Display="advanced" Required="false" Mask="false">3000</Config>
+  <Config Name="DATA_DIR" Target="DATA_DIR" Default="/data" Mode="" Description="&#x540C;&#x6B65;&#x670D;&#x52A1;&#x7684;&#x6570;&#x636E;&#x76EE;&#x5F55;&#xFF08;&#x5BB9;&#x5668;&#x5185;&#x8DEF;&#x5F84;&#xFF09;&#xFF0C;&#x5BF9;&#x5E94;&#x4E0A;&#x9762;&#x7684; Sync Data &#x6302;&#x8F7D;&#xFF0C;&#x901A;&#x5E38;&#x65E0;&#x9700;&#x4FEE;&#x6539;&#x3002;" Type="Variable" Display="advanced" Required="false" Mask="false">/data</Config>
+  <TailscaleStateDir/>
+</Container>

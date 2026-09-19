@@ -1,0 +1,27 @@
+# 用户数据与运行时产物：绝不入库
+# data/ 里有 state.json（角色卡、聊天记录、头像 base64）、backups/ 与 images/ 归档
+data/
+**/data/state.json
+**/data/backups/
+**/data/images/
+_backup/
+*.log
+
+# 部署残留与本地备份
+*.bak
+*.bak-*
+nginx/default.conf.bak-*
+
+# 依赖与系统文件
+node_modules/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 本地测试产物
+tools/_out/
+tools/tmp/
+
+# 本机部署笔记：属于个人运维记录（含自己的路径与服务信息），不入公共仓库
+docs/REFACTOR-NOTES.md
