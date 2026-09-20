@@ -628,6 +628,9 @@ const app = createApp({
             // --- Stable Diffusion（Forge / A1111 sdapi）专用 ---
             // 底模：留空表示用服务端当前已加载的模型。
             sdModel: '',
+            // VAE：留空 = 不使用（即不下发 sd_vae，沿用模型自带的 VAE）。
+            // 有的底模已内置 VAE、有的必须外挂，所以默认不使用，由用户按需选。
+            sdVae: '',
             sdSteps: 28,
             sdCfgScale: 6,
             sdSampler: 'DPM++ 2M SDE Karras',
@@ -1880,6 +1883,8 @@ let removedProviderConfigCleared = false;
                 }
                 // SD 自定义分辨率：老存档没有这几个键，靠默认值兜底；这里只做合法性收敛。
                 settings.sdCustomSizeEnabled = settings.sdCustomSizeEnabled === true;
+                // VAE 同理：老存档没有 sdVae，收敛成空串 = 不使用 VAE。
+                settings.sdVae = String(settings.sdVae || '').trim();
                 if (!(sdSizePresets || []).some(item => item.value === settings.sdSizePreset)) {
                     settings.sdSizePreset = 'portrait-2-3';
                 }
@@ -2381,9 +2386,11 @@ let removedProviderConfigCleared = false;
             try {
                 if (isManual) showToast('正在从 SD 服务拉取模型与采样器...', 'info');
                 const models = await fetchSdJson('/sdapi/v1/sd-models');
-                const [samplers, schedulers] = await Promise.all([
+                const [samplers, schedulers, vaes] = await Promise.all([
                     fetchSdJson('/sdapi/v1/samplers').catch(() => []),
-                    fetchSdJson('/sdapi/v1/schedulers').catch(() => [])
+                    fetchSdJson('/sdapi/v1/schedulers').catch(() => []),
+                    // VAE 是可选能力：老版本 / 精简版服务端没有这个端点，失败就当空列表。
+                    fetchSdJson('/sdapi/v1/sd-vae').catch(() => [])
                 ]);
                 sdCapabilities.models = Array.isArray(models)
                     ? models.map(item => ({ value: item.title || item.model_name, label: item.model_name || item.title }))
@@ -2394,9 +2401,12 @@ let removedProviderConfigCleared = false;
                 sdCapabilities.schedulers = Array.isArray(schedulers)
                     ? schedulers.map(item => ({ value: item.name, label: item.label || item.name }))
                     : [];
+                sdCapabilities.vaes = Array.isArray(vaes)
+                    ? vaes.map(item => imageUtils.normalizeSdVaeEntry(item)).filter(Boolean)
+                    : [];
                 sdCapabilities.loaded = true;
                 sdCapabilities.error = '';
-                if (isManual) showToast(`成功获取 ${sdCapabilities.models.length} 个 SD 模型`, 'success');
+                if (isManual) showToast(`成功获取 ${sdCapabilities.models.length} 个 SD 模型、${sdCapabilities.vaes.length} 个 VAE`, 'success');
                 return { ok: true, ...sdCapabilities };
             } catch (error) {
                 sdCapabilities.error = error.message || '拉取失败';
@@ -2411,7 +2421,8 @@ let removedProviderConfigCleared = false;
             error: '',
             models: [],
             samplers: [],
-            schedulers: []
+            schedulers: [],
+            vaes: []
         });
 
         // 设置页下拉用的选项：内置列表 + 从服务端动态拉到的项（去重）。
@@ -2584,6 +2595,23 @@ let removedProviderConfigCleared = false;
             return merged;
         });
 
+        // VAE 下拉：首项固定是「不使用」（空值 = 不下发 sd_vae，模型自带 VAE 照常生效）。
+        // 之所以不用「Automatic」，是因为该值在 Forge/A1111 上语义随服务端设置变化，
+        // 用户要的是「要么用我选的这个，要么完全不干预」。
+        const sdVaeOptions = computed(() => {
+            const seen = new Set(['']);
+            const list = [{ value: '', label: '不使用 VAE（默认）' }];
+            for (const name of sdCapabilities.vaes) {
+                if (!name || seen.has(name)) continue;
+                seen.add(name);
+                list.push({ value: name, label: name });
+            }
+            // 当前选中项若不在拉取结果里（换过服务端 / 还没拉取），补上以免下拉显示空白。
+            const current = String(settings.sdVae || '').trim();
+            if (current && !seen.has(current)) list.push({ value: current, label: `${current}（未在服务端列表）` });
+            return list;
+        });
+
         // 调用 sdapi 生成一张图，返回 { imageUrl(data URL), info }
         const generateWithSd = async ({ tags }) => {
             const { width, height } = getSdSize();
@@ -2602,8 +2630,16 @@ let removedProviderConfigCleared = false;
                 // 不覆盖服务端全局设置，避免污染用户自己的 Forge 配置。
                 send_images: true
             };
+            // override_settings 不覆盖服务端全局配置（配合 restore_afterwards），
+            // 只在这一次请求里生效：底模与 VAE 都是「留空即不干预」。
             const model = String(settings.sdModel || '').trim();
-            if (model) payload.override_settings = { sd_model_checkpoint: model };
+            const vae = imageUtils.resolveSdVaeOverride(settings);
+            const overrideSettings = {};
+            if (model) overrideSettings.sd_model_checkpoint = model;
+            if (vae) overrideSettings.sd_vae = vae;
+            if (Object.keys(overrideSettings).length) payload.override_settings = overrideSettings;
+            // 恢复时机沿用「保持宽高比（写入后恢复服务端设置）」这个开关：
+            // 默认开，因此选了 VAE 也不会把用户 Forge 里的全局 VAE 永久改掉。
             if (settings.sdKeepAspectRatio) payload.override_settings_restore_afterwards = true;
 
             const result = await fetchSdJson('/sdapi/v1/txt2img', {
@@ -8882,7 +8918,7 @@ let removedProviderConfigCleared = false;
             isGenerating, isRemoteGenerating, remoteEstimatedTime, isReceiving, isThinking, hasActiveToolInlineWork, isConversationBusy, activeToolContinuationMessageId, activeToolContinuationHasResponse, userInput, pendingCardInteraction, clearPendingCardInteraction, pendingChatImages, pendingChatImageReadCount, isRecognizingImages, requestChatImageSelection, handleChatImageSelection, removePendingChatImage, modelSearchQuery, activeModelTag, modelTags, characterSearchQuery, filteredModels, filteredCharacters,
             user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, characters, currentCharacter, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontFamilyOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
             // 生图方式与 SD 专用
-            isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdSamplerOptions, sdSchedulerOptions,
+            isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
             activeImageEndpointId, savedImageEndpointOptions, selectImageEndpoint, saveCurrentImageEndpoint, deleteActiveImageEndpoint,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,

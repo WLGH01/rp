@@ -60,14 +60,27 @@ http.createServer(async (request, response) => {
             height: payload.height,
             steps: payload.steps,
             sampler: payload.sampler_name,
+            // VAE 走 override_settings.sd_vae；不下发时这里是 undefined，
+            // 正好用来断言「默认不使用 VAE 时请求体里没有这个键」。
+            vae: payload.override_settings?.sd_vae,
+            model: payload.override_settings?.sd_model_checkpoint,
             prompt: String(payload.prompt || '').slice(0, 200)
         });
-        console.log(`txt2img ← ${payload.width}x${payload.height} sampler=${payload.sampler_name} steps=${payload.steps}`);
+        console.log(`txt2img ← ${payload.width}x${payload.height} sampler=${payload.sampler_name} steps=${payload.steps} vae=${payload.override_settings?.sd_vae ?? '(未指定)'}`);
         json(response, 200, { images: [PNG], info: 'mock sdapi' });
         return;
     }
     if (url.pathname === '/sdapi/v1/sd-models') {
         json(response, 200, [{ title: 'mock-model.safetensors [abc123]', model_name: 'mock-model' }]);
+        return;
+    }
+    if (url.pathname === '/sdapi/v1/sd-vae') {
+        json(response, 200, [
+            { model_name: 'vae-ft-mse-840000-ema-pruned', filename: '/models/VAE/vae-ft-mse-840000-ema-pruned.safetensors' },
+            { model_name: 'sdxl_vae', filename: '/models/VAE/sdxl_vae.safetensors' },
+            // 只有 filename 的条目：验证 normalizeSdVaeEntry 能从路径兜出名字。
+            { filename: '/models/VAE/kl-f8-anime2.ckpt' }
+        ]);
         return;
     }
     if (url.pathname === '/sdapi/v1/samplers') {

@@ -1238,12 +1238,32 @@ window.RPHubUtils = {
         return { width: preset.width, height: preset.height };
     };
 
+    // VAE 覆盖值：留空 = 不使用（不下发 sd_vae，模型自带 VAE 照常生效）。
+    // 返回 null 表示「这次请求不碰 VAE 设置」，调用方据此决定要不要写 override_settings。
+    // 注意：不能下发空串，Forge/A1111 收到空串会当成无效 VAE 名而报错。
+    const resolveSdVaeOverride = (settings = {}) => {
+        const raw = String(settings?.sdVae || '').trim();
+        return raw ? raw : null;
+    };
+
+    // 从 /sdapi/v1/sd-vae 的响应里取出可读名字。
+    // A1111 与 Forge 的字段名不完全一致（model_name / title / name），且 filename 是绝对路径，
+    // 这里统一兜底，避免某一版服务端返回的列表在下拉里显示成空白。
+    const normalizeSdVaeEntry = (item) => {
+        if (typeof item === 'string') return item.trim();
+        if (!item || typeof item !== 'object') return '';
+        const direct = item.model_name || item.title || item.name || item.value;
+        if (typeof direct === 'string' && direct.trim()) return direct.trim();
+        const file = String(item.filename || item.path || '').split(/[\\/]/).pop() || '';
+        return file.replace(/\.(safetensors|ckpt|pt|bin)$/i, '').trim();
+    };
+
     // 每个生图预设各自携带的「出图参数」：决定画面长什么样。
     // 刻意不含 imageGenBaseUrl / imageProvider / imageGenKey（那是「连哪儿」，本来就按预设存），
     // 也不含 imageGenCount（期望张数属于这一次生成的操作习惯，不该被切预设改掉）。
     const IMAGE_PROFILE_FIELDS = Object.freeze([
         'imageStyle', 'customImageArtists', 'imageModel', 'imageSize',
-        'sdModel', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler',
+        'sdModel', 'sdVae', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler',
         'sdLoras', 'sdPromptPrefix', 'sdNegativePrompt', 'sdKeepAspectRatio',
         'sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight'
     ]);
@@ -1341,6 +1361,8 @@ window.RPHubUtils = {
         resolveGeneratedImageUrl,
         resolveGeneratedImageAspect,
         resolveSdSizePreset,
+        resolveSdVaeOverride,
+        normalizeSdVaeEntry,
         captureImageProfile,
         applyImageProfile,
         seedEndpointProfiles,

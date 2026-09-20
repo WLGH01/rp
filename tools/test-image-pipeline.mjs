@@ -157,7 +157,7 @@ assertEqual('全都没有 → 兜底竖图', imageUtils.resolveGeneratedImageAsp
 section('7) 预设隔离：改一个预设不应影响其他预设');
 const baseSettings = {
     imageStyle: 'vertical', customImageArtists: '', imageModel: 'nai-diffusion-4-5-full', imageSize: '竖图',
-    sdModel: '', sdSteps: 28, sdCfgScale: 6, sdSampler: 'DPM++ 2M SDE Karras', sdScheduler: 'Karras',
+    sdModel: '', sdVae: '', sdSteps: 28, sdCfgScale: 6, sdSampler: 'DPM++ 2M SDE Karras', sdScheduler: 'Karras',
     sdLoras: '', sdPromptPrefix: '', sdNegativePrompt: '', sdKeepAspectRatio: true,
     sdCustomSizeEnabled: false, sdSizePreset: 'portrait-2-3', sdCustomWidth: 832, sdCustomHeight: 1216,
     imageGenCount: 4
@@ -198,6 +198,8 @@ assertTrue('鉴权密钥不在 profile 字段里', !imageUtils.IMAGE_PROFILE_FIE
 assertTrue('SD 参数在 profile 字段里',
     ['sdModel', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler', 'sdLoras', 'sdPromptPrefix', 'sdNegativePrompt']
         .every(field => imageUtils.IMAGE_PROFILE_FIELDS.includes(field)));
+assertTrue('VAE 在 profile 字段里（跟着预设一起保存）',
+    imageUtils.IMAGE_PROFILE_FIELDS.includes('sdVae'));
 assertTrue('自定义分辨率在 profile 字段里',
     ['sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight']
         .every(field => imageUtils.IMAGE_PROFILE_FIELDS.includes(field)));
@@ -210,8 +212,38 @@ assertEqual('残缺 profile 不影响其他字段', live.sdSteps, 40);
 assertEqual('空 profile 返回 false（调用方据此补基线）', imageUtils.applyImageProfile(live, {}), false);
 assertEqual('null profile 返回 false', imageUtils.applyImageProfile(live, null), false);
 
-// --- 8. 归档后缓存只留服务端短地址 ---
-section('8) 归档：缓存里只留短地址，本机不再堆 base64');
+// --- 7b. VAE：默认不使用；选了才下发，且随预设走 ---
+section('7b) VAE：默认不使用，选了才下发');
+assertEqual('未设置 sdVae → 不下发（默认不使用）', imageUtils.resolveSdVaeOverride({}), null);
+assertEqual('空串 → 不下发', imageUtils.resolveSdVaeOverride({ sdVae: '' }), null);
+assertEqual('纯空白 → 不下发', imageUtils.resolveSdVaeOverride({ sdVae: '   ' }), null);
+assertEqual('null/undefined 设置对象也安全', imageUtils.resolveSdVaeOverride(null), null);
+assertEqual('选了 VAE → 原样下发', imageUtils.resolveSdVaeOverride({ sdVae: 'vae-ft-mse-840000-ema-pruned' }), 'vae-ft-mse-840000-ema-pruned');
+assertEqual('首尾空格被裁掉', imageUtils.resolveSdVaeOverride({ sdVae: ' sdxl_vae ' }), 'sdxl_vae');
+
+// 服务端返回的字段名不一致：model_name / title / name / 只有 filename 都要能兜出名字
+assertEqual('model_name 优先', imageUtils.normalizeSdVaeEntry({ model_name: 'a', title: 'b', filename: '/x/c.safetensors' }), 'a');
+assertEqual('退到 title', imageUtils.normalizeSdVaeEntry({ title: 'b', filename: '/x/c.safetensors' }), 'b');
+assertEqual('退到 name', imageUtils.normalizeSdVaeEntry({ name: 'c' }), 'c');
+assertEqual('只有 filename → 取文件名去扩展名', imageUtils.normalizeSdVaeEntry({ filename: '/models/VAE/kl-f8-anime2.ckpt' }), 'kl-f8-anime2');
+assertEqual('Windows 路径分隔符也能处理', imageUtils.normalizeSdVaeEntry({ filename: 'D:\\models\\VAE\\sdxl_vae.safetensors' }), 'sdxl_vae');
+assertEqual('字符串条目直接用', imageUtils.normalizeSdVaeEntry('plain-vae'), 'plain-vae');
+assertEqual('空对象 → 空串（调用方据此过滤）', imageUtils.normalizeSdVaeEntry({}), '');
+assertEqual('null 安全', imageUtils.normalizeSdVaeEntry(null), '');
+
+// 随预设保存：A 选了 VAE、B 没选，切换后互不影响
+const vaeLive = { ...baseSettings, sdVae: '' };
+imageUtils.applyImageProfile(vaeLive, presetA.profile);
+vaeLive.sdVae = 'vae-ft-mse-840000-ema-pruned';
+presetA.profile = imageUtils.captureImageProfile(vaeLive);
+assertEqual('A 的 profile 记住了 VAE', presetA.profile.sdVae, 'vae-ft-mse-840000-ema-pruned');
+imageUtils.applyImageProfile(vaeLive, presetB.profile);
+assertEqual('切到 B 后 VAE 回到 B 自己的值（不使用）', vaeLive.sdVae, '');
+assertEqual('B 的 profile 没被 A 的 VAE 污染', presetB.profile.sdVae, '');
+imageUtils.applyImageProfile(vaeLive, presetA.profile);
+assertEqual('切回 A 后 VAE 恢复', vaeLive.sdVae, 'vae-ft-mse-840000-ema-pruned');
+
+// --- 8. 归档后缓存只留服务端短地址 ---section('8) 归档：缓存里只留短地址，本机不再堆 base64');
 const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
 const sdEntry = { status: 'done', directImage: true, imageUrl: dataUrl, width: 1024, height: 1536, sizeLabel: '竖图' };
 const archived = imageUtils.promoteImageJobToServer(sdEntry, { url: '/images/2026-09-19/abc12345.png', apiUrl: '/api/v1/images/2026-09-19/abc12345.png' });
@@ -271,6 +303,11 @@ assertTrue('切换预设时载入 profile', /selectImageEndpoint[\s\S]{0,900}app
 assertTrue('保存预设时带上 profile', /endpointData = \{[\s\S]{0,400}profile: captureImageProfile\(\)/.test(appSource));
 assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,220}writeActiveImageProfile\(\)/.test(appSource));
 assertTrue('启动时为老预设补 profile', appSource.includes('seedEndpointProfiles(settings.savedImageEndpoints, settings)'));
+assertTrue('从 /sdapi/v1/sd-vae 拉取 VAE 列表', appSource.includes("fetchSdJson('/sdapi/v1/sd-vae')"));
+assertTrue('VAE 走 resolveSdVaeOverride 决定是否下发', appSource.includes('imageUtils.resolveSdVaeOverride(settings)'));
+assertTrue('VAE 写进 override_settings.sd_vae', /overrideSettings\.sd_vae\s*=\s*vae/.test(appSource));
+assertTrue('老存档的 sdVae 被收敛为字符串', appSource.includes('settings.sdVae = String(settings.sdVae || '));
+assertTrue('VAE 下拉暴露给模板', appSource.includes('sdVaeOptions,'));
 
 const syncSource = readFileSync(join(root, 'assets/js/sync-client.js'), 'utf8');
 assertTrue('快照里剔除以 base64 存的生图（413 防线）', syncSource.includes('compactImageCache'));
@@ -294,6 +331,10 @@ assertTrue('归档响应带 url / apiUrl', serverSource.includes('imageUrlsOf'))
 
 assertTrue('index.html 暴露自定义分辨率 UI',
     readFileSync(join(root, 'index.html'), 'utf8').includes('settings.sdCustomSizeEnabled'));
+const indexSource = readFileSync(join(root, 'index.html'), 'utf8');
+assertTrue('index.html 暴露 VAE 选择框', indexSource.includes('settings.sdVae') && indexSource.includes('sdVaeOptions'));
+assertTrue('VAE 默认项文案是「不使用」', appSource.includes('不使用 VAE（默认）'));
+assertTrue('mock 服务提供 /sdapi/v1/sd-vae', readFileSync(join(root, 'tools/mock-sdapi.mjs'), 'utf8').includes("'/sdapi/v1/sd-vae'"));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
 process.exit(failures === 0 ? 0 : 1);
