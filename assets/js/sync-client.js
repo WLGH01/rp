@@ -305,7 +305,11 @@
         const body = JSON.stringify({ ...state, force });
         // 超限时 nginx 会在请求进入业务逻辑前就返回 413，前端只能看到裸状态码。
         // 这里先量一次体积，给出能看懂的原因，省掉一趟几十 MB 的无用上传。
-        const bytes = new TextEncoder().encode(body).length;
+        //
+        // 用 Blob.size 而不是 new TextEncoder().encode(body).length：
+        // 后者会为整份快照再分配一个同等大小的 Uint8Array（快照上百 MB 时
+        // 就是白白多占上百 MB 内存）；Blob 的字节长度由浏览器在堆外统计。
+        const bytes = new Blob([body]).size;
         if (bytes > MAX_PUSH_BYTES) {
             return {
                 ok: false,
@@ -313,7 +317,8 @@
                 bytes,
                 state,
                 error: `同步快照约 ${(bytes / 1048576).toFixed(1)}MB，超过服务端 128MB 上限，本次未上传。`
-                    + '通常是角色卡头像（base64 内联）累积过大，可清理不用的角色卡后重试。'
+                    + '通常是角色卡头像（base64 内联）累积过大：'
+                    + '可到「设置 → 空间管理 → 压缩头像体积」把头像压到展示尺寸后重试。'
             };
         }
         const { ok, status, body: responseBody } = await request('/v1/state', { method: 'POST', body });
