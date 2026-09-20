@@ -41,10 +41,10 @@ let lastError = '';
 const startOn = async (port) => {
     const proc = spawn(process.execPath, [path.join(root, 'sync-server', 'server.js')], {
         env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir },
-        stdio: ['ignore', 'pipe', 'pipe']
+        // 不用 'pipe'：受限沙箱下管道会触发 spawn EPERM。
+        // 服务日志本来也不需要，stderr 只在启动失败时想看，交给上层终端即可。
+        stdio: ['ignore', 'ignore', 'inherit']
     });
-    proc.stdout.on('data', () => {});
-    proc.stderr.on('data', chunk => { lastError += chunk.toString(); });
     for (let i = 0; i < 50; i += 1) {
         await new Promise(resolve => setTimeout(resolve, 100));
         if (proc.exitCode !== null) return null;

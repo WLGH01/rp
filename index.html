@@ -2096,6 +2096,12 @@
                                             class="px-4 py-2.5 text-sm font-bold text-gray-600 bg-white border border-gray-200 rounded-xl shadow-sm hover:bg-gray-50 hover:shadow-md active:scale-95 transition-all disabled:opacity-40 disabled:shadow-none">
                                             {{ storageStats.loading ? '统计中...' : (storageStats.hasMeasured ? '重新统计' : '统计') }}
                                         </button>
+                                        <button type="button" @click="shrinkAvatars"
+                                            :disabled="storageStats.loading || storageStats.cleaning || avatarShrink.running"
+                                            class="px-4 py-2.5 text-sm font-bold text-primary-700 bg-white border border-primary-200 rounded-xl shadow-sm hover:bg-primary-50 hover:shadow-md active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                                            title="把角色卡头像压缩到适合展示的尺寸。头像原图（原始 PNG 立绘）是同步快照与内存占用的最大来源。">
+                                            {{ avatarShrink.running ? '压缩中...' : '压缩头像体积' }}
+                                        </button>
                                         <button type="button" @click="cleanupUnusedStorage"
                                             :disabled="storageStats.loading || storageStats.cleaning || storageStats.orphanedItems === 0"
                                             class="px-4 py-2.5 text-sm font-bold text-red-600 bg-white border border-gray-200 rounded-xl shadow-sm hover:bg-red-50 hover:border-red-100 hover:shadow-md active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none">
@@ -2104,6 +2110,13 @@
                                     </div>
                                 </div>
 
+                                <div v-if="avatarShrink.done"
+                                    class="rounded-xl border border-primary-100 bg-primary-50 px-4 py-3 text-sm text-primary-700 mb-4">
+                                    上次头像压缩：处理 {{ avatarShrink.changed }} 张，
+                                    {{ formatStorageSize(avatarShrink.beforeBytes) }} →
+                                    {{ formatStorageSize(avatarShrink.afterBytes) }}（节省
+                                    {{ formatStorageSize(Math.max(0, avatarShrink.beforeBytes - avatarShrink.afterBytes)) }}）
+                                </div>
                                 <div v-if="storageStats.error"
                                     class="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
                                     {{ storageStats.error }}

@@ -5,7 +5,7 @@ FROM node:22-alpine
 WORKDIR /app
 
 # 只拷贝服务本体，保持镜像最小。
-COPY server.js ./
+COPY server.js json-scan.js base64-stream.js stream-store.js ./
 
 ENV PORT=3000 \
     DATA_DIR=/data \

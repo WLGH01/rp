@@ -377,11 +377,13 @@
         getStorageLogicalKey,
         globalUiTemplates,
         readStorageKeys,
+        saveCharacters,
         saveStoredValue,
         scanStorageEntries,
         scopedStorageNames,
         toast
     }) => {
+        const { estimateDataUrlBytes, isAvatarWorthShrinking } = window.RPHubUtils;
         const categories = Object.freeze([
             { key: 'characters', label: '角色卡', color: '#2563eb' },
             { key: 'chat', label: '聊天记录', color: '#3b82f6' },
@@ -450,6 +452,85 @@
             return bytes;
         };
         const estimateStorageEntrySize = (key, value) => String(key).length * 2 + estimateStorageValueSize(value);
+
+        // --- 头像瘦身 ---
+        // 存量数据的最大头：角色卡头像过去是原样内联的原始 PNG
+        // （实测单张 9.4MB，20 张 71.5MB，base64 后 105MB，占整个快照的 89%）。
+        // 这里做一次性迁移：把每张头像压到适合头像展示的尺寸，
+        // 并在压缩前后如实汇报省下的空间，让用户自己决定是否保存。
+        const avatarShrink = reactive({
+            running: false,
+            done: false,
+            scanned: 0,
+            changed: 0,
+            beforeBytes: 0,
+            afterBytes: 0
+        });
+
+        const measureAvatarBytes = (list) => list.reduce(
+            (total, character) => total + estimateDataUrlBytes(character?.avatar || ''),
+            0
+        );
+
+        const shrinkAvatars = async () => {
+            if (avatarShrink.running) return { ok: false };
+            const shrink = window.RPHubUtils?.shrinkAvatarDataUrl;
+            if (typeof shrink !== 'function') {
+                toast('头像压缩功能未加载，请刷新页面后重试', 'error');
+                return { ok: false };
+            }
+
+            // 只挑「值得压」的：已经是 JPEG 或体积很小的直接跳过，
+            // 避免把本来就不大的头像反复重编码（每次重编码都会再损失一点画质）。
+            const targets = characters.value.filter(character => isAvatarWorthShrinking(character?.avatar));
+            if (!targets.length) {
+                avatarShrink.scanned = characters.value.length;
+                avatarShrink.changed = 0;
+                avatarShrink.beforeBytes = measureAvatarBytes(characters.value);
+                avatarShrink.afterBytes = avatarShrink.beforeBytes;
+                avatarShrink.done = true;
+                toast('所有头像都已经是小图，无需压缩', 'info');
+                return { ok: true, changed: 0 };
+            }
+
+            avatarShrink.running = true;
+            avatarShrink.done = false;
+            avatarShrink.scanned = characters.value.length;
+            // 记录原值，压缩过程中任何异常都能整体回滚。
+            const originals = targets.map(character => character.avatar);
+            const beforeBytes = measureAvatarBytes(characters.value);
+            let changed = 0;
+            try {
+                for (const character of targets) {
+                    character.avatar = await shrink(character.avatar);
+                }
+                changed = targets.filter((character, index) => character.avatar !== originals[index]).length;
+                const afterBytes = measureAvatarBytes(characters.value);
+                avatarShrink.changed = changed;
+                avatarShrink.beforeBytes = beforeBytes;
+                avatarShrink.afterBytes = afterBytes;
+                avatarShrink.done = true;
+
+                if (!changed) {
+                    toast('头像已经足够小，本次没有改动', 'info');
+                    return { ok: true, changed: 0 };
+                }
+                await saveCharacters?.();
+                const saved = Math.max(0, beforeBytes - afterBytes);
+                toast(`已压缩 ${changed} 张头像，节省约 ${formatStorageSize(saved)}`, 'success');
+                await refreshStorageStats();
+                return { ok: true, changed, savedBytes: saved };
+            } catch (error) {
+                // 回滚，避免留下压缩到一半的状态。
+                targets.forEach((character, index) => { character.avatar = originals[index]; });
+                avatarShrink.done = false;
+                console.error('头像压缩失败:', error);
+                toast('头像压缩失败：' + error.message, 'error');
+                return { ok: false, error: error.message };
+            } finally {
+                avatarShrink.running = false;
+            }
+        };
 
         const refreshStorageStats = async () => {
             if (storageStats.loading) return;
@@ -745,9 +826,11 @@
         };
 
         return {
+            avatarShrink,
             cleanupUnusedStorage,
             formatStorageSize,
             refreshStorageStats,
+            shrinkAvatars,
             storageStats,
             initSync,
             refreshSyncStatus,

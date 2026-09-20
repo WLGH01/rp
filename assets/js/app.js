@@ -44,6 +44,7 @@ const {
     getImageTagRegex,
     normalizeApiUsage,
     parseCot,
+    shrinkAvatarDataUrl,
     stringifyErrorDetail
 } = window.RPHubUtils;
 const {
@@ -1447,9 +1448,11 @@ let removedProviderConfigCleared = false;
             }) });
         };
         const {
+            avatarShrink,
             cleanupUnusedStorage,
             formatStorageSize,
             refreshStorageStats,
+            shrinkAvatars,
             storageStats,
             initSync,
             refreshSyncStatus,
@@ -1471,6 +1474,9 @@ let removedProviderConfigCleared = false;
             getStorageLogicalKey,
             globalUiTemplates,
             readStorageKeys,
+            // saveCharactersNow 声明在本块之后，这里必须用闭包延迟取值，
+            // 直接传值会命中 TDZ（const 尚未初始化）。
+            saveCharacters: (...args) => saveCharactersNow(...args),
             saveStoredValue: setStoredValue,
             scanStorageEntries,
             scopedStorageNames: CHARACTER_SCOPED_STORAGE_NAMES,
@@ -8001,7 +8007,9 @@ let removedProviderConfigCleared = false;
                 const reader = new FileReader();
                 reader.onload = async (e) => {
                     try {
-                        editingCharacter.data.avatar = await compressImage(e.target.result, 400, 0.8);
+                        editingCharacter.data.avatar = await shrinkAvatarDataUrl(
+                            await compressImage(e.target.result, 400, 0.8)
+                        );
                     } catch (err) {
                         editingCharacter.data.avatar = e.target.result;
                     }
@@ -8246,7 +8254,9 @@ let removedProviderConfigCleared = false;
                         const { data } = cardUtils.parsePngCharacterData(buffer);
                         const blob = new Blob([buffer], { type: 'image/png' });
                         const avatarUrl = await cardUtils.blobToDataUrl(blob);
-                        await importCharacterData(data, avatarUrl);
+                        // 角色卡 PNG 里嵌的就是原始立绘（实测 1773×2364 / 9.4MB），
+                        // 原样内联会让快照与内存迅速膨胀，导入时先压到适合头像的尺寸。
+                        await importCharacterData(data, await shrinkAvatarDataUrl(avatarUrl));
                     } catch (err) {
                         if (err.chunks) console.warn("Available chunks:", Object.keys(err.chunks));
                         console.error(err);
@@ -8864,6 +8874,7 @@ let removedProviderConfigCleared = false;
             latestMainTokenUsage, formatLatestTokenCount, formatLatestUsageCost,
             getUncachedInputTokens, formatTokenCount, formatTokenAggregate, formatTokenUsageTime, getTokenUsageTypeLabel, clearTokenUsageHistory,
             storageStats, refreshStorageStats, cleanupUnusedStorage, formatStorageSize,
+            avatarShrink, shrinkAvatars,
             syncState, initSync, refreshSyncStatus, syncNow, syncPull, syncPush, syncPushForce,
             showCharacterExportModal, openCharacterExportModal, confirmCharacterExport, // Character Export Modal
             updateModalRef, latestUpdateConfig,

@@ -24,6 +24,9 @@ COPY novel /usr/share/nginx/html/novel
 COPY docker/default.conf /etc/nginx/conf.d/default.conf
 
 COPY sync-server/server.js /app/server.js
+COPY sync-server/json-scan.js /app/json-scan.js
+COPY sync-server/base64-stream.js /app/base64-stream.js
+COPY sync-server/stream-store.js /app/stream-store.js
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

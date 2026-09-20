@@ -88,6 +88,79 @@ const compressImage = (source, maxWidth = 300, quality = 0.7) => new Promise((re
     image.onerror = () => resolve(source);
 });
 
+// 头像专用压缩参数。
+// 头像在界面里最大也就渲染到卡片封面那么大（几百像素），
+// 而导入原始 PNG 立绘可能是 1773×2364、单张 9.4MB（实测）——
+// 这 70+MB 过去会被原样 base64 内联进快照，是磁盘与内存的大头。
+// 512 宽 + JPEG 0.85 在肉眼几乎无差别的前提下能把单张压到 30~80KB。
+const AVATAR_MAX_WIDTH = 512;
+const AVATAR_QUALITY = 0.85;
+
+// data URL 的体量估算：base64 部分每 4 个字符 3 字节。
+const estimateDataUrlBytes = (dataUrl) => {
+    const text = String(dataUrl || '');
+    const comma = text.indexOf(',');
+    if (comma < 0) return 0;
+    const payload = text.length - comma - 1;
+    if (!/;base64/i.test(text.slice(0, comma))) return payload;
+    const padding = text.endsWith('==') ? 2 : (text.endsWith('=') ? 1 : 0);
+    return Math.max(0, Math.floor(payload / 4) * 3 - padding);
+};
+
+// 把头像压到适合内联存储的大小。
+//   * 本来就不是 data URL（例如 http 地址、空值）→ 原样返回
+//   * 已经是小图（未超过阈值且体积不大）→ 原样返回，避免每次加载都重编码
+//   * 压缩后反而更大（小图转 JPEG 可能变大）→ 保留原图
+// 失败一律退回原值：宁可头像大一点，也不能把头像弄丢。
+const shrinkAvatarDataUrl = async (dataUrl, options = {}) => {
+    const text = String(dataUrl || '');
+    if (!text.startsWith('data:image/')) return text;
+
+    const maxWidth = Number(options.maxWidth) > 0 ? Number(options.maxWidth) : AVATAR_MAX_WIDTH;
+    const quality = Number(options.quality) > 0 ? Number(options.quality) : AVATAR_QUALITY;
+    // SVG 等矢量图体积本来就小，重编码成位图只会变糊。
+    if (/^data:image\/svg/i.test(text)) return text;
+
+    const originalBytes = estimateDataUrlBytes(text);
+    const minBytes = Number(options.minBytes) > 0 ? Number(options.minBytes) : 64 * 1024;
+    if (originalBytes > 0 && originalBytes <= minBytes) return text;
+
+    try {
+        const image = await new Promise((resolve, reject) => {
+            const element = new Image();
+            element.onload = () => resolve(element);
+            element.onerror = () => reject(new Error('头像解码失败'));
+            element.src = text;
+        });
+        // 尺寸已经很小且体积不大时没必要重编码。
+        if (image.width <= maxWidth && originalBytes <= minBytes * 4) return text;
+
+        const scale = Math.min(1, maxWidth / image.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext('2d');
+        // 头像可能是透明 PNG：先铺白底，避免转 JPEG 后透明区域变黑。
+        context.fillStyle = '#FFFFFF';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const compressed = canvas.toDataURL('image/jpeg', quality);
+        // 压完更大就用原图（小尺寸 PNG 转 JPEG 常见）。
+        return estimateDataUrlBytes(compressed) < originalBytes ? compressed : text;
+    } catch {
+        return text;
+    }
+};
+
+// 判断一个头像是否值得压缩（给「一键压缩」统计用）。
+const isAvatarWorthShrinking = (dataUrl) => {
+    const text = String(dataUrl || '');
+    if (!text.startsWith('data:image/')) return false;
+    if (/^data:image\/svg/i.test(text)) return false;
+    if (/^data:image\/jpeg/i.test(text)) return false;
+    return estimateDataUrlBytes(text) > 64 * 1024;
+};
+
 const readUsageNumber = (...values) => {
     for (const value of values) {
         const number = Number(value);
@@ -203,15 +276,20 @@ const extractApiErrorMessage = (payload, fallbackStatus = '') => {
 };
 
 window.RPHubUtils = {
+    AVATAR_MAX_WIDTH,
+    AVATAR_QUALITY,
     compressImage,
     defaultAvatar,
+    estimateDataUrlBytes,
     extractApiErrorMessage,
     formatApiErrorMessage,
     generateUUID,
     getApiUsagePayload,
     getImageTagRegex,
+    isAvatarWorthShrinking,
     normalizeApiUsage,
     parseCot,
+    shrinkAvatarDataUrl,
     stringifyErrorDetail
 };
 })();
