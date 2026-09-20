@@ -31,7 +31,11 @@ const check = (label, ok, extra = '') => {
     if (!ok) failures += 1;
 };
 
-const server = spawn(process.execPath, [join(root, 'tools/mock-sdapi.mjs'), String(PORT)], { stdio: 'ignore' });
+const server = spawn(process.execPath, [join(root, 'tools/mock-sdapi.mjs'), String(PORT)], {
+    stdio: 'ignore',
+    // 模拟 Forge neo：/sdapi/v1/sd-vae 返回 404，VAE 列表走 /sdapi/v1/sd-modules
+    env: { ...process.env, MOCK_SD_MODE: 'forge' }
+});
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // 等 mock 起来
@@ -69,17 +73,43 @@ try {
     seen = (await (await fetch(`${BASE}/__requests`)).json()).at(-1);
     check('sd_vae 是所选值', seen.vae === 'vae-ft-mse-840000-ema-pruned', `实际 ${seen.vae}`);
 
-    console.log('\n3) 从 /sdapi/v1/sd-vae 拉取并归一化名字');
-    const vaes = await (await fetch(`${BASE}/sdapi/v1/sd-vae`)).json();
-    const names = vaes.map(imageUtils.normalizeSdVaeEntry).filter(Boolean);
-    check('拉到 3 个 VAE', names.length === 3, JSON.stringify(names));
-    check('只有 filename 的条目也能出名字', names.includes('kl-f8-anime2'), JSON.stringify(names));
-    check('model_name 优先于 filename', names.includes('vae-ft-mse-840000-ema-pruned'), JSON.stringify(names));
+    console.log('\n3) Forge neo：/sdapi/v1/sd-vae 404 → 回退 /sdapi/v1/sd-modules');
+    // 先确认 Forge 场景下 sd-vae 确实不可用
+    const direct = await fetch(`${BASE}/sdapi/v1/sd-vae`);
+    check('Forge 上 /sdapi/v1/sd-vae 返回 404（模拟真实环境）', direct.status === 404, `实际 HTTP ${direct.status}`);
+
+    // 与 app.js fetchSdVaeList 同一套回退逻辑。
+    // 注意：裸 fetch 对 404 不抛异常，必须自己按 response.ok 判失败，
+    // 否则会把 404 的错误体当成列表（app.js 里的 fetchSdJson 已做这个判断）。
+    const getJson = async (path) => {
+        const res = await fetch(`${BASE}${path}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+    };
+    const fetchSdVaeList = async () => {
+        try {
+            return imageUtils.parseSdVaeList(await getJson('/sdapi/v1/sd-vae'), { usePath: false });
+        } catch {
+            return imageUtils.parseSdVaeList(await getJson('/sdapi/v1/sd-modules'), { usePath: true });
+        }
+    };
+    const vaes = await fetchSdVaeList();
+    check('回退后能拉到 VAE（不再是 0 个）', vaes.length > 0, JSON.stringify(vaes));
+    check('text_encoder 被剔除', !vaes.some(v => v.value.includes('text_encoder')), JSON.stringify(vaes));
+    check('VAE 项被保留', vaes.some(v => v.value.includes('qwenimagevae_v7')), JSON.stringify(vaes));
+    check('value 是绝对路径（Forge 要求）',
+        vaes.every(v => /^[A-Za-z]:\\/.test(v.value)), JSON.stringify(vaes));
+    check('label 是可读名字', vaes.every(v => !v.label.includes('\\')), JSON.stringify(vaes));
+
+    console.log('\n3b) Forge 下 sd_vae 必须下发绝对路径');
+    await txt2img({ sdVae: vaes[0].value, sdKeepAspectRatio: true });
+    seen = (await (await fetch(`${BASE}/__requests`)).json()).at(-1);
+    check('下发的 sd_vae 是绝对路径', /^[A-Za-z]:\\/.test(seen.vae || ''), `实际 ${seen.vae}`);
 
     console.log('\n4) 底模与 VAE 可同时覆盖');
-    await txt2img({ sdModel: 'mock-model.safetensors [abc123]', sdVae: 'sdxl_vae', sdKeepAspectRatio: true });
+    await txt2img({ sdModel: 'mock-model.safetensors [abc123]', sdVae: vaes[0].value, sdKeepAspectRatio: true });
     seen = (await (await fetch(`${BASE}/__requests`)).json()).at(-1);
-    check('两个键都在 override_settings 里', seen.vae === 'sdxl_vae' && seen.model === 'mock-model.safetensors [abc123]', JSON.stringify(seen));
+    check('两个键都在 override_settings 里', seen.vae === vaes[0].value && seen.model === 'mock-model.safetensors [abc123]', JSON.stringify(seen));
 } finally {
     server.kill();
 }

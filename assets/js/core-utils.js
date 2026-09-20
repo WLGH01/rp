@@ -1246,7 +1246,7 @@ window.RPHubUtils = {
         return raw ? raw : null;
     };
 
-    // 从 /sdapi/v1/sd-vae 的响应里取出可读名字。
+    // 从服务端返回的 VAE 条目里取出可读名字。
     // A1111 与 Forge 的字段名不完全一致（model_name / title / name），且 filename 是绝对路径，
     // 这里统一兜底，避免某一版服务端返回的列表在下拉里显示成空白。
     const normalizeSdVaeEntry = (item) => {
@@ -1256,6 +1256,41 @@ window.RPHubUtils = {
         if (typeof direct === 'string' && direct.trim()) return direct.trim();
         const file = String(item.filename || item.path || '').split(/[\\/]/).pop() || '';
         return file.replace(/\.(safetensors|ckpt|pt|bin)$/i, '').trim();
+    };
+
+    // Forge 的 /sdapi/v1/sd-modules 把 VAE 与 text_encoder 混在同一个列表里返回
+    // （Forge 源码里该接口就叫 get_sd_vaes_and_text_encoders，UI 标签是 "VAE / Text Encoder"）。
+    // 这里按目录名把 text_encoder 剔掉，只留真正的 VAE。
+    // 拿不到路径信息时不敢乱排除，宁可多留一项。
+    const isSdVaeModulePath = (filepath) => {
+        const normalized = String(filepath || '').replace(/\\/g, '/').toLowerCase();
+        if (!normalized) return true;
+        return !/(^|\/)text_encoder\//.test(normalized);
+    };
+
+    // 把服务端返回的 VAE 列表统一成下拉选项 [{value, label}]。
+    //
+    // 两个服务端的差异（都实测过）：
+    //   - 标准 A1111: GET /sdapi/v1/sd-vae → sd_vae 传 VAE 名称（如 x.safetensors）
+    //   - Forge neo : 没有 sd-vae，改用 GET /sdapi/v1/sd-modules；
+    //                 且 sd_vae 必须传【绝对路径】，传文件名会 500「Model is corrupt or invalid」
+    //                 （Forge 把该值直接交给 load_torch_file，不做名字解析）
+    // 因此 value 就是「应当下发给服务端的值」，由 usePath 决定用路径还是名字。
+    const parseSdVaeList = (items, options = {}) => {
+        const usePath = options.usePath === true;
+        const list = [];
+        const seen = new Set();
+        for (const item of (Array.isArray(items) ? items : [])) {
+            const filepath = item && typeof item === 'object' ? String(item.filename || item.path || '') : '';
+            if (usePath && !isSdVaeModulePath(filepath)) continue;
+            const label = normalizeSdVaeEntry(item);
+            if (!label) continue;
+            const value = usePath && filepath ? filepath : label;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            list.push({ value, label });
+        }
+        return list;
     };
 
     // 每个生图预设各自携带的「出图参数」：决定画面长什么样。
@@ -1363,6 +1398,8 @@ window.RPHubUtils = {
         resolveSdSizePreset,
         resolveSdVaeOverride,
         normalizeSdVaeEntry,
+        isSdVaeModulePath,
+        parseSdVaeList,
         captureImageProfile,
         applyImageProfile,
         seedEndpointProfiles,

@@ -75,11 +75,27 @@ http.createServer(async (request, response) => {
         return;
     }
     if (url.pathname === '/sdapi/v1/sd-vae') {
+        // 标准 A1111 端点：value 用名称。
+        // 设 MOCK_SD_MODE=forge 时故意 404，模拟 Forge neo（它没有这个端点）。
+        if (process.env.MOCK_SD_MODE === 'forge') {
+            json(response, 404, { detail: 'Not Found' });
+            return;
+        }
         json(response, 200, [
             { model_name: 'vae-ft-mse-840000-ema-pruned', filename: '/models/VAE/vae-ft-mse-840000-ema-pruned.safetensors' },
             { model_name: 'sdxl_vae', filename: '/models/VAE/sdxl_vae.safetensors' },
             // 只有 filename 的条目：验证 normalizeSdVaeEntry 能从路径兜出名字。
             { filename: '/models/VAE/kl-f8-anime2.ckpt' }
+        ]);
+        return;
+    }
+    if (url.pathname === '/sdapi/v1/sd-modules') {
+        // Forge neo 的 VAE 列表：把 VAE 与 text_encoder 混在一起返回，
+        // 且 value 需要绝对路径（这里用 Windows 风格路径，贴近真实 Forge）。
+        json(response, 200, [
+            { model_name: 'qwen_3_06b_base.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors' },
+            { model_name: 'qwenimagevae_v7.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors' },
+            { model_name: 'vae-ft-mse-840000-ema-pruned.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\vae-ft-mse-840000-ema-pruned.safetensors' }
         ]);
         return;
     }

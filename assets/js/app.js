@@ -2376,6 +2376,25 @@ let removedProviderConfigCleared = false;
             return payload;
         };
 
+        // 拉取 VAE 列表。两个服务端的端点与取值格式都不同（均已实测）：
+        //   - 标准 A1111: GET /sdapi/v1/sd-vae  → [{model_name, filename}]
+        //                 sd_vae 传【VAE 名称】即可
+        //   - Forge neo : 没有 /sdapi/v1/sd-vae（404），改用 GET /sdapi/v1/sd-modules
+        //                 该接口把 VAE 与 text_encoder 混在一起返回（Forge 源码里的函数名就是
+        //                 get_sd_vaes_and_text_encoders），需要按目录过滤掉 text_encoder；
+        //                 且 sd_vae 必须传【绝对路径】，传名称会 500「Model is corrupt or invalid」
+        // 返回统一的 [{value, label}]，value 就是应当下发给服务端的值。
+        const fetchSdVaeList = async () => {
+            try {
+                const list = await fetchSdJson('/sdapi/v1/sd-vae');
+                return imageUtils.parseSdVaeList(list, { usePath: false });
+            } catch (error) {
+                // 端点不存在（Forge）或临时失败都走这里，继续尝试 Forge 的模块接口。
+                const modules = await fetchSdJson('/sdapi/v1/sd-modules');
+                return imageUtils.parseSdVaeList(modules, { usePath: true });
+            }
+        };
+
         // 拉取服务端可用的模型 / 采样器，用于设置页下拉。
         const refreshSdCapabilities = async (isManual = false) => {
             const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
@@ -2386,11 +2405,11 @@ let removedProviderConfigCleared = false;
             try {
                 if (isManual) showToast('正在从 SD 服务拉取模型与采样器...', 'info');
                 const models = await fetchSdJson('/sdapi/v1/sd-models');
-                const [samplers, schedulers, vaes] = await Promise.all([
+                const [samplers, schedulers, vaeList] = await Promise.all([
                     fetchSdJson('/sdapi/v1/samplers').catch(() => []),
                     fetchSdJson('/sdapi/v1/schedulers').catch(() => []),
-                    // VAE 是可选能力：老版本 / 精简版服务端没有这个端点，失败就当空列表。
-                    fetchSdJson('/sdapi/v1/sd-vae').catch(() => [])
+                    // VAE 列表：两个服务端的端点不一样，见 fetchSdVaeList 的说明。
+                    fetchSdVaeList().catch(() => [])
                 ]);
                 sdCapabilities.models = Array.isArray(models)
                     ? models.map(item => ({ value: item.title || item.model_name, label: item.model_name || item.title }))
@@ -2401,9 +2420,7 @@ let removedProviderConfigCleared = false;
                 sdCapabilities.schedulers = Array.isArray(schedulers)
                     ? schedulers.map(item => ({ value: item.name, label: item.label || item.name }))
                     : [];
-                sdCapabilities.vaes = Array.isArray(vaes)
-                    ? vaes.map(item => imageUtils.normalizeSdVaeEntry(item)).filter(Boolean)
-                    : [];
+                sdCapabilities.vaes = Array.isArray(vaeList) ? vaeList : [];
                 sdCapabilities.loaded = true;
                 sdCapabilities.error = '';
                 if (isManual) showToast(`成功获取 ${sdCapabilities.models.length} 个 SD 模型、${sdCapabilities.vaes.length} 个 VAE`, 'success');
@@ -2598,13 +2615,15 @@ let removedProviderConfigCleared = false;
         // VAE 下拉：首项固定是「不使用」（空值 = 不下发 sd_vae，模型自带 VAE 照常生效）。
         // 之所以不用「Automatic」，是因为该值在 Forge/A1111 上语义随服务端设置变化，
         // 用户要的是「要么用我选的这个，要么完全不干预」。
+        // 注意：Forge 的 value 是绝对路径、A1111 的是名称，这里原样透传，不做任何拼装。
         const sdVaeOptions = computed(() => {
             const seen = new Set(['']);
             const list = [{ value: '', label: '不使用 VAE（默认）' }];
-            for (const name of sdCapabilities.vaes) {
-                if (!name || seen.has(name)) continue;
-                seen.add(name);
-                list.push({ value: name, label: name });
+            for (const item of sdCapabilities.vaes) {
+                const value = String(item?.value || '');
+                if (!value || seen.has(value)) continue;
+                seen.add(value);
+                list.push({ value, label: item.label || value });
             }
             // 当前选中项若不在拉取结果里（换过服务端 / 还没拉取），补上以免下拉显示空白。
             const current = String(settings.sdVae || '').trim();

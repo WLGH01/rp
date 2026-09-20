@@ -231,6 +231,48 @@ assertEqual('字符串条目直接用', imageUtils.normalizeSdVaeEntry('plain-va
 assertEqual('空对象 → 空串（调用方据此过滤）', imageUtils.normalizeSdVaeEntry({}), '');
 assertEqual('null 安全', imageUtils.normalizeSdVaeEntry(null), '');
 
+// 两个服务端的 VAE 列表解析（这是实际踩到的坑：Forge neo 没有 /sdapi/v1/sd-vae）
+section('7c) VAE 列表解析：兼容 A1111 与 Forge neo');
+// A1111：/sdapi/v1/sd-vae → value 用名称
+const a1111Raw = [
+    { model_name: 'vae-ft-mse-840000-ema-pruned', filename: '/models/VAE/vae-ft-mse-840000-ema-pruned.safetensors' },
+    { model_name: 'sdxl_vae', filename: '/models/VAE/sdxl_vae.safetensors' },
+    { filename: '/models/VAE/kl-f8-anime2.ckpt' }
+];
+const a1111List = imageUtils.parseSdVaeList(a1111Raw, { usePath: false });
+assertEqual('A1111: value 用名称而非路径', a1111List[0].value, 'vae-ft-mse-840000-ema-pruned');
+assertEqual('A1111: 只有 filename 时用文件名去扩展名', a1111List[2].value, 'kl-f8-anime2');
+assertEqual('A1111: 三项都保留', a1111List.length, 3);
+
+// Forge neo：/sdapi/v1/sd-modules → value 用绝对路径，且要剔除 text_encoder
+const forgeRaw = [
+    { model_name: 'qwen_3_06b_base.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors' },
+    { model_name: 'qwenimagevae_v7.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors' }
+];
+const forgeList = imageUtils.parseSdVaeList(forgeRaw, { usePath: true });
+assertEqual('Forge: text_encoder 被剔除，只剩 1 个 VAE', forgeList.length, 1);
+assertEqual('Forge: value 是绝对路径（Forge 要求）', forgeList[0].value,
+    'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors');
+assertEqual('Forge: label 是可读名字', forgeList[0].label, 'qwenimagevae_v7.safetensors');
+assertTrue('Forge: 剔除项不是那个 VAE',
+    !forgeList.some(i => i.value.includes('text_encoder')));
+
+// text_encoder 判定：正/反斜杠、大小写都要认
+assertTrue('识别 text_encoder（反斜杠）', !imageUtils.isSdVaeModulePath('D:\\m\\models\\text_encoder\\x.safetensors'));
+assertTrue('识别 text_encoder（正斜杠）', !imageUtils.isSdVaeModulePath('/m/models/text_encoder/x.safetensors'));
+assertTrue('识别 text_encoder（大小写混合）', !imageUtils.isSdVaeModulePath('/m/models/Text_Encoder/x.safetensors'));
+assertTrue('VAE 目录不被误杀', imageUtils.isSdVaeModulePath('/m/models/VAE/x.safetensors'));
+assertTrue('名为 text_encoder 的 VAE 文件不被误杀', imageUtils.isSdVaeModulePath('/m/models/VAE/text_encoder_v2.safetensors'));
+assertTrue('无路径信息时保守保留', imageUtils.isSdVaeModulePath(''));
+
+// 边界：空列表 / 非数组 / 重复项
+assertEqual('空列表 → 空数组', imageUtils.parseSdVaeList([], { usePath: true }), []);
+assertEqual('非数组 → 空数组', imageUtils.parseSdVaeList(null, { usePath: false }), []);
+assertEqual('重复项去重', imageUtils.parseSdVaeList([
+    { model_name: 'same', filename: '/a/VAE/same.safetensors' },
+    { model_name: 'same', filename: '/b/VAE/same.safetensors' }
+], { usePath: false }).length, 1);
+
 // 随预设保存：A 选了 VAE、B 没选，切换后互不影响
 const vaeLive = { ...baseSettings, sdVae: '' };
 imageUtils.applyImageProfile(vaeLive, presetA.profile);
@@ -304,6 +346,9 @@ assertTrue('保存预设时带上 profile', /endpointData = \{[\s\S]{0,400}profi
 assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,220}writeActiveImageProfile\(\)/.test(appSource));
 assertTrue('启动时为老预设补 profile', appSource.includes('seedEndpointProfiles(settings.savedImageEndpoints, settings)'));
 assertTrue('从 /sdapi/v1/sd-vae 拉取 VAE 列表', appSource.includes("fetchSdJson('/sdapi/v1/sd-vae')"));
+assertTrue('Forge 无 sd-vae 时回退 /sdapi/v1/sd-modules', appSource.includes("fetchSdJson('/sdapi/v1/sd-modules')"));
+assertTrue('Forge 分支用路径作 value', /parseSdVaeList\(modules, \{ usePath: true \}\)/.test(appSource));
+assertTrue('A1111 分支用名称作 value', /parseSdVaeList\(list, \{ usePath: false \}\)/.test(appSource));
 assertTrue('VAE 走 resolveSdVaeOverride 决定是否下发', appSource.includes('imageUtils.resolveSdVaeOverride(settings)'));
 assertTrue('VAE 写进 override_settings.sd_vae', /overrideSettings\.sd_vae\s*=\s*vae/.test(appSource));
 assertTrue('老存档的 sdVae 被收敛为字符串', appSource.includes('settings.sdVae = String(settings.sdVae || '));
@@ -335,6 +380,7 @@ const indexSource = readFileSync(join(root, 'index.html'), 'utf8');
 assertTrue('index.html 暴露 VAE 选择框', indexSource.includes('settings.sdVae') && indexSource.includes('sdVaeOptions'));
 assertTrue('VAE 默认项文案是「不使用」', appSource.includes('不使用 VAE（默认）'));
 assertTrue('mock 服务提供 /sdapi/v1/sd-vae', readFileSync(join(root, 'tools/mock-sdapi.mjs'), 'utf8').includes("'/sdapi/v1/sd-vae'"));
+assertTrue('mock 服务提供 /sdapi/v1/sd-modules（Forge 场景）', readFileSync(join(root, 'tools/mock-sdapi.mjs'), 'utf8').includes("'/sdapi/v1/sd-modules'"));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
 process.exit(failures === 0 ? 0 : 1);
