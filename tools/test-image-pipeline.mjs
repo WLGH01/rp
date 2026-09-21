@@ -811,7 +811,23 @@ const p45 = naiOff.buildNaiOfficialPayload({
 assertEqual('model 字段正确', p45.model, 'nai-diffusion-4-5-full');
 assertEqual('action 是 generate', p45.action, 'generate');
 assertEqual('input 是提示词', p45.input, 'a cat');
-assertEqual('V4.5 用 params_version 3', p45.parameters.params_version, 3);
+assertEqual('V4.5 用 params_version 4（与官方前端一致）', p45.parameters.params_version, 4);
+// 官方侧三个「网关没有」的开关默认必须是关的：否则两边配置看起来一样、出图却不同。
+assertEqual('默认 UC 预设=无（不叠官方短词）', p45.parameters.ucPresetId, 'none');
+assertEqual('默认不发质量标签（qualityPresetId=none）', p45.parameters.qualityPresetId, 'none');
+assertEqual('默认不带多样性增强（skip_cfg_above_sigma）', p45.parameters.skip_cfg_above_sigma, undefined);
+const p45On = naiOff.buildNaiOfficialPayload({
+    settings: {
+        naiOfficialModel: 'nai-diffusion-4-5-full', naiOfficialResolution: '832x1216', naiOfficialSteps: 28,
+        naiOfficialUcPreset: 0, naiOfficialQualityToggle: true, naiOfficialVarietyBoost: true
+    },
+    prompt: 'a cat', negativePrompt: 'bad'
+});
+assertEqual('显式选 Heavy 时发 heavy', p45On.parameters.ucPresetId, 'heavy');
+assertEqual('显式开质量标签时发 standard', p45On.parameters.qualityPresetId, 'standard');
+assertEqual('显式开多样性增强时带 58', p45On.parameters.skip_cfg_above_sigma, 58);
+assertEqual('V4.5 不再发旧字段 ucPreset', p45.parameters.ucPreset, undefined);
+assertEqual('V4.5 不再发旧字段 qualityToggle', p45.parameters.qualityToggle, undefined);
 assertEqual('width/height 进 parameters', [p45.parameters.width, p45.parameters.height], [1024, 1024]);
 assertEqual('steps 进 parameters', p45.parameters.steps, 28);
 assertEqual('scale 进 parameters', p45.parameters.scale, 6);
@@ -837,7 +853,7 @@ assertEqual('顶层没有 parameters 之外的多余键', Object.keys(p45).sort(
 // V4/V5 才带 v4_prompt 结构
 assertEqual('V4.5 带 v4_prompt', p45.parameters.v4_prompt.caption.base_caption, 'a cat');
 assertEqual('V4.5 带 v4_negative_prompt', p45.parameters.v4_negative_prompt.caption.base_caption, 'bad');
-assertEqual('V4.5 的 skip_cfg_above_sigma=58', p45.parameters.skip_cfg_above_sigma, 58);
+assertEqual('V4.5 默认不带 skip_cfg_above_sigma（多样性增强默认关）', p45.parameters.skip_cfg_above_sigma, undefined);
 
 const p5 = naiOff.buildNaiOfficialPayload({
     settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialResolution: '1024x1024', naiOfficialSteps: 28 },
@@ -850,7 +866,73 @@ const p3 = naiOff.buildNaiOfficialPayload({
     settings: { naiOfficialModel: 'nai-diffusion-3', naiOfficialResolution: '832x1216', naiOfficialSteps: 28 },
     prompt: 'x', negativePrompt: ''
 });
-assertEqual('V3 用 params_version 3', p3.parameters.params_version, 3);
+assertEqual('V3 用 params_version 3（老模型仍走旧字段）', p3.parameters.params_version, 3);
+assertEqual('V3 旧字段 ucPreset 默认也是「无」（4）', p3.parameters.ucPreset, 4);
+assertTrue('V3 旧字段 qualityToggle 默认关', p3.parameters.qualityToggle === false);
+const p3On = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-3', naiOfficialUcPreset: 0, naiOfficialQualityToggle: true },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('V3 显式选 Heavy → ucPreset 0', p3On.parameters.ucPreset, 0);
+assertTrue('V3 显式开质量标签 → qualityToggle true', p3On.parameters.qualityToggle === true);
+
+// UC 预设档位 → 字符串 id：各模型可用档位不同，缺档要按官方偏好表降级（不能硬塞未知 id）。
+section('12g) 官方 UC 预设：数字档位 → 字符串 id（按模型可用性降级）');
+assertEqual('V4.5 Full：0=heavy', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-5-full', 0), 'heavy');
+assertEqual('V4.5 Full：2=humanFocus', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-5-full', 2), 'humanFocus');
+assertEqual('V4.5 Full：3=furryFocus', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-5-full', 3), 'furryFocus');
+assertEqual('V4.5 Full：4=none', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-5-full', 4), 'none');
+assertEqual('V4.5 Curated：没有 furryFocus → 降级到 heavy',
+    naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-5-curated', 3), 'heavy');
+assertEqual('V4 Full：只有 heavy/light/none → humanFocus 降级到 heavy',
+    naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-full', 2), 'heavy');
+assertEqual('V4 Full：none 仍然可用', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-4-full', 4), 'none');
+assertEqual('V5：humanFocus 可用', naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-5-full', 2), 'humanFocus');
+assertEqual('V3：furryFocus 没有 → 降级到 heavy',
+    naiOff.resolveNaiOfficialUcPresetId('nai-diffusion-3', 3), 'heavy');
+assertEqual('未知模型：一律 none', naiOff.resolveNaiOfficialUcPresetId('whatever-model', 0), 'none');
+assertEqual('质量标签开了发 standard', naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialQualityToggle: false }, prompt: 'x', negativePrompt: ''
+}).parameters.qualityPresetId, 'none');
+
+// 网关参数：默认值必须与网关自己的默认一致（否则「两边看起来一样、出图不一样」重演）。
+section('12h) NAI（RP Hub 网关）参数默认值与配置项');
+const gatewayDefaults = sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaults;
+assertEqual('网关默认步数 28', gatewayDefaults.steps, 28);
+assertEqual('网关默认 scale 6', gatewayDefaults.scale, 6);
+assertEqual('网关默认 cfg 0', gatewayDefaults.cfg, 0);
+assertEqual('网关默认采样器 k_dpmpp_2m_sde', gatewayDefaults.sampler, 'k_dpmpp_2m_sde');
+assertEqual('网关默认噪声计划 karras', gatewayDefaults.noiseSchedule, 'karras');
+assertTrue('网关默认负面词与网关当前默认一致（带权重语法）',
+    /^\{\{\{\{bad anatomy\}\}\}\}/.test(sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaultNegative)
+    && /worst quality$/.test(sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaultNegative));
+assertTrue('网关采样器下拉有 k_dpmpp_2m_sde',
+    sandbox.window.RPHubConfig.uiOptions.naiGatewaySamplers.some(item => item.value === 'k_dpmpp_2m_sde'));
+// 这些参数决定画面，必须进「生图预设」字段表（同时也是缓存指纹的一部分）。
+for (const field of ['naiGatewaySteps', 'naiGatewayScale', 'naiGatewayCfg', 'naiGatewaySampler', 'naiGatewayNoiseSchedule', 'naiGatewayNegativePrompt']) {
+    assertTrue(`生图预设/指纹包含 ${field}`, imageUtils.IMAGE_PROFILE_FIELDS.includes(field));
+}
+
+// 网关参数写回生图 URL：老存档里硬编码的 steps=40 与旧负面词必须被换成当前设置值。
+section('12i) NAI 网关：把出图参数写回生图 URL');
+const legacyReplacement = '<div class="generated-image-card" data-image-request="http://gw.local/generate?tag=$1&token=abc&model=nai-diffusion-4-5-full&artist=AAA&size=%E7%AB%96%E5%9B%BE&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative=OLD_NEGATIVE_LIST&nocache=0&noise_schedule=karras"></div>';
+const synced = imageUtils.applyNaiGatewayUrlParams(legacyReplacement, {
+    steps: 28, scale: 6, cfg: 0, sampler: 'k_dpmpp_2m_sde', noiseSchedule: 'karras', negative: 'bad anatomy, low quality'
+});
+assertTrue('steps=40 被换成当前设置值 28', synced.includes('steps=28'));
+assertTrue('旧的 OLD_NEGATIVE_LIST 被换掉', !synced.includes('OLD_NEGATIVE_LIST'));
+assertTrue('新增的负面词被 URL 编码（逗号→%2C、空格→%20）', synced.includes('negative=bad%20anatomy%2C%20low%20quality&nocache=0'));
+assertTrue('nocache 与 noise_schedule 仍然保留', synced.includes('nocache=0') && synced.includes('noise_schedule=karras'));
+assertTrue('URL 之外的 HTML 结构没被破坏', synced.startsWith('<div class="generated-image-card"') && synced.endsWith('"></div>'));
+const switchedSampler = imageUtils.applyNaiGatewayUrlParams(synced, { steps: 33, scale: 5, cfg: 0.2, sampler: 'k_euler', noiseSchedule: 'exponential', negative: 'x' });
+assertTrue('采样器/噪声计划/scale/cfg 都能换', switchedSampler.includes('sampler=k_euler')
+    && switchedSampler.includes('noise_schedule=exponential')
+    && switchedSampler.includes('scale=5')
+    && switchedSampler.includes('cfg=0.2')
+    && switchedSampler.includes('steps=33'));
+assertEqual('非网关 URL 原样返回（官方/SD/ComfyUI 不受影响）',
+    imageUtils.applyNaiGatewayUrlParams('<img data-image-request="http://x/ai/generate-image?tag=$1&provider=novelai-official">', { steps: 33 }),
+    '<img data-image-request="http://x/ai/generate-image?tag=$1&provider=novelai-official">');
 assertEqual('V3 不带 v4_prompt（老模型没这套结构）', p3.parameters.v4_prompt, undefined);
 
 // 种子留空 → 随机（官方语义 seed 0 由后端随机）

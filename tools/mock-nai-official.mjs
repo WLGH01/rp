@@ -5,10 +5,15 @@
 //   POST /ai/generate-image   Bearer 鉴权；请求体 { input, model, action, parameters }
 //                             成功时返回一个 ZIP（内含 PNG），而不是 JSON
 //   401 无/错 token，400 参数非法（宽高非 64 倍数），402 无订阅
+//   429 账号并发已满（官方是「全局并发 1」）：__fail?mode=concurrency 会复刻它
 //   GET  /user/subscription   探活用；有 token 时 200
 //
 // 用法: node tools/mock-nai-official.mjs [port]     默认 8897
 // 查看收到的请求: curl http://127.0.0.1:8897/__requests
+// 查看并发统计:   curl http://127.0.0.1:8897/__stats
+// 注入故障:       curl 'http://127.0.0.1:8897/__fail?mode=busy&count=1'（下 1 次请求 429）
+//                 curl 'http://127.0.0.1:8897/__fail?mode=concurrency'（并发 >1 时 429）
+//                 curl 'http://127.0.0.1:8897/__fail?mode=stall&count=1&ms=300'（下 1 次请求挂住）
 
 import http from 'node:http';
 import zlib from 'node:zlib';
@@ -19,8 +24,18 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
 
 const requests = [];
 let failMode = '';
+// mode=busy 时还要吞掉多少次请求（每次 429 后减一）。
+let busyRemaining = 0;
+// mode=stall 时还要让多少次请求「卡住不返回」（用来验证客户端超时重试）。
+let stallRemaining = 0;
+let stallMs = 300;
+// 账号级并发：inFlight 用来复刻「全局并发 1」，maxInFlight 用来断言客户端确实没并发。
+let inFlight = 0;
+let maxInFlight = 0;
 // 默认接受任意 token；设环境变量可要求指定 token
 const EXPECTED_TOKEN = process.env.MOCK_NAI_TOKEN || '';
+
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const cors = {
     'Access-Control-Allow-Origin': '*',
@@ -77,13 +92,42 @@ const makeZip = (name, data) => {
 };
 
 http.createServer(async (request, response) => {
+    // 客户端超时重试会主动断开连接，之后写响应会报错——这是预期行为，忽略即可。
+    response.on('error', () => {});
     const url = new URL(request.url || '/', 'http://localhost');
     const p = url.pathname;
 
     if (request.method === 'OPTIONS') { response.writeHead(204, cors); response.end(); return; }
     if (p === '/__requests') { json(response, 200, requests); return; }
-    if (p === '/__reset') { requests.length = 0; failMode = ''; json(response, 200, { ok: true }); return; }
-    if (p === '/__fail') { failMode = url.searchParams.get('mode') || 'error'; json(response, 200, { ok: true, mode: failMode }); return; }
+    if (p === '/__stats') { json(response, 200, { inFlight, maxInFlight, generates: requests.filter(r => r.kind === 'generate').length }); return; }
+    if (p === '/__reset') {
+        requests.length = 0;
+        failMode = '';
+        busyRemaining = 0;
+        stallRemaining = 0;
+        inFlight = 0;
+        maxInFlight = 0;
+        json(response, 200, { ok: true });
+        return;
+    }
+    if (p === '/__fail') {
+        const mode = url.searchParams.get('mode') || 'error';
+        if (mode === 'busy') {
+            // 「下 N 次请求回 429」：用于验证客户端的退避重试。
+            busyRemaining = Math.max(1, Number(url.searchParams.get('count')) || 1);
+            failMode = '';
+        } else if (mode === 'stall') {
+            // 「下 N 次请求挂住不返回」：用于验证客户端超时后也会重试。
+            stallRemaining = Math.max(1, Number(url.searchParams.get('count')) || 1);
+            stallMs = Math.max(50, Number(url.searchParams.get('ms')) || 300);
+            failMode = '';
+        } else {
+            failMode = mode;
+            busyRemaining = 0;
+        }
+        json(response, 200, { ok: true, mode, busyRemaining, stallRemaining });
+        return;
+    }
 
     const auth = request.headers['authorization'] || '';
 
@@ -120,12 +164,16 @@ http.createServer(async (request, response) => {
     }
 
     if (p === '/ai/generate-image' && request.method === 'POST') {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
         const raw = await readBody(request);
         let payload = {};
         try { payload = JSON.parse(raw || '{}'); } catch { /* 非法 JSON */ }
         const params = payload.parameters || {};
         requests.push({
             kind: 'generate',
+            concurrentAtStart: inFlight,
             model: payload.model,
             action: payload.action,
             input: payload.input,
@@ -140,7 +188,9 @@ http.createServer(async (request, response) => {
             seed: params.seed,
             paramsVersion: params.params_version,
             ucPreset: params.ucPreset,
+            ucPresetId: params.ucPresetId,
             qualityToggle: params.qualityToggle,
+            qualityPresetId: params.qualityPresetId,
             skipCfg: params.skip_cfg_above_sigma,
             negativePrompt: params.negative_prompt,
             v4Base: params.v4_prompt?.caption?.base_caption,
@@ -153,6 +203,15 @@ http.createServer(async (request, response) => {
         }
         if (EXPECTED_TOKEN && auth.replace(/^Bearer\s+/, '') !== EXPECTED_TOKEN) {
             return json(response, 401, { statusCode: 401, message: 'Invalid token' });
+        }
+        // 「下 N 次 429」：用来验证客户端的退避重试确实发生。
+        if (busyRemaining > 0) {
+            busyRemaining -= 1;
+            return json(response, 429, { statusCode: 429, message: 'Too Many Requests: generation slot is busy' });
+        }
+        // 复刻官方的「账号级全局并发 1」：已有请求在跑时，后到的那个直接 429。
+        if (failMode === 'concurrency' && inFlight > 1) {
+            return json(response, 429, { statusCode: 429, message: 'Too Many Requests: only 1 concurrent generation per account' });
         }
         if (failMode === 'payment') {
             return json(response, 402, { statusCode: 402, message: 'An active subscription is required to access this endpoint.' });
@@ -168,6 +227,14 @@ http.createServer(async (request, response) => {
             return json(response, 400, { statusCode: 400, message: 'invalid request' });
         }
 
+        // concurrency 模式下让请求慢一点，否则两个请求根本来不及重叠。
+        if (failMode === 'concurrency') await wait(150);
+        // stall 模式：挂住不返回，逼客户端走到「超时 → 重试」这条分支。
+        if (stallRemaining > 0) {
+            stallRemaining -= 1;
+            await wait(stallMs);
+        }
+
         const zip = makeZip(`image_${Number(params.seed) || 0}.png`, PNG);
         response.writeHead(200, {
             'Content-Type': 'application/zip',
@@ -176,6 +243,9 @@ http.createServer(async (request, response) => {
         });
         response.end(zip);
         return;
+        } finally {
+            inFlight -= 1;
+        }
     }
 
     json(response, 404, { statusCode: 404, message: 'Not Found' });

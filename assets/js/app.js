@@ -631,10 +631,16 @@ const app = createApp({
             naiOfficialScale: 5,
             naiOfficialSampler: 'k_euler_ancestral',
             naiOfficialNoiseSchedule: 'karras',
-            naiOfficialUcPreset: 0,
+            // UC 预设默认「无（4 = none）」、质量标签与多样性增强默认关闭：
+            // 这三项网关都没有，官方侧开着会让两边「配置看起来一样、出图却不一样」。
+            naiOfficialUcPreset: 4,
             naiOfficialCfgRescale: 0,
-            naiOfficialQualityToggle: true,
-            naiOfficialVarietyBoost: true,
+            naiOfficialQualityToggle: false,
+            naiOfficialVarietyBoost: false,
+            // 失败重试：默认只重试 2 次，间隔 3s / 5s（撞 429 时短间隔连打更容易被限流/风控）。
+            // 两次都不成就直接失败，用户在卡片上手动点「重新生成」即可。
+            naiOfficialRetryMax: 2,
+            naiOfficialRetryDelays: '3,5',
             // 官方负面提示词（除了 ucPreset 之外的附加内容，留空则只用预设）。
             naiOfficialNegativePrompt: '',
             // 种子：留空 = 每次随机（官方语义 seed 0 由后端随机）。
@@ -651,6 +657,19 @@ const app = createApp({
             customImageArtists: '',
             imageModel: 'nai-diffusion-4-5-full',
             imageSize: '竖图',
+            // --- NAI（RP Hub 网关）专用：写进生图 URL 的出图参数 ---
+            // 默认值 = 网关自己的默认（nai.sta1n.cn /api/settings：
+            // 竖图 832×1216 / steps 28 / scale 6 / cfg_rescale 0 / k_dpmpp_2m_sde / karras）。
+            // 以前这些是硬编码在正则 URL 里的（steps 还被写成 40、负面词是带残字的旧串），
+            // 界面上既看不见也改不了，所以「官方面板调的参数」与「网关实际收到的参数」永远对不上。
+            naiGatewaySteps: 28,
+            naiGatewayScale: 6,
+            naiGatewayCfg: 0,
+            naiGatewaySampler: 'k_dpmpp_2m_sde',
+            naiGatewayNoiseSchedule: 'karras',
+            // 默认与网关当前使用的默认负面词逐字一致；要两边完全对齐，就把同一段文本
+            // 分别贴到「NAI 网关负面提示词」和官方面板的「附加负面提示词」。
+            naiGatewayNegativePrompt: window.RPHubConfig?.uiOptions?.naiGatewayDefaultNegative || '',
             imageGenCount: 2,
             // --- Stable Diffusion（Forge / A1111 sdapi）专用 ---
             // 底模：留空表示用服务端当前已加载的模型。
@@ -744,6 +763,15 @@ const app = createApp({
         const naiOfficialUcPresetOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialUcPresets || []).map(item => ({
             value: item.value,
             label: item.label
+        })));
+        // NAI（RP Hub 网关）参数的下拉项：采样器用官方 id（网关原样转给 NovelAI）。
+        const naiGatewaySamplerOptions = computed(() => (window.RPHubConfig?.uiOptions?.naiGatewaySamplers || []).map(item => ({
+            value: item.value,
+            label: item.label
+        })));
+        const naiGatewayNoiseScheduleOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialNoiseSchedules || []).map(name => ({
+            value: name,
+            label: name
         })));
         const naiOfficialSizeLimits = window.RPHubConfig?.uiOptions?.novelaiOfficialSizeLimits
             || { min: 64, max: 2048, step: 64 };
@@ -2005,9 +2033,20 @@ let removedProviderConfigCleared = false;
                 settings.naiOfficialSteps = Math.max(1, Math.min(50, Math.round(Number(settings.naiOfficialSteps) || 28)));
                 settings.naiOfficialScale = Math.max(0, Math.min(30, Number(settings.naiOfficialScale) || 5));
                 settings.naiOfficialCfgRescale = Math.max(0, Math.min(1, Number(settings.naiOfficialCfgRescale) || 0));
-                settings.naiOfficialUcPreset = [0, 1, 2, 3, 4].includes(Number(settings.naiOfficialUcPreset)) ? Number(settings.naiOfficialUcPreset) : 0;
-                settings.naiOfficialQualityToggle = settings.naiOfficialQualityToggle !== false;
-                settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost !== false;
+                settings.naiOfficialUcPreset = [0, 1, 2, 3, 4].includes(Number(settings.naiOfficialUcPreset)) ? Number(settings.naiOfficialUcPreset) : 4;
+                settings.naiOfficialQualityToggle = settings.naiOfficialQualityToggle === true;
+                settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost === true;
+                settings.naiOfficialRetryMax = Math.max(0, Math.min(5, Math.round(Number(settings.naiOfficialRetryMax ?? 2))));
+                settings.naiOfficialRetryDelays = String(settings.naiOfficialRetryDelays ?? '').trim() || '3,5';
+                // NAI（RP Hub 网关）参数：老存档没有这些键，用网关自己的默认兜底。
+                const gatewayDefaults = window.RPHubConfig?.uiOptions?.naiGatewayDefaults || {};
+                settings.naiGatewaySteps = Math.max(1, Math.min(50, Math.round(Number(settings.naiGatewaySteps) || gatewayDefaults.steps || 28)));
+                settings.naiGatewayScale = Math.max(1, Math.min(20, Number(settings.naiGatewayScale) || gatewayDefaults.scale || 6));
+                settings.naiGatewayCfg = Math.max(0, Math.min(1, Number(settings.naiGatewayCfg) || gatewayDefaults.cfg || 0));
+                settings.naiGatewaySampler = String(settings.naiGatewaySampler || gatewayDefaults.sampler || 'k_dpmpp_2m_sde');
+                settings.naiGatewayNoiseSchedule = String(settings.naiGatewayNoiseSchedule || gatewayDefaults.noiseSchedule || 'karras');
+                // 留空 = 用网关自己的默认负面词（不往 URL 里塞空值）。
+                settings.naiGatewayNegativePrompt = String(settings.naiGatewayNegativePrompt ?? '');
                 settings.naiOfficialCustomSizeEnabled = settings.naiOfficialCustomSizeEnabled === true;
                 settings.naiOfficialSeed = String(settings.naiOfficialSeed ?? '');
                 // 官方专属的密钥：老存档没有这个键，收敛成字符串即可。
@@ -2259,6 +2298,12 @@ let removedProviderConfigCleared = false;
             const resolvedUrl = resolveGeneratedImageUrl(job, task);
             if (!resolvedUrl) return;
             const entry = { ...job, sizeLabel: request.searchParams.get('size') || '' };
+            // 记下「这张图是在什么参数下生成的」：改了负面/风格/模型后再渲染同一条消息，
+            // 就不能再拿这张旧图顶上（否则表现为「参数改了却没生效」）。
+            entry.imageFingerprint = imageUtils.resolveImageCacheFingerprint({
+                settings,
+                requestUrl: request?.href || ''
+            });
             // SD 的 imageUrl 本身就是 base64 data URL，resolvedUrl 与它完全一致，
             // 再存一遍等于把几十 MB 的图片在缓存里翻倍（同步体积就是这么被顶爆的）。
             if (resolvedUrl !== job.imageUrl) entry.resolvedUrl = resolvedUrl;
@@ -2288,9 +2333,11 @@ let removedProviderConfigCleared = false;
             }
 
             if (job.status === 'queued') {
-                if (label) label.textContent = job.queuePosition
-                    ? `排队中 · 第 ${job.queuePosition} / ${job.queuedCount || job.queuePosition} 个`
-                    : '排队中';
+                // queueLabel 用于「重试中」这类一次性文案；否则按位次显示。
+                if (label) label.textContent = job.queueLabel
+                    || (job.queuePosition
+                        ? `排队中 · 第 ${job.queuePosition} / ${job.queuedCount || job.queuePosition} 个`
+                        : '排队中');
                 return;
             }
             if (job.status === 'running') {
@@ -3454,8 +3501,33 @@ let removedProviderConfigCleared = false;
             return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
         };
 
+        // ===== 官方 API 的并发闸门 =====
+        // 官方账号侧是「全局并发 1」：同一账号同一时刻只允许一张在跑。本站每张图都是一个
+        // 独立任务，一次对话出 2 张 = 2 个任务同时发 → 第二张必然 429。
+        // 这里用并发度 1 的队列把它们串起来，排队中的卡片会显示位次。
+        const NAI_OFFICIAL_CONCURRENCY = 1;
+        const naiOfficialImageQueue = naiOfficialUtils.createSerialTaskQueue({
+            concurrency: NAI_OFFICIAL_CONCURRENCY
+        });
+
+        // ===== NAI（RP Hub 网关）的出图参数 =====
+        // 这些值必须写进生图 URL（网关按 query 取用），而且必须能在界面上改：
+        // 以前 steps=40 与那条旧负面词是硬编码在正则 URL 里的，官方面板改什么都影响不到网关，
+        // 于是「两边配置看起来一样、出图却不一样」。
+        const naiGatewayDefaults = window.RPHubConfig?.uiOptions?.naiGatewayDefaults || {};
+        const naiGatewayParam = (key) => {
+            const field = `naiGateway${key[0].toUpperCase()}${key.slice(1)}`;
+            const value = settings[field];
+            if (value === '' || value === null || value === undefined) return naiGatewayDefaults[key] ?? '';
+            return value;
+        };
+        // 留空 = 交给网关自己的默认负面词（不往 URL 里塞空值）。
+        const naiGatewayNegative = () => String(settings.naiGatewayNegativePrompt || '').trim();
+
         // 调用官方 API 生成一张图。
         // onProgress 用「已接收字节 / 总字节」估算——官方一次性返回 ZIP，没有服务端进度可查。
+        // 429/5xx 的退避重试在 naiOfficialUtils.fetchNaiOfficialImageBytes 里，
+        // 「一张一张来」的并发闸门见 naiOfficialImageQueue。
         const generateWithNaiOfficial = async ({ tags, onProgress }) => {
             const token = naiOfficialToken();
             if (!token) throw new Error('未填写 NovelAI 官方 API token（pst 开头）');
@@ -3468,57 +3540,28 @@ let removedProviderConfigCleared = false;
             });
             const { width, height } = naiOfficialSize.value;
 
-            onProgress?.({ status: 'running', generationProgress: { percent: 8 } });
-            const response = await fetch(`${baseUrl}/ai/generate-image`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify(payload)
+            const { arrayBuffer, contentType } = await naiOfficialUtils.fetchNaiOfficialImageBytes({
+                baseUrl,
+                token,
+                payload,
+                // 重试策略来自设置（默认 2 次、间隔 3s / 5s），用户可在官方参数里改。
+                ...naiOfficialUtils.resolveNaiOfficialRetryPolicy(settings),
+                onProgress: (percent) => onProgress?.({ status: 'running', generationProgress: { percent } }),
+                // 重试期间复用「排队中」的文案位，让用户看到是在等服务端而不是卡死。
+                onRetry: ({ attempt, retryMax, delayMs, status, timedOut }) => {
+                    const seconds = Math.max(1, Math.round(delayMs / 1000));
+                    const why = status
+                        ? `官方接口繁忙（${status}）`
+                        : (timedOut ? '请求超时' : '网络异常');
+                    return onProgress?.({
+                        status: 'queued',
+                        queueLabel: `${why}，${seconds} 秒后重试（${attempt}/${retryMax}）`
+                    });
+                }
             });
 
-            if (!response.ok) {
-                // 官方错误体是 { statusCode, message }，把 message 带出来更有用。
-                const text = await response.text();
-                let message = '';
-                try { message = JSON.parse(text)?.message || ''; } catch { /* 非 JSON 就原样用 */ }
-                if (!message) message = text.slice(0, 300) || `HTTP ${response.status}`;
-                if (response.status === 401) message = `鉴权失败（401）：请检查 token 是否正确、是否已过期。${message}`;
-                if (response.status === 402) message = `需要有效订阅（402）：${message}`;
-                if (response.status === 429) message = `请求过于频繁或额度用尽（429）：${message}`;
-                throw new Error(message);
-            }
-
-            // 边读边报进度：官方 ZIP 通常几百 KB～数 MB，进度条能反映下载阶段。
-            const total = Number(response.headers.get('content-length')) || 0;
-            let buffer;
-            if (response.body && typeof response.body.getReader === 'function') {
-                const reader = response.body.getReader();
-                const chunks = [];
-                let received = 0;
-                for (;;) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    chunks.push(value);
-                    received += value.length;
-                    // 下载阶段占 10%～70%，剩余留给解压与渲染。
-                    const ratio = total ? Math.min(1, received / total) : 0.5;
-                    onProgress?.({ status: 'running', generationProgress: { percent: Math.round(10 + ratio * 60) } });
-                }
-                buffer = new Uint8Array(received);
-                let offset = 0;
-                for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
-            } else {
-                buffer = new Uint8Array(await response.arrayBuffer());
-            }
-
             onProgress?.({ status: 'running', generationProgress: { percent: 78 } });
-            const contentType = response.headers.get('content-type') || '';
-            const image = await naiOfficialUtils.extractNaiOfficialImage(
-                buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
-                contentType
-            );
+            const image = await naiOfficialUtils.extractNaiOfficialImage(arrayBuffer, contentType);
             onProgress?.({ status: 'running', generationProgress: { percent: 92 } });
 
             // 直接转成 data URL：官方这是单张图，交给现有渲染/归档链路（与 SD 的 base64 同型）。
@@ -3610,11 +3653,20 @@ let removedProviderConfigCleared = false;
             };
             task.promise = (async () => {
                 // NovelAI 官方 API：Bearer 提交，一次拿到 ZIP，没有任务队列。
+                // 但官方账号侧并发是 1，所以这里必须过一遍本地队列（同账号一张一张跑）。
                 if (isNaiOfficialProvider.value) {
-                    const job = await generateWithNaiOfficial({
-                        tags: request.searchParams.get('tag') || '',
-                        onProgress: publish
-                    });
+                    const tags = request.searchParams.get('tag') || '';
+                    const job = await naiOfficialImageQueue.run(
+                        () => generateWithNaiOfficial({ tags, onProgress: publish }),
+                        {
+                            // 排队时也发一条 job，卡片上就能显示「排队中 · 第 N / M 个」。
+                            onWait: (position, total) => publish({
+                                status: 'queued',
+                                queuePosition: position,
+                                queuedCount: total
+                            })
+                        }
+                    );
                     const finished = {
                         status: 'done',
                         imageUrl: job.imageUrl,
@@ -3731,14 +3783,25 @@ let removedProviderConfigCleared = false;
             // 彻底杜绝切换生图地址、切换预设或重新渲染消息时历史图片全部重新跑图的问题。
             if (!options.fresh && tagKey && completedImageJobsByTag.has(tagKey)) {
                 const cachedJob = completedImageJobsByTag.get(tagKey);
-                card.dataset.imageRequest = requestUrl;
-                card.dataset.imageJobState = cachedJob.status;
-                // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。
-                applyGeneratedImageCardAspect(card, { requestUrl, job: cachedJob });
-                renderGeneratedImageJob(card, { baseUrl: parsedUrl.origin }, cachedJob, true);
-                // 老条目（升级前生成的）里还存着整张 base64：按需补传到服务端并换回短地址。
-                upgradeLegacyCachedImage(tagKey, cachedJob, card);
-                return Promise.resolve(cachedJob);
+                // 参数变了（负面/风格/模型/步数…）就不能复用旧图，按新参数重跑一张。
+                // 老条目没有指纹，按旧行为直接复用，避免升级后把历史图片全部重跑。
+                const currentFingerprint = imageUtils.resolveImageCacheFingerprint({
+                    settings,
+                    requestUrl: requestUrl || ''
+                });
+                if (!imageUtils.shouldReuseCachedImageJob(cachedJob, currentFingerprint)) {
+                    completedImageJobsByTag.delete(tagKey);
+                    persistCompletedImageJob();
+                } else {
+                    card.dataset.imageRequest = requestUrl;
+                    card.dataset.imageJobState = cachedJob.status;
+                    // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。
+                    applyGeneratedImageCardAspect(card, { requestUrl, job: cachedJob });
+                    renderGeneratedImageJob(card, { baseUrl: parsedUrl.origin }, cachedJob, true);
+                    // 老条目（升级前生成的）里还存着整张 base64：按需补传到服务端并换回短地址。
+                    upgradeLegacyCachedImage(tagKey, cachedJob, card);
+                    return Promise.resolve(cachedJob);
+                }
             }
 
             ensureGeneratedImageProgressUi(card);
@@ -3893,6 +3956,16 @@ let removedProviderConfigCleared = false;
             }
             newReplacement = newReplacement.replace(/model=[^&]+/, 'model=' + settings.imageModel);
             newReplacement = newReplacement.replace(/size=[^&]+/, 'size=' + settings.imageSize);
+            // 出图参数（steps/scale/cfg/sampler/negative/noise_schedule）也一并同步：
+            // 老存档里那条硬编码的 steps=40 与旧负面词就是靠这里被换成当前设置值的。
+            newReplacement = imageUtils.applyNaiGatewayUrlParams(newReplacement, {
+                steps: naiGatewayParam('steps'),
+                scale: naiGatewayParam('scale'),
+                cfg: naiGatewayParam('cfg'),
+                sampler: naiGatewayParam('sampler'),
+                noiseSchedule: naiGatewayParam('noiseSchedule'),
+                negative: naiGatewayNegative()
+            });
             regex.replacement = newReplacement;
 
             let messages = [];
@@ -3961,6 +4034,18 @@ let removedProviderConfigCleared = false;
             if (isAutoImageGenEnabled.value && messages && messages.length > 0) {
                 showToast('生图比例已切换：' + messages.join('，'), 'success');
             }
+        });
+
+        // NAI（RP Hub 网关）的出图参数：改完立刻同步进生图 URL（否则界面改了等于没改）。
+        watch(() => [
+            settings.naiGatewaySteps,
+            settings.naiGatewayScale,
+            settings.naiGatewayCfg,
+            settings.naiGatewaySampler,
+            settings.naiGatewayNoiseSchedule,
+            settings.naiGatewayNegativePrompt
+        ].join('\u0000'), () => {
+            updateImageGenRegexState({ enableRegex: isAutoImageGenEnabled.value });
         });
 
         watch(() => settings.imageGenCount, () => {
@@ -8429,7 +8514,7 @@ let removedProviderConfigCleared = false;
                 ? `${naiOfficialBaseUrl()}/ai/generate-image?tag=$1&provider=novelai-official&size=${settings.imageSize}&w=${naiOfficialSize.value.width}&h=${naiOfficialSize.value.height}`
                 : isSdProvider.value
                 ? `${baseUrl}/sdapi/v1/txt2img?tag=$1&provider=stable-diffusion&size=${settings.imageSize}&w=${sdSize.width}&h=${sdSize.height}`
-                : `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative={{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}&nocache=0&noise_schedule=karras`;
+                : `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=${naiGatewayParam('steps')}&scale=${naiGatewayParam('scale')}&cfg=${naiGatewayParam('cfg')}&sampler=${naiGatewayParam('sampler')}&negative=${encodeURIComponent(naiGatewayNegative())}&nocache=0&noise_schedule=${naiGatewayParam('noiseSchedule')}`;
             const imageGenRegexContent = {
                 name: imageGenRegexName,
                 regex: getImageTagRegex().toString(),
@@ -9977,6 +10062,7 @@ let removedProviderConfigCleared = false;
             naiOfficialSize, naiOfficialSizeLabel, naiOfficialIsFree, naiOfficialFreeHint,
             naiOfficialAccount, naiOfficialAccountLabel, fetchNaiOfficialAccount,
             naiOfficialModelOptions, naiOfficialResolutionOptions, naiOfficialSamplerOptions,
+            naiGatewaySamplerOptions, naiGatewayNoiseScheduleOptions,
             naiOfficialNoiseScheduleOptions, naiOfficialUcPresetOptions,
             naiOfficialSizeLimits, naiOfficialFreeSteps,
             comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,

@@ -37,7 +37,8 @@ const sandbox = {
     window: {}, crypto: globalThis.crypto, URL, URLSearchParams,
     TextDecoder, TextEncoder, console, setTimeout, clearTimeout,
     atob: globalThis.atob, btoa: globalThis.btoa,
-    Blob, Response, DecompressionStream
+    Blob, Response, DecompressionStream, fetch,
+    AbortController, AbortSignal, DOMException
 };
 sandbox.globalThis = sandbox;
 sandbox.self = sandbox;
@@ -59,7 +60,12 @@ const startOn = async (port) => {
         if (proc.exitCode !== null) return null;
         try {
             const res = await fetch(`http://127.0.0.1:${port}/user/subscription`, { headers: { Authorization: 'Bearer t' } });
-            if (res.ok) return proc;
+            if (!res.ok) continue;
+            // 还要确认应答的是「本次这个 mock」：端口上若残留着旧进程，
+            // 缺 /__stats（并发统计）会导致后面出现假失败。
+            const stats = await fetch(`http://127.0.0.1:${port}/__stats`);
+            const payload = await stats.json().catch(() => null);
+            if (typeof payload?.maxInFlight === 'number') return proc;
         } catch { /* 还没起来 */ }
     }
     proc.kill();
@@ -141,8 +147,22 @@ try {
     });
     const seen2 = await (await fetch(`${base}/__requests`)).json();
     const req45 = seen2.filter(r => r.kind === 'generate').pop();
-    assertEqual('V4.5 的 params_version=3', req45.paramsVersion, 3);
-    assertEqual('V4.5 带 skip_cfg_above_sigma=58', req45.skipCfg, 58);
+    assertEqual('V4.5 的 params_version=4（与官方前端一致）', req45.paramsVersion, 4);
+    assertEqual('V4.5 的 UC 预设走 ucPresetId 字符串（默认=无）', req45.ucPresetId, 'none');
+    assertEqual('V4.5 的质量标签走 qualityPresetId 字符串（默认=不发）', req45.qualityPresetId, 'none');
+    assertEqual('V4.5 不再发数字 ucPreset', req45.ucPreset, undefined);
+    assertEqual('V4.5 不再发布尔 qualityToggle', req45.qualityToggle, undefined);
+    assertEqual('V4.5 默认不发 skip_cfg_above_sigma（多样性增强默认关）', req45.skipCfg, undefined);
+    // 显式打开时才发（且 4.5 是 58、V4 是 19）
+    await runChain({
+        naiOfficialModel: 'nai-diffusion-4-5-full',
+        naiOfficialResolution: '832x1216',
+        naiOfficialSteps: 28,
+        naiOfficialVarietyBoost: true
+    });
+    const seen45on = await (await fetch(`${base}/__requests`)).json();
+    const req45on = seen45on.filter(r => r.kind === 'generate').pop();
+    assertEqual('显式开多样性增强时带 58', req45on.skipCfg, 58);
 
     await runChain({
         naiOfficialModel: 'nai-diffusion-3',
@@ -247,6 +267,192 @@ try {
     const seenAcct = await (await fetch(`${base}/__requests`)).json();
     const infoReq = seenAcct.filter(r => r.kind === 'information').pop();
     assertTrue('information 端点带上了 Bearer', infoReq?.auth === 'present');
+
+    section('9) 官方并发闸门：并发度 1 的队列必须串行');
+    const serialQueue = nai.createSerialTaskQueue({ concurrency: 1 });
+    let runningTasks = 0;
+    let maxRunningTasks = 0;
+    const finishedOrder = [];
+    await Promise.all([1, 2, 3].map(n => serialQueue.run(async () => {
+        runningTasks += 1;
+        maxRunningTasks = Math.max(maxRunningTasks, runningTasks);
+        await new Promise(r => setTimeout(r, 15));
+        finishedOrder.push(n);
+        runningTasks -= 1;
+    })));
+    assertEqual('同一时刻只有 1 个任务在跑', maxRunningTasks, 1);
+    assertEqual('按入队顺序完成', finishedOrder, [1, 2, 3]);
+
+    const waits = [];
+    const queue2 = nai.createSerialTaskQueue({ concurrency: 1 });
+    await Promise.all([
+        queue2.run(() => new Promise(r => setTimeout(r, 40)), { onWait: (pos, total) => waits.push(['a', pos, total]) }),
+        queue2.run(async () => {}, { onWait: (pos, total) => waits.push(['b', pos, total]) }),
+        queue2.run(async () => {}, { onWait: (pos, total) => waits.push(['c', pos, total]) })
+    ]);
+    assertTrue('排队的第 2 个任务拿到第 1 位', waits.some(([who, pos]) => who === 'b' && pos === 1));
+    assertTrue('第 3 个任务先排第 2 位、再补到第 1 位',
+        waits.some(([who, pos]) => who === 'c' && pos === 2) && waits.some(([who, pos]) => who === 'c' && pos === 1));
+
+    section('10) 报错重试策略：408/429/5xx 与超时都重试，4xx 业务错误不重试');
+    assertEqual('429 可重试', nai.isNaiOfficialRetryableStatus(429), true);
+    assertEqual('503 可重试', nai.isNaiOfficialRetryableStatus(503), true);
+    assertEqual('408（请求超时）可重试', nai.isNaiOfficialRetryableStatus(408), true);
+    assertEqual('402 不重试', nai.isNaiOfficialRetryableStatus(402), false);
+    assertEqual('400 不重试', nai.isNaiOfficialRetryableStatus(400), false);
+    assertEqual('默认只重试 2 次', nai.NAI_OFFICIAL_RETRY_DEFAULTS.retryMax, 2);
+    assertEqual('默认间隔是 3s / 5s', nai.NAI_OFFICIAL_RETRY_DEFAULTS.delaysMs, [3000, 5000]);
+    assertTrue('单次尝试有超时上限', nai.NAI_OFFICIAL_TIMEOUT_MS > 0);
+    assertEqual('间隔解析支持中文逗号/顿号',
+        [nai.parseNaiOfficialRetryDelays('3,5'), nai.parseNaiOfficialRetryDelays('4，6'), nai.parseNaiOfficialRetryDelays('7、9')],
+        [[3000, 5000], [4000, 6000], [7000, 9000]]);
+    assertEqual('间隔留空回落默认', nai.parseNaiOfficialRetryDelays(''), [3000, 5000]);
+    assertEqual('间隔非法值回落默认', nai.parseNaiOfficialRetryDelays('abc'), [3000, 5000]);
+    assertEqual('间隔被夹在 1–60 秒（非正数直接忽略）',
+        [nai.parseNaiOfficialRetryDelays('0,120'), nai.parseNaiOfficialRetryDelays('0')],
+        [[60000], [3000, 5000]]);
+    assertEqual('策略：次数与间隔都从设置读',
+        nai.resolveNaiOfficialRetryPolicy({ naiOfficialRetryMax: 1, naiOfficialRetryDelays: '9' }),
+        { retryMax: 1, delaysMs: [9000] });
+    assertEqual('策略：次数被夹在 0–5',
+        [nai.resolveNaiOfficialRetryPolicy({ naiOfficialRetryMax: -3 }).retryMax,
+            nai.resolveNaiOfficialRetryPolicy({ naiOfficialRetryMax: 99 }).retryMax],
+        [0, 5]);
+    assertEqual('策略：缺设置时用默认',
+        nai.resolveNaiOfficialRetryPolicy({}),
+        { retryMax: 2, delaysMs: [3000, 5000] });
+    assertEqual('第 1/2 次重试取 3s / 5s',
+        [0, 1].map(i => nai.naiOfficialRetryDelayMs(i, { delaysMs: [3000, 5000] })),
+        [3000, 5000]);
+    assertEqual('次数多于间隔时沿用最后一个',
+        [2, 5].map(i => nai.naiOfficialRetryDelayMs(i, { delaysMs: [3000, 5000] })),
+        [5000, 5000]);
+    assertTrue('429 文案带出服务端 message',
+        /429/.test(nai.describeNaiOfficialHttpError(429, 'Too Many Requests'))
+        && /Too Many Requests/.test(nai.describeNaiOfficialHttpError(429, 'Too Many Requests')));
+
+    section('11) 撞 429 时自动退避重试（真实 HTTP）');
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=busy&count=1`);
+    const officialSettings = { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialResolution: '1024x1024', naiOfficialSteps: 28 };
+    const callOfficial = (tag, options = {}) => nai.fetchNaiOfficialImageBytes({
+        baseUrl: base,
+        token: 'pst-test-token',
+        payload: nai.buildNaiOfficialPayload({ settings: officialSettings, prompt: tag, negativePrompt: 'bad' }),
+        fetchImpl: fetch,
+        sleep: () => Promise.resolve(),
+        ...options
+    });
+    const retries = [];
+    const retried = await callOfficial('retry-me', { onRetry: info => retries.push(info) });
+    assertTrue('429 之后重试成功（拿到 ZIP 字节）', retried.arrayBuffer.byteLength > 0);
+    assertEqual('确实重试了 1 次', retries.length, 1);
+    assertEqual('重试原因是 429', retries[0].status, 429);
+    assertEqual('重试间隔取设置里的第一次间隔（默认 3s）', retries[0].delayMs, 3000);
+    assertEqual('重试不是超时导致的', retries[0].timedOut, false);
+    const seenBusy = await (await fetch(`${base}/__requests`)).json();
+    assertEqual('服务端收到 2 次提交（1 次 429 + 1 次成功）',
+        seenBusy.filter(r => r.kind === 'generate').length, 2);
+
+    section('11b) 请求超时也会重试，而不是一直挂着');
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=stall&count=1&ms=250`);
+    const timeoutRetries = [];
+    const afterTimeout = await callOfficial('slow-first', {
+        timeoutMs: 40,
+        onRetry: info => timeoutRetries.push(info)
+    });
+    assertTrue('第一次超时后重试拿到了图', afterTimeout.arrayBuffer.byteLength > 0);
+    assertEqual('超时触发了 1 次重试', timeoutRetries.length, 1);
+    assertEqual('重试原因标记为超时', timeoutRetries[0].timedOut, true);
+    assertEqual('超时重试的 status 记 0', timeoutRetries[0].status, 0);
+    // 一直挂住时不能无限重试：retryMax=0 必须直接报「请求超时」
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=stall&count=1&ms=250`);
+    let timeoutMessage = '';
+    try { await callOfficial('stuck', { timeoutMs: 40, retryMax: 0 }); }
+    catch (error) { timeoutMessage = error.message; }
+    assertTrue('不重试时明确报「请求超时」', /请求超时/.test(timeoutMessage) && /已尝试 1 次/.test(timeoutMessage));
+
+    section('11c) 业务错误不重试（省额度、不浪费时间）');
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=payment`);
+    const businessRetries = [];
+    let businessMessage = '';
+    try { await callOfficial('no-plan', { onRetry: info => businessRetries.push(info) }); }
+    catch (error) { businessMessage = error.message; }
+    assertEqual('402 一次都不重试', businessRetries.length, 0);
+    assertTrue('402 的文案照旧带出 message', /已重试/.test(businessMessage) === false && /subscription/i.test(businessMessage));
+
+    section('12) 账号并发 1：不加队列会 429，加了队列不会');
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=concurrency`);
+    // retryMax=0：让 429 直接失败，用来证明「并发会撞墙」这件事是真的。
+    const rawPair = await Promise.allSettled([
+        callOfficial('raw-a', { retryMax: 0 }),
+        callOfficial('raw-b', { retryMax: 0 })
+    ]);
+    assertEqual('不加队列时必有一个 429',
+        rawPair.filter(r => r.status === 'rejected' && /429/.test(r.reason.message)).length, 1);
+
+    await fetch(`${base}/__reset`);
+    await fetch(`${base}/__fail?mode=concurrency`);
+    const queuedQueue = nai.createSerialTaskQueue({ concurrency: 1 });
+    const queuedResults = await Promise.all(['q-a', 'q-b', 'q-c'].map(tag => queuedQueue.run(() => callOfficial(tag))));
+    assertEqual('过队列后 3 张全部成功', queuedResults.filter(r => r.arrayBuffer.byteLength > 0).length, 3);
+    const stats = await (await fetch(`${base}/__stats`)).json();
+    assertEqual('服务端从未看到并发', stats.maxInFlight, 1);
+    assertEqual('统计里是 3 次提交', stats.generates, 3);
+
+    section('13) 已完成图片缓存：参数没变才复用，参数改了必须重跑');
+    const imageUtils2 = sandbox.window.RPHubImageUtils;
+    const baseSettings = {
+        imageProvider: 'novelai-official',
+        imageGenBaseUrl: '',
+        imageStyle: 'vertical',
+        customImageArtists: '',
+        imageModel: 'nai-diffusion-4-5-full',
+        imageSize: '竖图',
+        naiOfficialModel: 'nai-diffusion-4-5-full',
+        naiOfficialResolution: '832x1216',
+        naiOfficialSteps: 28,
+        naiOfficialScale: 5,
+        naiOfficialSampler: 'k_euler_ancestral',
+        naiOfficialUcPreset: 0,
+        naiOfficialQualityToggle: true,
+        naiOfficialVarietyBoost: true,
+        naiOfficialNegativePrompt: '',
+        naiOfficialSeed: ''
+    };
+    const requestUrl = 'http://x/ai/generate-image?tag=1girl&provider=novelai-official&size=竖图&w=832&h=1216';
+    const fp = (patch = {}) => imageUtils2.resolveImageCacheFingerprint({
+        settings: { ...baseSettings, ...patch },
+        requestUrl
+    });
+    assertEqual('同一套参数指纹一致', fp() === fp(), true);
+    assertEqual('改了负面 → 指纹变化', fp() !== fp({ naiOfficialNegativePrompt: 'bad anatomy' }), true);
+    assertEqual('改了 UC 预设 → 指纹变化', fp() !== fp({ naiOfficialUcPreset: 4 }), true);
+    assertEqual('改了风格 → 指纹变化', fp() !== fp({ imageStyle: 'r18' }), true);
+    assertEqual('改了模型 → 指纹变化', fp() !== fp({ naiOfficialModel: 'nai-diffusion-5-full' }), true);
+    assertEqual('改了步数 → 指纹变化', fp() !== fp({ naiOfficialSteps: 40 }), true);
+    assertEqual('换了服务地址 → 指纹变化', fp() !== fp({ imageGenBaseUrl: 'http://elsewhere' }), true);
+    assertEqual('换了生图方式 → 指纹变化', fp() !== fp({ imageProvider: 'novelai' }), true);
+    assertEqual('输入框里没变的键不影响指纹（qualityToggle 显式同值）',
+        fp() === fp({ naiOfficialQualityToggle: true }), true);
+
+    // 复用判定：有指纹就要完全一致；老条目（没指纹）放行，避免升级后历史图全部重跑。
+    assertEqual('指纹一致 → 复用缓存', imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp()), true);
+    assertEqual('指纹不一致 → 不复用（重跑）',
+        imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp({ naiOfficialNegativePrompt: 'x' })), false);
+    assertEqual('老条目没有指纹 → 仍然复用（不烧额度）',
+        imageUtils2.shouldReuseCachedImageJob({ status: 'done', imageUrl: 'x' }, fp()), true);
+    assertEqual('没有条目 → 不复用', imageUtils2.shouldReuseCachedImageJob(null, fp()), false);
+    // 请求 URL 里的出图参数（网关的 steps/sampler/negative）也要参与指纹
+    const gwA = imageUtils2.resolveImageCacheFingerprint({ settings: baseSettings, requestUrl: 'http://x/generate?tag=a&steps=40&sampler=k_euler' });
+    const gwB = imageUtils2.resolveImageCacheFingerprint({ settings: baseSettings, requestUrl: 'http://x/generate?tag=a&steps=28&sampler=k_euler' });
+    assertEqual('URL 里的 steps 变化 → 指纹变化', gwA !== gwB, true);
+    const gwC = imageUtils2.resolveImageCacheFingerprint({ settings: baseSettings, requestUrl: 'http://x/generate?tag=a&steps=40&sampler=k_euler&nocache=1&token=abc' });
+    assertEqual('nocache / token 这类易变参数不参与指纹', gwA === gwC, true);
 } catch (error) {
     failures += 1;
     checks += 1;

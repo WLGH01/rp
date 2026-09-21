@@ -1103,6 +1103,26 @@ window.RPHubUtils = {
             ]),
             // NovelAI 官方 API 常量（取自官方文档与官方 Python 库实测值）。
             novelaiOfficialBaseUrl: 'https://image.novelai.net',
+            // NAI（RP Hub 网关）的出图参数默认值 = 网关自己的默认（nai.sta1n.cn 的 /api/settings）。
+            // 以前本站硬编码成 steps=40 + 一条带残字的旧负面词，与网关界面/官方接口都对不上。
+            naiGatewayDefaults: Object.freeze({
+                steps: 28,
+                scale: 6,
+                cfg: 0,
+                sampler: 'k_dpmpp_2m_sde',
+                noiseSchedule: 'karras'
+            }),
+            // 网关当前使用的默认负面词（原样取自 nai.sta1n.cn/api/settings 的 defaultNegative）。
+            naiGatewayDefaultNegative: '{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,{{poorly drawn hands}},signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality',
+            // 网关采样器：value 必须用官方采样器 id（网关原样转给 NovelAI）。
+            naiGatewaySamplers: Object.freeze([
+                { value: 'k_dpmpp_2m_sde', label: 'DPM++ 2M SDE（网关默认）' },
+                { value: 'k_dpmpp_2m', label: 'DPM++ 2M' },
+                { value: 'k_dpmpp_sde', label: 'DPM++ SDE' },
+                { value: 'k_dpmpp_2s_ancestral', label: 'DPM++ 2S Ancestral' },
+                { value: 'k_euler_ancestral', label: 'Euler Ancestral' },
+                { value: 'k_euler', label: 'Euler' }
+            ]),
             novelaiOfficialModels: Object.freeze([
                 { value: 'nai-diffusion-5-full', label: 'V5 完整版（Full）' },
                 { value: 'nai-diffusion-5-curated', label: 'V5 精选版（Curated）' },
@@ -1376,6 +1396,11 @@ window.RPHubUtils = {
     // 也不含 imageGenCount（期望张数属于这一次生成的操作习惯，不该被切预设改掉）。
     const IMAGE_PROFILE_FIELDS = Object.freeze([
         'imageStyle', 'customImageArtists', 'imageModel', 'imageSize',
+        // NAI（RP Hub 网关）专用：这些是直接写进生图 URL 的出图参数。
+        // 以前它们被硬编码在正则 URL 里（steps=40、那条旧负面词），界面上既看不到也改不了，
+        // 于是「官方面板调的参数」与「网关实际收到的参数」对不上，两边永远对不齐。
+        'naiGatewaySteps', 'naiGatewayScale', 'naiGatewayCfg', 'naiGatewaySampler',
+        'naiGatewayNoiseSchedule', 'naiGatewayNegativePrompt',
         'sdModel', 'sdVae', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler',
         'sdLoras', 'sdPromptPrefix', 'sdNegativePrompt', 'sdKeepAspectRatio',
         'sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight',
@@ -1402,6 +1427,39 @@ window.RPHubUtils = {
         IMAGE_PROFILE_FIELDS.forEach(field => { profile[field] = settings[field]; });
         return profile;
     };
+
+    // ===== 已完成图片缓存的「参数指纹」 =====
+    // 起因：缓存原先只按提示词 tag 存。改了负面/风格/模型/步数后，同样的 tag 仍然命中旧图，
+    // 表现为「参数改了却像没生效」。指纹把这些「决定画面长什么样」的输入算进去即可判定复用。
+    // 注意：指纹只是**附加**在条目上，key 仍是 tag —— 老条目（没有指纹）按旧行为放行，
+    // 避免升级后把历史图片全部重跑（官方 API 会花 Anlas）。
+    const IMAGE_CACHE_VOLATILE_PARAMS = Object.freeze(['tag', 'token', 'nocache', 't']);
+
+    const resolveImageCacheFingerprint = ({ settings = {}, requestUrl = '' } = {}) => {
+        const parts = {
+            provider: settings.imageProvider || '',
+            baseUrl: settings.imageGenBaseUrl || '',
+            profile: captureImageProfile(settings)
+        };
+        if (requestUrl) {
+            try {
+                // 请求 URL 里也带着一部分出图参数（网关的 steps/sampler/negative、SD 的 w/h）。
+                const params = [...new URL(requestUrl, 'http://localhost').searchParams.entries()]
+                    .filter(([key]) => !IMAGE_CACHE_VOLATILE_PARAMS.includes(key))
+                    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+                parts.request = Object.fromEntries(params);
+            } catch { /* 非法 URL 就只按设置算指纹 */ }
+        }
+        return JSON.stringify(parts);
+    };
+
+    // 缓存条目能不能复用：没记指纹的老条目一律复用（升级兼容），有指纹就必须完全一致。
+    const shouldReuseCachedImageJob = (entry, fingerprint) => {
+        if (!entry) return false;
+        if (!entry.imageFingerprint) return true;
+        return entry.imageFingerprint === fingerprint;
+    };
+
 
     // 只覆盖 profile 里真正带了的字段，缺字段保持原值（老预设向前兼容）。
     const applyImageProfile = (settings, profile) => {
@@ -1481,6 +1539,28 @@ window.RPHubUtils = {
             entries[tag] = entry;
         }
         return { entries, dropped };
+    };
+
+    // ===== NAI（RP Hub 网关）出图参数写回生图 URL =====
+    //
+    // 正则 replacement 里嵌的就是生图 URL（`data-image-request`）。网关按 query 取参数，
+    // 所以改了步数/采样器/负面词必须把 URL 重写一遍——老存档里那条硬编码的 steps=40
+    // 与旧负面词，就是靠这里被换成当前设置值的。纯字符串处理，便于直接回归测试。
+    const applyNaiGatewayUrlParams = (replacement, params = {}) => {
+        const text = String(replacement || '');
+        if (!text.includes('generate?tag=')) return text; // 非网关链路（官方/SD/ComfyUI）不动
+        const negative = encodeURIComponent(String(params.negative ?? ''));
+        // 注意用 [^&"]* 而不是 [^&]*：URL 嵌在 HTML 属性 data-image-request="…" 里，
+        // 最后一个参数后面紧跟的是 `"`，用 [^&]* 会把 `">` 一起吃掉、把卡片结构搞坏。
+        let next = text
+            .replace(/steps=[^&"]*/, 'steps=' + String(params.steps ?? ''))
+            .replace(/scale=[^&"]*/, 'scale=' + String(params.scale ?? ''))
+            .replace(/cfg=[^&"]*/, 'cfg=' + String(params.cfg ?? ''))
+            .replace(/sampler=[^&"]*/, 'sampler=' + String(params.sampler ?? ''))
+            .replace(/noise_schedule=[^&"]*/, 'noise_schedule=' + String(params.noiseSchedule ?? ''));
+        // negative 一定在 nocache 之前（URL 模板就是这么拼的），非贪婪匹配到 &nocache= 为止。
+        next = next.replace(/negative=[\s\S]*?&nocache=/, 'negative=' + negative + '&nocache=');
+        return next;
     };
 
     // ===== ComfyUI：API 格式工作流的解析、参数绑定与输出收集 =====
@@ -1973,6 +2053,51 @@ window.RPHubUtils = {
         return null;
     };
 
+    // ===== 官方 UC 预设：数字档位 → 字符串 id =====
+    //
+    // 官方网页端发的是 ucPresetId（heavy / light / humanFocus / furryFocus / none），
+    // 且各模型可用的档位不同（V4 Full 只有 heavy/light/none）。这里逐字对照官方前端实现：
+    // 先按界面档位取目标 id，该模型没有就按官方偏好表往下降级（furry → heavy → light → none）。
+    const NAI_OFFICIAL_UC_PRESET_ID_BY_VALUE = Object.freeze({
+        0: 'heavy', 1: 'light', 2: 'humanFocus', 3: 'furryFocus', 4: 'none'
+    });
+    const NAI_OFFICIAL_UC_PRESET_CATEGORY = Object.freeze({
+        heavy: 'heavy', light: 'light', humanFocus: 'human', furryFocus: 'furry', none: 'none'
+    });
+    const NAI_OFFICIAL_UC_FALLBACK = Object.freeze({
+        none: ['none', 'light', 'heavy'],
+        light: ['light', 'none', 'heavy'],
+        heavy: ['heavy', 'light', 'none'],
+        human: ['human', 'heavy', 'light', 'none'],
+        furry: ['furry', 'heavy', 'light', 'none']
+    });
+
+    const naiOfficialUcPresetIds = (model) => {
+        const id = String(model || '');
+        if (id.startsWith('nai-diffusion-5')) return ['heavy', 'light', 'furryFocus', 'humanFocus', 'none'];
+        if (id.startsWith('nai-diffusion-4-5-full')) return ['heavy', 'light', 'furryFocus', 'humanFocus', 'none'];
+        if (id.startsWith('nai-diffusion-4-5-curated')) return ['heavy', 'light', 'humanFocus', 'none'];
+        if (id.startsWith('nai-diffusion-4')) return ['heavy', 'light', 'none'];
+        if (id === 'nai-diffusion-3') return ['heavy', 'light', 'humanFocus', 'none'];
+        if (id.startsWith('nai-diffusion-furry')) return ['heavy', 'light', 'none'];
+        return ['none'];
+    };
+
+    // 界面档位 → 字符串 id。缺省（undefined / null / 空）与非法值一律当「无」：
+    // 官方这三个默认值与网关对齐后就该是「什么都不加」，只有用户显式选了才加。
+    const resolveNaiOfficialUcPresetId = (model, requested) => {
+        const available = naiOfficialUcPresetIds(model);
+        const numeric = (requested === undefined || requested === null || requested === '') ? 4 : Number(requested);
+        const wanted = NAI_OFFICIAL_UC_PRESET_ID_BY_VALUE[numeric] || 'none';
+        if (available.includes(wanted)) return wanted;
+        const order = NAI_OFFICIAL_UC_FALLBACK[NAI_OFFICIAL_UC_PRESET_CATEGORY[wanted]] || ['none'];
+        for (const category of order) {
+            const hit = available.find(id => NAI_OFFICIAL_UC_PRESET_CATEGORY[id] === category);
+            if (hit) return hit;
+        }
+        return 'none';
+    };
+
     // 构建官方 API 的请求体。
     // 返回 { input, model, action, parameters }，可直接 JSON.stringify 后 POST。
     const buildNaiOfficialPayload = ({ settings = {}, prompt = '', negativePrompt = '' } = {}) => {
@@ -2001,16 +2126,31 @@ window.RPHubUtils = {
             cfg_rescale: Number.isFinite(cfgRescale) ? cfgRescale : 0,
             // 噪声计划：用户选的调度器必须落到 noise_schedule，否则该选项完全没作用。
             noise_schedule: noiseSchedule,
-            // V5 用 params_version 4，V4/V4.5 用 3；写错会被服务端当成旧版参数解析。
-            params_version: model.startsWith('nai-diffusion-5') ? 4 : 3,
             legacy: false,
-            legacy_v3_extend: false,
-            qualityToggle: settings.naiOfficialQualityToggle !== false,
-            ucPreset: Number.isFinite(Number(settings.naiOfficialUcPreset)) ? Number(settings.naiOfficialUcPreset) : 0
+            legacy_v3_extend: false
         };
 
+        // 参数表版本：官方网页端**所有**模型现在都发 params_version 4，并用字符串 id
+        // （ucPresetId / qualityPresetId）。旧版数字 ucPreset / 布尔 qualityToggle 已被官方
+        // 前端迁移逻辑删掉——这正是「官方侧负面预设选了却像没生效」的原因之一。
+        // V3 / Furry V3 走原来的旧字段（实测可用），不跟着改，避免影响老模型。
+        const usesV4Schema = model.startsWith('nai-diffusion-4') || model.startsWith('nai-diffusion-5');
+        if (usesV4Schema) {
+            parameters.params_version = 4;
+            parameters.ucPresetId = resolveNaiOfficialUcPresetId(model, settings.naiOfficialUcPreset);
+            // 质量标签默认关（网关没有这一项）；只有显式开启才发 standard。
+            parameters.qualityPresetId = settings.naiOfficialQualityToggle === true ? 'standard' : 'none';
+        } else {
+            parameters.params_version = 3;
+            parameters.qualityToggle = settings.naiOfficialQualityToggle === true;
+            parameters.ucPreset = Number.isFinite(Number(settings.naiOfficialUcPreset))
+                ? Number(settings.naiOfficialUcPreset)
+                : 4;
+        }
+
         const skipCfg = naiOfficialSkipCfgAboveSigma(model);
-        if (skipCfg !== null && settings.naiOfficialVarietyBoost !== false) {
+        // 多样性增强（Variety+）默认关：网关没有这个参数，开了就是多一个变量。
+        if (skipCfg !== null && settings.naiOfficialVarietyBoost === true) {
             parameters.skip_cfg_above_sigma = skipCfg;
         }
 
@@ -2031,6 +2171,249 @@ window.RPHubUtils = {
         }
 
         return { input: String(prompt || ''), model, action: 'generate', parameters };
+    };
+
+    // ===== 官方 API 的并发闸门与退避重试 =====
+    //
+    // 官方账号侧是「全局并发 1」：同一账号同一时刻只允许一张在跑。而本站每张图都是一个
+    // 独立任务（一次对话出 2 张 = 2 个任务），两张同时发 → 第二张必然 429。
+    // 这里放两段可测的逻辑：并发度可配的 Promise 队列 + 429/5xx 退避重试的请求执行器。
+
+    // 429/5xx/408 属于「等一会儿就好」；401/402/400 重试没有意义。
+    const NAI_OFFICIAL_RETRYABLE_STATUS = Object.freeze([408, 429, 500, 502, 503, 504]);
+    // 报错重试的默认策略：只重试 2 次，间隔刻意拉长到 3s / 5s。
+    // 撞 429 说明服务端已经在限流，短间隔连打更容易被当成滥用；两次都不成就交回用户手动重试。
+    const NAI_OFFICIAL_RETRY_DEFAULTS = Object.freeze({ retryMax: 2, delaysMs: Object.freeze([3000, 5000]) });
+    const NAI_OFFICIAL_RETRY_MAX_LIMIT = 5;
+    // 单次尝试的超时：官方生图通常 10～40 秒，卡住 120 秒就该重试而不是无限等（也会堵住队列）。
+    const NAI_OFFICIAL_TIMEOUT_MS = 120000;
+
+    // 并发度 1 的任务队列：超出并发度的任务排队，前面的跑完自动补位。
+    // onWait(position, total) 只在「确实要等」和位次变化时回调，用来在卡片上显示排队位次。
+    const createSerialTaskQueue = ({ concurrency = 1 } = {}) => {
+        const limit = Math.max(1, Math.floor(Number(concurrency) || 1));
+        const pending = [];
+        let active = 0;
+
+        const notify = () => {
+            pending.forEach((entry, index) => entry.onWait?.(index + 1, pending.length));
+        };
+
+        const pump = () => {
+            while (active < limit && pending.length) {
+                const entry = pending.shift();
+                active += 1;
+                notify();
+                Promise.resolve()
+                    .then(() => entry.task())
+                    .then(entry.resolve, entry.reject)
+                    .finally(() => {
+                        active -= 1;
+                        pump();
+                    });
+            }
+        };
+
+        return {
+            // task 需返回 Promise；onWait 可选。
+            run(task, { onWait } = {}) {
+                return new Promise((resolve, reject) => {
+                    pending.push({ task, onWait, resolve, reject });
+                    // 只有真要排队才报位次，避免立刻开跑的任务闪一下「排队中」。
+                    if (active >= limit) notify();
+                    pump();
+                });
+            },
+            get activeCount() { return active; },
+            get pendingCount() { return pending.length; }
+        };
+    };
+
+    // 解析设置里的「重试间隔」：支持 "3,5" / "3，5" / "3、5" / "3 5"，单位秒，1～60 秒，回落默认。
+    const parseNaiOfficialRetryDelays = (value) => {
+        const defaults = NAI_OFFICIAL_RETRY_DEFAULTS.delaysMs;
+        if (value === undefined || value === null || value === '') return [...defaults];
+        const seconds = String(value)
+            .split(/[,\uFF0C\u3001;\s]+/)
+            .map(part => Math.round(Number(part)))
+            .filter(ms => Number.isFinite(ms) && ms > 0)
+            .map(seconds => Math.max(1, Math.min(60, seconds)) * 1000);
+        return seconds.length ? seconds : [...defaults];
+    };
+
+    // 从设置解析这次生成要用的重试策略；次数 0 = 不自动重试（失败就直接报错，交用户手动重试）。
+    const resolveNaiOfficialRetryPolicy = (settings = {}) => {
+        const rawMax = Number(settings.naiOfficialRetryMax);
+        const retryMax = Number.isFinite(rawMax)
+            ? Math.max(0, Math.min(NAI_OFFICIAL_RETRY_MAX_LIMIT, Math.round(rawMax)))
+            : NAI_OFFICIAL_RETRY_DEFAULTS.retryMax;
+        return {
+            retryMax,
+            delaysMs: parseNaiOfficialRetryDelays(settings.naiOfficialRetryDelays)
+        };
+    };
+
+    // 第 attempt（0 起）次重试前等多久；超出间隔表就沿用最后一个（不无限增长）。
+    const naiOfficialRetryDelayMs = (attempt, policy = NAI_OFFICIAL_RETRY_DEFAULTS) => {
+        const list = (Array.isArray(policy) ? policy : policy?.delaysMs) || NAI_OFFICIAL_RETRY_DEFAULTS.delaysMs;
+        const delays = list.length ? list : NAI_OFFICIAL_RETRY_DEFAULTS.delaysMs;
+        const index = Math.max(0, Math.round(Number(attempt) || 0));
+        return delays[Math.min(index, delays.length - 1)];
+    };
+
+    const isNaiOfficialRetryableStatus = (status) => NAI_OFFICIAL_RETRYABLE_STATUS.includes(Number(status));
+
+    const describeNaiOfficialHttpError = (status, detail = '') => {
+        const text = String(detail || '').trim() || `HTTP ${status}`;
+        if (status === 401) return `鉴权失败（401）：请检查 token 是否正确、是否已过期。${text}`;
+        if (status === 402) return `需要有效订阅（402）：${text}`;
+        if (status === 429) return `请求过于频繁或额度用尽（429）：${text}`;
+        return text;
+    };
+
+    // 单次尝试的返回：{ outcome: 'ok' | 'http' | 'network' }。
+    // 拆成「一次尝试」的好处：超时、网络中断、HTTP 状态码三条失败路径共用同一套重试判定，
+    // 且读响应体（下载）失败也能进入重试，而不是把半截数据当成成品。
+    const runNaiOfficialImageAttempt = async ({
+        url,
+        token,
+        payload,
+        doFetch,
+        onProgress,
+        timeoutMs = NAI_OFFICIAL_TIMEOUT_MS
+    }) => {
+        const canAbort = typeof AbortController === 'function';
+        const controller = canAbort ? new AbortController() : null;
+        const limitMs = Math.max(0, Math.round(Number(timeoutMs) || 0));
+        const timer = controller && limitMs > 0 ? setTimeout(() => controller.abort(), limitMs) : null;
+
+        const readOkBody = async (response) => {
+            // 边读边报进度：官方 ZIP 通常几百 KB～数 MB，进度条能反映下载阶段。
+            const total = Number(response.headers?.get?.('content-length')) || 0;
+            let buffer;
+            if (response.body && typeof response.body.getReader === 'function') {
+                const reader = response.body.getReader();
+                const chunks = [];
+                let received = 0;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    received += value.length;
+                    // 下载阶段占 10%～70%，剩余留给解压与渲染。
+                    const ratio = total ? Math.min(1, received / total) : 0.5;
+                    onProgress?.(Math.round(10 + ratio * 60));
+                }
+                buffer = new Uint8Array(received);
+                let offset = 0;
+                for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
+            } else {
+                buffer = new Uint8Array(await response.arrayBuffer());
+            }
+            return buffer;
+        };
+
+        try {
+            onProgress?.(8);
+            let response;
+            try {
+                response = await doFetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify(payload),
+                    ...(controller ? { signal: controller.signal } : {})
+                });
+            } catch (error) {
+                return {
+                    outcome: 'network',
+                    timedOut: controller?.signal?.aborted === true,
+                    message: error?.message || String(error)
+                };
+            }
+
+            if (response.ok) {
+                try {
+                    const buffer = await readOkBody(response);
+                    return {
+                        outcome: 'ok',
+                        arrayBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+                        contentType: response.headers?.get?.('content-type') || ''
+                    };
+                } catch (error) {
+                    // 下载中断/超时：不能当成成品，走重试。
+                    return {
+                        outcome: 'network',
+                        timedOut: controller?.signal?.aborted === true,
+                        message: error?.message || String(error)
+                    };
+                }
+            }
+
+            // 官方错误体是 { statusCode, message }，把 message 带出来更有用。
+            let text = '';
+            try { text = await response.text(); } catch { /* 读不出就只用状态码 */ }
+            let message = '';
+            try { message = JSON.parse(text)?.message || ''; } catch { /* 非 JSON 就原样用 */ }
+            if (!message) message = text.slice(0, 300);
+            return { outcome: 'http', status: response.status, message };
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    };
+
+    // 提交一次官方生图请求并读回响应体。
+    // 报错重试机制：HTTP 408/429/5xx、请求超时、网络中断都按「重试间隔」重试，
+    // 默认只重试 2 次（3s / 5s），可在设置页改；401/402/400 这类重试也不会变的错误直接抛。
+    // fetch / sleep 可注入（便于测试）；onProgress(percent) 报下载进度，onRetry(info) 报重试。
+    // 返回 { arrayBuffer, contentType }。
+    const fetchNaiOfficialImageBytes = async ({
+        baseUrl,
+        token,
+        payload,
+        fetchImpl,
+        sleep,
+        retryMax = NAI_OFFICIAL_RETRY_DEFAULTS.retryMax,
+        retryDelaysMs = NAI_OFFICIAL_RETRY_DEFAULTS.delaysMs,
+        timeoutMs = NAI_OFFICIAL_TIMEOUT_MS,
+        onProgress,
+        onRetry
+    } = {}) => {
+        const doFetch = fetchImpl || ((...args) => fetch(...args));
+        const doSleep = sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
+        const url = `${String(baseUrl || '').replace(/\/+$/, '')}/ai/generate-image`;
+        const maxRetry = Math.max(0, Math.round(Number(retryMax) || 0));
+
+        for (let attempt = 0; ; attempt += 1) {
+            const result = await runNaiOfficialImageAttempt({ url, token, payload, doFetch, onProgress, timeoutMs });
+            if (result.outcome === 'ok') {
+                return { arrayBuffer: result.arrayBuffer, contentType: result.contentType };
+            }
+
+            const retryable = result.outcome === 'network' || isNaiOfficialRetryableStatus(result.status);
+            if (retryable && attempt < maxRetry) {
+                const delayMs = naiOfficialRetryDelayMs(attempt, retryDelaysMs);
+                onRetry?.({
+                    attempt: attempt + 1,
+                    retryMax: maxRetry,
+                    delayMs,
+                    status: result.outcome === 'http' ? result.status : 0,
+                    timedOut: result.outcome === 'network' && result.timedOut === true,
+                    reason: result.outcome === 'network' ? result.message : ''
+                });
+                await doSleep(delayMs);
+                continue;
+            }
+
+            if (result.outcome === 'network') {
+                const why = result.timedOut ? '请求超时' : '网络错误';
+                throw new Error(`${why}（已尝试 ${attempt + 1} 次）：${result.message}`);
+            }
+            const retried = attempt > 0 ? `（已重试 ${attempt} 次）` : '';
+            throw new Error(describeNaiOfficialHttpError(result.status, result.message) + retried);
+        }
     };
 
     // --- 极简 ZIP 读取（浏览器内置解压，不引第三方库）---
@@ -2187,7 +2570,20 @@ window.RPHubUtils = {
         isNaiOfficialFreeTier,
         describeNaiOfficialFreeStatus,
         naiOfficialSkipCfgAboveSigma,
+        naiOfficialUcPresetIds,
+        resolveNaiOfficialUcPresetId,
         buildNaiOfficialPayload,
+        NAI_OFFICIAL_RETRYABLE_STATUS,
+        NAI_OFFICIAL_RETRY_DEFAULTS,
+        NAI_OFFICIAL_RETRY_MAX_LIMIT,
+        NAI_OFFICIAL_TIMEOUT_MS,
+        parseNaiOfficialRetryDelays,
+        resolveNaiOfficialRetryPolicy,
+        createSerialTaskQueue,
+        naiOfficialRetryDelayMs,
+        isNaiOfficialRetryableStatus,
+        describeNaiOfficialHttpError,
+        fetchNaiOfficialImageBytes,
         readZipEntries,
         extractNaiOfficialImage,
         bytesToPngDataUrl
@@ -2220,6 +2616,9 @@ window.RPHubUtils = {
 
     window.RPHubImageUtils = Object.freeze({
         IMAGE_PROFILE_FIELDS,
+        resolveImageCacheFingerprint,
+        shouldReuseCachedImageJob,
+        applyNaiGatewayUrlParams,
         normalizeSdDimension,
         resolveSdSize,
         resolveGeneratedImageUrl,
