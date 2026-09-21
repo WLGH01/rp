@@ -1901,6 +1901,38 @@
             opacity: 0;
         }
 
+        /* 生成中的「取消」按钮：进度层默认 pointer-events:none，这里单独放开。 */
+        .generated-image-cancel {
+            position: relative;
+            z-index: 5;
+            margin: 0;
+            padding: 0.35rem 0.9rem !important;
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.42);
+            color: #fff;
+            font-size: 0.75rem;
+            font-weight: 600;
+            line-height: 1.4;
+            cursor: pointer;
+            pointer-events: auto;
+            backdrop-filter: blur(2px);
+            transition: background 160ms ease, opacity 160ms ease;
+        }
+
+        .generated-image-cancel:hover {
+            background: rgba(190, 18, 60, 0.72);
+        }
+
+        .generated-image-cancel:disabled {
+            cursor: default;
+            opacity: 0.6;
+        }
+
+        .generated-image-cancel[hidden] {
+            display: none;
+        }
+
         @keyframes generated-image-spinner-rotate {
             100% { transform: rotate(360deg); }
         }

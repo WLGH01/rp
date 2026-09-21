@@ -382,5 +382,202 @@ assertTrue('VAE 默认项文案是「不使用」', appSource.includes('不使�
 assertTrue('mock 服务提供 /sdapi/v1/sd-vae', readFileSync(join(root, 'tools/mock-sdapi.mjs'), 'utf8').includes("'/sdapi/v1/sd-vae'"));
 assertTrue('mock 服务提供 /sdapi/v1/sd-modules（Forge 场景）', readFileSync(join(root, 'tools/mock-sdapi.mjs'), 'utf8').includes("'/sdapi/v1/sd-modules'"));
 
+// --- 10. ComfyUI：API 工作流解析 / 绑定探测 / 参数改写 / 输出收集 ---
+// 被测对象是 core-utils.js 的 window.RPHubComfyUtils（纯函数）。
+// ComfyUI 与 NAI/SD 的根本差异是「它只认识节点图」，所以这里的重点是
+// 「有没有在对的节点上改对的输入」以及「别把用户的图结构改坏」。
+const comfy = sandbox.window.RPHubComfyUtils;
+assertTrue('core-utils 导出 RPHubComfyUtils', Boolean(comfy));
+
+section('10) ComfyUI：工作流解析与校验');
+assertEqual('空串被拒', comfy.parseComfyWorkflow('').ok, false);
+assertEqual('坏 JSON 被拒', comfy.parseComfyWorkflow('{oops').ok, false);
+assertEqual('数组被拒（不是节点表）', comfy.parseComfyWorkflow('[]').ok, false);
+// 用户最容易犯的错：粘了画布的界面图格式。必须给出可读提示，而不是发出去让服务端报错。
+const uiGraph = JSON.stringify({ nodes: [{ id: 3, type: 'KSampler' }], links: [] });
+const uiResult = comfy.parseComfyWorkflow(uiGraph);
+assertEqual('界面图格式被识别并拒收', uiResult.ok, false);
+assertTrue('界面图格式的提示指向「API Format」', /API Format/.test(uiResult.error));
+assertEqual('节点缺 class_type 被拒', comfy.parseComfyWorkflow(JSON.stringify({ '1': { inputs: {} } })).ok, false);
+
+// 一份贴近真实的最小工作流（结构参考 ComfyUI 默认 txt2img）
+const comfyWorkflow = {
+    '3': { class_type: 'KSampler', inputs: { seed: 1, steps: 20, cfg: 7, sampler_name: 'euler', scheduler: 'normal', denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+    '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'model.safetensors' } },
+    '5': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: 'a cat', clip: ['4', 1] } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: 'bad', clip: ['4', 1] } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+    '9': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'ComfyUI' } }
+};
+const parsedOk = comfy.parseComfyWorkflow(JSON.stringify(comfyWorkflow));
+assertEqual('合法工作流解析成功', parsedOk.ok, true);
+assertEqual('节点全部纳入', parsedOk.nodes.length, 7);
+assertEqual('节点 id 被规范成字符串', parsedOk.nodes.find(n => n.classType === 'KSampler').id, '3');
+assertEqual('数字 id 的 JSON 也能解析', comfy.parseComfyWorkflow('{"3":{"class_type":"KSampler","inputs":{}}}').nodes[0].id, '3');
+assertEqual('识别到采样节点', comfy.comfyWorkflowHasSampler(parsedOk.nodes), true);
+assertEqual('只有输出节点不算采样工作流', comfy.comfyWorkflowHasSampler([{ id: '1', classType: 'SaveImage', inputs: {} }]), false);
+
+section('10b) ComfyUI：节点连线不能被当参数覆盖');
+assertEqual('数组形节点引用被识别为连线', comfy.isComfyNodeLink(['4', 0]), true);
+assertEqual('数字节点引用也是连线', comfy.isComfyNodeLink([3, 0]), true);
+assertEqual('字符串不是连线', comfy.isComfyNodeLink('a cat'), false);
+assertEqual('数字不是连线', comfy.isComfyNodeLink(7), false);
+assertEqual('长度不足不是连线', comfy.isComfyNodeLink(['4']), false);
+assertEqual('节点引用被规范成字符串', comfy.normalizeComfyNodeRef([3, 0]), ['3', 0]);
+assertEqual('非法引用返回 null', comfy.normalizeComfyNodeRef(['3']), null);
+assertEqual('null 返回 null', comfy.normalizeComfyNodeRef(null), null);
+// 只挑标量输入：model/positive/negative/latent_image 都是连线，不该出现在可改列表里
+assertEqual('标量输入被挑出（连线被排除）',
+    comfy.scalarComfyInputs(parsedOk.nodes.find(n => n.classType === 'KSampler')).sort(),
+    ['cfg', 'denoise', 'sampler_name', 'scheduler', 'seed', 'steps'].sort());
+
+section('10c) ComfyUI：自动绑定必须区分正向/负面提示词');
+const detected = comfy.detectComfyBindings(parsedOk.nodes);
+assertEqual('正向绑到连 KSampler.positive 的那个 CLIPTextEncode', detected.prompt, { nodeId: '6', input: 'text' });
+assertEqual('负向绑到连 KSampler.negative 的那个（不能和正向撞在一起）', detected.negativePrompt, { nodeId: '7', input: 'text' });
+assertTrue('正负向不是同一个节点', detected.prompt.nodeId !== detected.negativePrompt.nodeId);
+assertEqual('宽度绑到 EmptyLatentImage', detected.width, { nodeId: '5', input: 'width' });
+assertEqual('高度绑到 EmptyLatentImage', detected.height, { nodeId: '5', input: 'height' });
+assertEqual('步数绑到 KSampler.steps', detected.steps, { nodeId: '3', input: 'steps' });
+assertEqual('CFG 绑到 KSampler.cfg', detected.cfg, { nodeId: '3', input: 'cfg' });
+assertEqual('采样器绑到 KSampler.sampler_name', detected.sampler, { nodeId: '3', input: 'sampler_name' });
+assertEqual('种子绑到 KSampler.seed', detected.seed, { nodeId: '3', input: 'seed' });
+assertEqual('底模绑到 CheckpointLoaderSimple（不是 UNETLoader）', detected.checkpoint, { nodeId: '4', input: 'ckpt_name' });
+assertEqual('文件名前缀绑到 SaveImage', detected.filenamePrefix, { nodeId: '9', input: 'filename_prefix' });
+
+// 没有 KSampler 连线信息时（正负向都是孤立节点）退化成「第一个 / 第二个」，但绝不能相同
+const looseNodes = [
+    { id: '1', classType: 'CLIPTextEncode', inputs: { text: 'pos', clip: ['9', 1] } },
+    { id: '2', classType: 'CLIPTextEncode', inputs: { text: 'neg', clip: ['9', 1] } }
+];
+const loose = comfy.detectComfyBindings(looseNodes);
+assertEqual('无连线时正向取第一个', loose.prompt, { nodeId: '1', input: 'text' });
+assertEqual('无连线时负向取第二个', loose.negativePrompt, { nodeId: '2', input: 'text' });
+assertTrue('退化路径也不会正负撞车', loose.prompt.nodeId !== loose.negativePrompt.nodeId);
+
+assertEqual('空节点表安全', comfy.detectComfyBindings([]), {});
+
+section('10d) ComfyUI：绑定表整理（换了工作流后旧绑定必须失效）');
+assertEqual('节点不存在的绑定被剔除',
+    comfy.normalizeComfyBindings({ prompt: { nodeId: '999', input: 'text' } }, parsedOk.nodes), {});
+assertEqual('缺输入名的绑定被剔除',
+    comfy.normalizeComfyBindings({ prompt: { nodeId: '6', input: '' } }, parsedOk.nodes), {});
+assertEqual('非法角色被剔除',
+    comfy.normalizeComfyBindings({ nonsense: { nodeId: '6', input: 'text' } }, parsedOk.nodes), {});
+assertEqual('合法绑定保留',
+    comfy.normalizeComfyBindings({ prompt: { nodeId: '6', input: 'text' } }, parsedOk.nodes),
+    { prompt: { nodeId: '6', input: 'text' } });
+
+section('10e) ComfyUI：参数写入（深拷贝，不动原对象）');
+const applied = comfy.applyComfyParamValues(comfyWorkflow, detected, { prompt: 'a dog', steps: 30, seed: 42 });
+assertEqual('提示词写进正向节点', applied.prompt['6'].inputs.text, 'a dog');
+assertEqual('负面提示词未被误改', applied.prompt['7'].inputs.text, 'bad');
+assertEqual('步数写进 KSampler', applied.prompt['3'].inputs.steps, 30);
+assertEqual('种子写进 KSampler', applied.prompt['3'].inputs.seed, 42);
+assertEqual('原工作流对象未被修改（深拷贝）', comfyWorkflow['6'].inputs.text, 'a cat');
+assertEqual('原工作流步数未被修改', comfyWorkflow['3'].inputs.steps, 20);
+assertEqual('applied 记录了实际写入项', applied.applied.length, 3);
+assertTrue('applied 里记录了提示词写入', applied.applied.some(item => item.role === 'prompt' && item.nodeId === '6'));
+assertEqual('未传值的角色不写入', applied.prompt['5'].inputs.width, 512);
+
+// 空值（'' / null / undefined）一律视为「不覆盖」，避免把工作流改空
+const blank = comfy.applyComfyParamValues(comfyWorkflow, detected, { prompt: '', steps: null, cfg: undefined });
+assertEqual('空串不覆盖', blank.prompt['6'].inputs.text, 'a cat');
+assertEqual('null 不覆盖', blank.prompt['3'].inputs.steps, 20);
+assertEqual('undefined 不覆盖', blank.prompt['3'].inputs.cfg, 7);
+assertEqual('全空时没有 applied', blank.applied.length, 0);
+
+// 绑定指向连线时必须拒绝，否则会把图结构改成字符串，跑出完全错误的结果
+const linkBinding = { model: { nodeId: '3', input: 'model' } };
+const linkAttempt = comfy.applyComfyParamValues(comfyWorkflow, linkBinding, { model: 'x' });
+assertEqual('指向连线的绑定被跳过', linkAttempt.skipped.length, 1);
+assertEqual('连线本身没被改写', linkAttempt.prompt['3'].inputs.model, ['4', 0]);
+assertEqual('跳过原因被记录', linkAttempt.skipped[0].role, 'model');
+
+// 节点不存在（用户改了工作流但绑定没更新）
+const ghost = comfy.applyComfyParamValues(comfyWorkflow, { prompt: { nodeId: '404', input: 'text' } }, { prompt: 'x' });
+assertEqual('节点不存在时被跳过而非崩溃', ghost.skipped.length, 1);
+assertEqual('跳过时工作流保持原样', ghost.prompt['6'].inputs.text, 'a cat');
+
+section('10f) ComfyUI：输出收集与 /view 地址');
+const historyEntry = {
+    outputs: {
+        '9': { images: [{ filename: 'ComfyUI_00001_.png', subfolder: '', type: 'output' }] },
+        '12': { gifs: [{ filename: 'anim.mp4', subfolder: 'video', type: 'output' }] }
+    }
+};
+const outputs = comfy.collectComfyOutputs(historyEntry);
+assertEqual('图片与视频都被收集', outputs.length, 2);
+assertEqual('图片文件名正确', outputs[0].filename, 'ComfyUI_00001_.png');
+assertEqual('图片来源节点被记录', outputs[0].nodeId, '9');
+assertEqual('媒体类型被记录', outputs[1].kind, 'gifs');
+assertEqual('默认 type 为 output', outputs[0].type, 'output');
+assertTrue('图片地址指向 /view', outputs[0].url.startsWith('/view?'));
+assertTrue('图片地址带 filename', outputs[0].url.includes('filename=ComfyUI_00001_.png'));
+assertTrue('视频的子目录进入查询串', outputs[1].url.includes('subfolder=video'));
+assertEqual('无 outputs 返回空数组', comfy.collectComfyOutputs({}), []);
+assertEqual('null 安全', comfy.collectComfyOutputs(null), []);
+// 没有 filename 的条目（某些节点的占位返回）必须被丢掉，否则会拼出空地址
+assertEqual('缺 filename 的条目被丢弃', comfy.collectComfyOutputs({ outputs: { '1': { images: [{ type: 'output' }] } } }), []);
+
+assertEqual('buildComfyViewUrl 带 baseUrl',
+    comfy.buildComfyViewUrl({ filename: 'a.png', type: 'output' }, 'http://127.0.0.1:8188'),
+    'http://127.0.0.1:8188/view?filename=a.png&type=output');
+assertEqual('buildComfyViewUrl 尾部斜杠被规范化',
+    comfy.buildComfyViewUrl({ filename: 'a.png', type: 'output' }, 'http://x:8188/'),
+    'http://x:8188/view?filename=a.png&type=output');
+assertTrue('subfolder 被编码进查询串',
+    comfy.buildComfyViewUrl({ filename: 'a b.png', subfolder: 'my dir', type: 'output' }, '').includes('subfolder=my+dir'));
+
+section('10g) ComfyUI：进度（progress_state → 百分比）');
+assertEqual('无 nodes 返回 null（退回不确定态，不假装有进度）', comfy.computeComfyProgress({}), null);
+assertEqual('max 为 0 的节点被忽略', comfy.computeComfyProgress({ nodes: { '1': { value: 0, max: 0, state: 'running' } } }), null);
+// 单个采样节点跑一半
+assertEqual('单节点 5/10 → 50%', comfy.computeComfyProgress({ nodes: { '3': { value: 5, max: 10, state: 'running' } } }), 50);
+assertEqual('单节点完成 → 100%', comfy.computeComfyProgress({ nodes: { '3': { value: 10, max: 10, state: 'finished' } } }), 100);
+// 两节点：一个已完成，一个跑一半 → (1 + 0.5) / 2 = 75%
+assertEqual('混合节点按比例折算',
+    comfy.computeComfyProgress({ nodes: { a: { value: 1, max: 1, state: 'finished' }, b: { value: 5, max: 10, state: 'running' } } }), 75);
+assertEqual('进度夹在 0–100 之间（value 超界也不越界）',
+    comfy.computeComfyProgress({ nodes: { a: { value: 99, max: 10, state: 'running' } } }), 100);
+assertEqual('负值被夹到 0', comfy.computeComfyProgress({ nodes: { a: { value: -5, max: 10, state: 'running' } } }), 0);
+assertEqual('文案带百分比', comfy.describeComfyProgress({ nodes: { a: { value: 5, max: 10, state: 'running' } } }), '生成中 50%');
+assertEqual('拿不到进度时文案退化为「生成中」', comfy.describeComfyProgress({}), '生成中');
+
+section('10h) ComfyUI：object_info 下拉选项提取');
+const objectInfo = {
+    CheckpointLoaderSimple: { input: { required: { ckpt_name: [['m1.safetensors', 'm2.safetensors']] } } },
+    KSampler: { input: { required: { sampler_name: [['euler', 'dpmpp_2m']], steps: ['INT', { default: 20 }] } } }
+};
+assertEqual('COMBO 列表被转成选项',
+    comfy.pickComfyComboOptions(objectInfo, 'CheckpointLoaderSimple', 'ckpt_name'),
+    [{ value: 'm1.safetensors', label: 'm1.safetensors' }, { value: 'm2.safetensors', label: 'm2.safetensors' }]);
+assertEqual('非 COMBO 的 INT 输入返回空', comfy.pickComfyComboOptions(objectInfo, 'KSampler', 'steps'), []);
+assertEqual('未知节点安全', comfy.pickComfyComboOptions(objectInfo, 'Nope', 'x'), []);
+assertEqual('缺 objectInfo 安全', comfy.pickComfyComboOptions(null, 'KSampler', 'sampler_name'), []);
+
+section('10i) ComfyUI：接线与配置检查');
+assertEqual('comfyui 进入生图方式列表',
+    config.uiOptions.imageProviders.some(p => p.value === 'comfyui'), true);
+assertTrue('ComfyUI 参数随预设保存（切预设不该串参数）',
+    ['comfyWorkflow', 'comfyBindings', 'comfySteps', 'comfyPrompt']
+        .every(field => imageUtils.IMAGE_PROFILE_FIELDS.includes(field)));
+assertTrue('app.js 使用 RPHubComfyUtils', appSource.includes('window.RPHubComfyUtils'));
+assertTrue('生成链路走 generateWithComfy', appSource.includes('generateWithComfy'));
+assertTrue('提交前用 /prompt 且带 client_id', /submitComfyPrompt[\s\S]{0,400}client_id/.test(appSource));
+assertTrue('进度读 progress_state 事件（0.34 已无 /progress 端点）', appSource.includes("case 'progress_state'"));
+assertTrue('输出从 /history 取文件名', appSource.includes('/history/${encodeURIComponent(promptId)}'));
+assertTrue('取消走 /interrupt', appSource.includes("fetchComfyJson('/interrupt'"));
+assertTrue('取消时同时清理队列项', appSource.includes("'/queue'"));
+assertTrue('ComfyUI 图片是远程地址（归档要按 URL 下载而非当 base64）', appSource.includes('remoteImage'));
+assertTrue('探活走 /system_stats（根路径会 403/重定向）', appSource.includes('/system_stats'));
+assertTrue('watch 里重建正则带上 ComfyUI 尺寸', appSource.includes('settings.comfyOverrideSize'));
+const comfyIndexSource = readFileSync(join(root, 'index.html'), 'utf8');
+assertTrue('index.html 暴露工作流输入框', comfyIndexSource.includes('settings.comfyWorkflow'));
+assertTrue('index.html 暴露参数绑定表格', comfyIndexSource.includes('setComfyBinding'));
+assertTrue('index.html 暴露取消开关', comfyIndexSource.includes('settings.comfyAllowCancel'));
+assertTrue('旧文案提到三种生图方式', comfyIndexSource.includes('ComfyUI 提交'));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
 process.exit(failures === 0 ? 0 : 1);

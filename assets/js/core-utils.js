@@ -1090,11 +1090,35 @@ window.RPHubUtils = {
                 { value: 'nai-diffusion-4-5-full', label: 'V4.5 完整版（-1）' },
                 { value: 'nai-diffusion-5-full', label: 'V5 完整版（-5）' }
             ]),
-            // 生图方式：novelai 走异步任务轮询；stable-diffusion 走 Forge/A1111 的 sdapi 同步返回。
+            // 生图方式：
+            //   novelai          异步任务轮询（POST /api/jobs → 轮询 → content 取图）
+            //   stable-diffusion Forge/A1111 的 sdapi 同步返回 base64
+            //   comfyui          提交 API 格式工作流 → 进度/历史 → /view 取图
             imageProviders: Object.freeze([
                 { value: 'novelai', label: 'NovelAI（异步任务）' },
-                { value: 'stable-diffusion', label: 'Stable Diffusion（Forge / A1111）' }
+                { value: 'stable-diffusion', label: 'Stable Diffusion（Forge / A1111）' },
+                { value: 'comfyui', label: 'ComfyUI（API 工作流）' }
             ]),
+            // ComfyUI 可调参数的角色：与具体节点类名解耦，探测结果可在设置页逐行改。
+            comfyRoles: Object.freeze([
+                { value: 'prompt', label: '正向提示词' },
+                { value: 'negativePrompt', label: '负面提示词' },
+                { value: 'width', label: '宽度' },
+                { value: 'height', label: '高度' },
+                { value: 'steps', label: '采样步数' },
+                { value: 'cfg', label: 'CFG' },
+                { value: 'sampler', label: '采样器' },
+                { value: 'scheduler', label: '调度器' },
+                { value: 'seed', label: '种子' },
+                { value: 'batchSize', label: '批次数量' },
+                { value: 'denoise', label: '重绘幅度' },
+                { value: 'checkpoint', label: '底模' },
+                { value: 'vae', label: 'VAE' },
+                { value: 'filenamePrefix', label: '文件名前缀' },
+                { value: 'none', label: '（不控制）' }
+            ]),
+            // ComfyUI 默认端口；仅作为输入框占位提示，不预置任何地址。
+            comfyDefaultPort: 8188,
             imageSizes: Object.freeze([
                 { value: '竖图', label: '竖图' },
                 { value: '横图', label: '横图' },
@@ -1300,7 +1324,14 @@ window.RPHubUtils = {
         'imageStyle', 'customImageArtists', 'imageModel', 'imageSize',
         'sdModel', 'sdVae', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler',
         'sdLoras', 'sdPromptPrefix', 'sdNegativePrompt', 'sdKeepAspectRatio',
-        'sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight'
+        'sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight',
+        // ComfyUI：工作流与绑定属于「这个服务上的这套配置」，随预设走。
+        'comfyWorkflow', 'comfyBindings', 'comfyAutoDetect',
+        'comfyPrompt', 'comfyNegativePrompt', 'comfySteps', 'comfyCfg',
+        'comfySampler', 'comfyScheduler', 'comfySeed', 'comfyRandomizeSeed',
+        'comfyWidth', 'comfyHeight', 'comfyBatchSize', 'comfyDenoise',
+        'comfyCheckpoint', 'comfyVae', 'comfyFilenamePrefix', 'comfyOverrideSize',
+        'comfyTimeout', 'comfyAllowCancel'
     ]);
 
     const captureImageProfile = (settings = {}) => {
@@ -1388,6 +1419,329 @@ window.RPHubUtils = {
         }
         return { entries, dropped };
     };
+
+    // ===== ComfyUI：API 格式工作流的解析、参数绑定与输出收集 =====
+    //
+    // ComfyUI 与 NAI/SD 的根本差异：它不认识「提示词」「步数」这些概念，只认识一张节点图。
+    // 因此这里做的是「在用户自己的工作流里找到该改哪个节点的哪个输入」，而不是拼一份固定请求体。
+    // 全部是纯函数（不碰 Vue/DOM/网络），便于 tools/test-image-pipeline.mjs 直接覆盖。
+
+    // ComfyUI 的节点引用必须写成 [字符串节点id, 槽位]。
+    // 部分工作流里 id 是数字（如 {"3": {...}} 被 JSON.stringify 后仍是字符串键，
+    // 但手工粘贴的 JSON 可能写成 [3, 0]），这里统一转成字符串，避免服务端 KeyError。
+    const normalizeComfyNodeRef = (ref) => {
+        if (!Array.isArray(ref) || ref.length < 2) return null;
+        const nodeId = ref[0];
+        const slot = Number(ref[1]);
+        if (nodeId === undefined || nodeId === null || !Number.isFinite(slot)) return null;
+        return [String(nodeId), slot];
+    };
+
+    // 判断一个值是不是「节点引用」（形如 ["3", 0]），而不是普通标量。
+    const isComfyNodeLink = (value) => Array.isArray(value)
+        && value.length >= 2
+        && (typeof value[0] === 'string' || typeof value[0] === 'number')
+        && typeof value[1] === 'number';
+
+    // 解析并校验一份 API 格式工作流。
+    // 返回 { ok, prompt, nodes, error }；只有 ok 时才拿去提交，避免把坏 JSON 发到服务端才报错。
+    const parseComfyWorkflow = (text) => {
+        const raw = typeof text === 'string' ? text.trim() : text;
+        if (!raw || (typeof raw === 'string' && !raw.length)) {
+            return { ok: false, prompt: null, nodes: [], error: '工作流为空' };
+        }
+        let parsed = raw;
+        if (typeof raw === 'string') {
+            try {
+                parsed = JSON.parse(raw);
+            } catch (error) {
+                return { ok: false, prompt: null, nodes: [], error: `JSON 解析失败：${error.message}` };
+            }
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return { ok: false, prompt: null, nodes: [], error: '工作流必须是「节点id → 节点」的对象' };
+        }
+        // 容错：用户可能把 UI 图格式（含 nodes/links 数组）粘进来。
+        // 这种格式不能直接运行，明确说清楚，而不是发出去让服务端报 key 错误。
+        if (Array.isArray(parsed.nodes) && !parsed.class_type) {
+            return {
+                ok: false,
+                prompt: null,
+                nodes: [],
+                error: '这看起来是 ComfyUI 的界面图格式（UI graph），请用「保存（API Format）」导出的 JSON'
+            };
+        }
+        const nodes = [];
+        for (const [nodeId, node] of Object.entries(parsed)) {
+            if (!node || typeof node !== 'object') continue;
+            if (!node.class_type) {
+                return { ok: false, prompt: null, nodes: [], error: `节点 ${nodeId} 缺少 class_type 字段` };
+            }
+            nodes.push({ id: String(nodeId), classType: String(node.class_type), inputs: node.inputs || {} });
+        }
+        if (!nodes.length) {
+            return { ok: false, prompt: null, nodes: [], error: '工作流里没有可用节点' };
+        }
+        return { ok: true, prompt: parsed, nodes, error: '' };
+    };
+
+    // 从一个节点的 inputs 里挑出「可以被参数控制」的输入名（标量，不是节点连线）。
+    // 节点连线（["3",0]）由工作流结构决定，不能当参数改。
+    const scalarComfyInputs = (node) => Object.entries(node?.inputs || {})
+        .filter(([, value]) => !isComfyNodeLink(value))
+        .map(([name]) => name);
+
+    // 各角色对应的「候选类名 → 候选输入名」，按优先级排列。
+    // 探测是通用规则，不针对某个具体工作流；探测不到时用户可在设置页手改。
+    const COMFY_ROLE_RULES = Object.freeze({
+        prompt: {
+            classes: ['CLIPTextEncode', 'BNK_CLIPTextEncodeAdvanced', 'CLIPTextEncodeSDXL', 'TextEncodeQwenImageEdit', 'PromptExpansion'],
+            inputs: ['text', 'prompt', 'positive', 'text_g', 'text_l']
+        },
+        negativePrompt: {
+            classes: ['CLIPTextEncode', 'BNK_CLIPTextEncodeAdvanced', 'CLIPTextEncodeSDXL'],
+            inputs: ['text', 'prompt']
+        },
+        width: { classes: ['EmptyLatentImage', 'EmptySD3LatentImage', 'EmptyLatentImagePresets'], inputs: ['width'] },
+        height: { classes: ['EmptyLatentImage', 'EmptySD3LatentImage', 'EmptyLatentImagePresets'], inputs: ['height'] },
+        batchSize: { classes: ['EmptyLatentImage', 'EmptySD3LatentImage'], inputs: ['batch_size'] },
+        steps: { classes: ['KSampler', 'KSamplerAdvanced', 'SamplerCustom', 'KSamplerSelect'], inputs: ['steps', 'noise_seed_steps'] },
+        cfg: { classes: ['KSampler', 'KSamplerAdvanced', 'SamplerCustom'], inputs: ['cfg', 'cfg_scale'] },
+        sampler: { classes: ['KSampler', 'KSamplerAdvanced', 'KSamplerSelect'], inputs: ['sampler_name', 'sampler'] },
+        scheduler: { classes: ['KSampler', 'KSamplerAdvanced'], inputs: ['scheduler'] },
+        seed: { classes: ['KSampler', 'KSamplerAdvanced', 'RandomNoise'], inputs: ['seed', 'noise_seed'] },
+        denoise: { classes: ['KSampler', 'KSamplerAdvanced'], inputs: ['denoise'] },
+        checkpoint: { classes: ['CheckpointLoaderSimple', 'CheckpointLoader', 'UNETLoader'], inputs: ['ckpt_name', 'unet_name'] },
+        vae: { classes: ['VAELoader'], inputs: ['vae_name'] },
+        filenamePrefix: { classes: ['SaveImage', 'SaveAnimatedWEBP'], inputs: ['filename_prefix'] }
+    });
+
+    // 找出工作流里「最终会落盘」的输出节点。
+    // 输出节点 = 类名以 Save/Preview 开头，或是自定义节点里带 images/video/audio 输入且无输出的终端节点。
+    const COMFY_OUTPUT_CLASS_RE = /^(Save|Preview)/;
+    const comfyOutputNodes = (nodes) => nodes.filter(node => {
+        const inputs = node?.inputs || {};
+        const isNamedOutput = COMFY_OUTPUT_CLASS_RE.test(node?.classType || '');
+        // SwarmUI/VHS 等自定义节点：类名不叫 Save，但吃 IMAGE/VIDEO/AUDIO 且没有下游输出。
+        const hasMediaInput = ['images', 'image', 'video', 'audio', 'filename_prefix', 'frames']
+            .some(name => name in inputs);
+        return isNamedOutput || hasMediaInput;
+    });
+
+    // 自动探测参数绑定：为每个角色找一组 { nodeId, input }。
+    //
+    // 关键细节：CLIPTextEncode 有很多个（正/负提示词各一个），不能都绑到同一个。
+    // 正向取「连到采样器 positive 槽」的那个，负向取「连到 negative 槽」的那个；
+    // 找不到连线关系时退化为「第一个 / 第二个」并靠用户手工纠正。
+    const detectComfyBindings = (nodes) => {
+        const list = Array.isArray(nodes) ? nodes : [];
+        const byId = new Map(list.map(node => [node.id, node]));
+        const bindings = {};
+
+        // 顺着 KSampler 的 positive/negative 输入回溯到文本节点。
+        const findTextNodeVia = (slotName) => {
+            for (const node of list) {
+                if (!/^KSampler/.test(node.classType || '')) continue;
+                const ref = normalizeComfyNodeRef(node.inputs?.[slotName]);
+                if (!ref) continue;
+                const upstream = byId.get(ref[0]);
+                if (upstream && /CLIPTextEncode|TextEncode|Prompt/.test(upstream.classType || '')) return upstream.id;
+            }
+            return '';
+        };
+        const positiveId = findTextNodeVia('positive');
+        const negativeId = findTextNodeVia('negative');
+
+        // 其余文本节点（排除已认领的正/负向）作为负向的兜底候选。
+        const textNodeIds = list
+            .filter(node => /CLIPTextEncode|TextEncode/.test(node.classType || ''))
+            .map(node => node.id);
+
+        // 记录正向最终落在哪个节点：负向必须避开它，否则正负提示词会被写进同一个输入。
+        // 依赖 COMFY_ROLE_RULES 的定义顺序（prompt 在 negativePrompt 之前）。
+        let chosenPromptNodeId = '';
+
+        for (const [role, rule] of Object.entries(COMFY_ROLE_RULES)) {
+            const candidates = list.filter(node => rule.classes.some(name => name === node.classType));
+            if (!candidates.length) continue;
+
+            let chosen = candidates[0];
+            if (role === 'prompt') {
+                if (positiveId) chosen = byId.get(positiveId) || chosen;
+                chosenPromptNodeId = chosen.id;
+            } else if (role === 'negativePrompt') {
+                // 明确排除「已认领为正向」的那一个，否则正负会被绑成同一个节点。
+                const others = candidates.filter(node => node.id !== chosenPromptNodeId);
+                if (negativeId && byId.get(negativeId) && byId.get(negativeId).id !== chosenPromptNodeId) {
+                    chosen = byId.get(negativeId);
+                } else if (others.length) {
+                    chosen = others[0];
+                } else if (textNodeIds.length > 1) {
+                    chosen = byId.get(textNodeIds[1]) || chosen;
+                }
+                // 只剩一个文本节点时宁可不绑，也不要把正负写成同一个输入。
+                if (chosen.id === chosenPromptNodeId) continue;
+            }
+
+            const inputs = scalarComfyInputs(chosen);
+            const input = rule.inputs.find(name => inputs.includes(name)) || inputs[0];
+            if (!input) continue;
+            bindings[role] = { nodeId: chosen.id, input };
+        }
+        return bindings;
+    };
+
+    // 把绑定表整理成「只有真正可用的条目」：节点存在、输入名非空、角色合法。
+    // 绑定存在 settings 里可能因为用户换了工作流而失效，应用前必须过滤。
+    const normalizeComfyBindings = (bindings, nodes) => {
+        const list = Array.isArray(nodes) ? nodes : [];
+        const byId = new Map(list.map(node => [node.id, node]));
+        const validRoles = new Set(Object.keys(COMFY_ROLE_RULES));
+        const out = {};
+        for (const [role, binding] of Object.entries(bindings || {})) {
+            if (!validRoles.has(role)) continue;
+            const nodeId = String(binding?.nodeId ?? '');
+            const input = String(binding?.input ?? '');
+            if (!nodeId || !input) continue;
+            const node = byId.get(nodeId);
+            if (!node) continue;
+            out[role] = { nodeId, input };
+        }
+        return out;
+    };
+
+    // 把参数值写进工作流的一份深拷贝；返回 { prompt, applied, skipped }。
+    // skipped 记录「想写但写不进去」的项（节点/输入不存在），由调用方决定是否提示用户，
+    // 绝不静默改坏用户的图。
+    const applyComfyParamValues = (workflow, bindings, values) => {
+        const copy = JSON.parse(JSON.stringify(workflow || {}));
+        const applied = [];
+        const skipped = [];
+        for (const [role, rawValue] of Object.entries(values || {})) {
+            const binding = bindings?.[role];
+            if (!binding) continue;
+            if (rawValue === undefined || rawValue === null || rawValue === '') continue;
+            const node = copy[binding.nodeId];
+            if (!node || typeof node !== 'object') {
+                skipped.push({ role, reason: `节点 ${binding.nodeId} 不存在` });
+                continue;
+            }
+            if (!node.inputs || typeof node.inputs !== 'object') node.inputs = {};
+            // 连线不能当参数覆盖，否则会把图结构改坏。
+            if (isComfyNodeLink(node.inputs[binding.input])) {
+                skipped.push({ role, reason: `${binding.nodeId}.${binding.input} 是节点连线` });
+                continue;
+            }
+            node.inputs[binding.input] = rawValue;
+            applied.push({ role, nodeId: binding.nodeId, input: binding.input, value: rawValue });
+        }
+        return { prompt: copy, applied, skipped };
+    };
+
+    // 从 /history/{prompt_id} 的结果里收集输出文件。
+    // 结构：{ outputs: { "9": { images: [{filename, subfolder, type}] } } }
+    // 视频类节点（VHS_VideoCombine）用 gifs/videos，音频用 audio，统一成同一种形状。
+    const collectComfyOutputs = (historyEntry) => {
+        const outputs = historyEntry?.outputs;
+        if (!outputs || typeof outputs !== 'object') return [];
+        const files = [];
+        for (const [nodeId, output] of Object.entries(outputs)) {
+            if (!output || typeof output !== 'object') continue;
+            for (const key of ['images', 'gifs', 'videos', 'audio', 'files']) {
+                const items = output[key];
+                if (!Array.isArray(items)) continue;
+                for (const item of items) {
+                    if (!item || typeof item !== 'object' || !item.filename) continue;
+                    files.push({
+                        nodeId: String(nodeId),
+                        kind: key,
+                        filename: String(item.filename),
+                        subfolder: String(item.subfolder || ''),
+                        type: String(item.type || 'output'),
+                        // 前端渲染 / 归档都需要一个可直接 GET 的地址。
+                        url: buildComfyViewUrl(item)
+                    });
+                }
+            }
+        }
+        return files;
+    };
+
+    // /view 的查询串：filename + subfolder + type，三者缺一不可（ComfyUI 用它们定位文件）。
+    const buildComfyViewUrl = (file, baseUrl = '') => {
+        const params = new URLSearchParams();
+        params.set('filename', String(file?.filename || ''));
+        if (file?.subfolder) params.set('subfolder', String(file.subfolder));
+        params.set('type', String(file?.type || 'output'));
+        const query = `/view?${params.toString()}`;
+        return baseUrl ? `${String(baseUrl).replace(/\/+$/, '')}${query}` : query;
+    };
+
+    // 从 WS 的 progress_state 事件里算出「整体百分比」。
+    //
+    // ComfyUI 的进度是按节点报的（每个节点有自己的 value/max），没有全局百分比。
+    // 这里用「已完成的采样步数 / 总步数」估算，只覆盖 value/max 有效且 max>0 的节点；
+    // 拿不到任何有效进度时返回 null，调用方退回不确定态（转圈 + 文案），不假装有进度。
+    const computeComfyProgress = (event) => {
+        const nodes = event?.nodes;
+        if (!nodes || typeof nodes !== 'object') return null;
+        const entries = Object.values(nodes).filter(node => node && Number(node.max) > 0);
+        if (!entries.length) return null;
+        const finished = entries.filter(node => node.state === 'finished').length;
+        // 未完成的节点按 value/max 折算，完成的直接算满。
+        const partial = entries.reduce((sum, node) => {
+            if (node.state === 'finished') return sum + 1;
+            const ratio = Number(node.value) / Number(node.max);
+            return sum + (Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0);
+        }, 0);
+        const percent = Math.round((Math.max(finished, partial) / entries.length) * 100);
+        return Math.max(0, Math.min(100, percent));
+    };
+
+    // 从 progress_state 里挑出「当前正在跑」的节点，用于文案（如「采样中」）。
+    const describeComfyProgress = (event) => {
+        const percent = computeComfyProgress(event);
+        if (percent === null) return '生成中';
+        if (percent >= 100) return '生成中 100%';
+        return `生成中 ${percent}%`;
+    };
+
+    // 工作流里是否有 KSampler 之类会真正出图的节点：
+    // 没有的话多半是用户粘错了 JSON，提前给出可读的提示。
+    const comfyWorkflowHasSampler = (nodes) => (Array.isArray(nodes) ? nodes : [])
+        .some(node => /Sampler|SamplerCustom|RandomNoise|KSampler/.test(node?.classType || ''));
+
+    // 汇总工作流里的可用下拉选项：从 object_info 里取该节点输入声明的 COMBO 列表。
+    // 用于设置页给「底模 / VAE / 采样器」这类参数提供下拉，而不是让用户背文件名。
+    const pickComfyComboOptions = (objectInfo, classType, inputName) => {
+        const spec = objectInfo?.[classType]?.input;
+        if (!spec) return [];
+        for (const group of ['required', 'optional']) {
+            const entry = spec[group]?.[inputName];
+            if (!Array.isArray(entry)) continue;
+            const first = entry[0];
+            if (Array.isArray(first)) return first.map(item => ({ value: String(item), label: String(item) }));
+        }
+        return [];
+    };
+
+    window.RPHubComfyUtils = Object.freeze({
+        COMFY_ROLE_RULES,
+        normalizeComfyNodeRef,
+        isComfyNodeLink,
+        parseComfyWorkflow,
+        scalarComfyInputs,
+        comfyOutputNodes,
+        detectComfyBindings,
+        normalizeComfyBindings,
+        applyComfyParamValues,
+        collectComfyOutputs,
+        buildComfyViewUrl,
+        computeComfyProgress,
+        describeComfyProgress,
+        comfyWorkflowHasSampler,
+        pickComfyComboOptions
+    });
 
     window.RPHubImageUtils = Object.freeze({
         IMAGE_PROFILE_FIELDS,

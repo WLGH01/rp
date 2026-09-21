@@ -222,6 +222,7 @@ const app = createApp({
             sdSizeLimits: sdSizeLimitConfig,
             sdSamplers,
             sdSchedulers,
+            comfyRoles,
             popularModelFamilies,
             presetRoleDisplayLabels,
             presetRoles: presetRoleOptions,
@@ -617,7 +618,9 @@ const app = createApp({
             // 生图配置预设列表：可保存多个不同的生图服务地址，随时切换。
             savedImageEndpoints: [
                 { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '' },
-                { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '' }
+                { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '' },
+                // ComfyUI 默认端口；直连需给 ComfyUI 加 --enable-cors-header（见设置页提示）。
+                { id: 'preset-comfyui-local', name: '本机 ComfyUI（直连 8188）', url: 'http://127.0.0.1:8188', provider: 'comfyui', key: '' }
             ],
             activeImageEndpointId: 'preset-forge-proxy',
             imageStyle: 'vertical',
@@ -647,6 +650,36 @@ const app = createApp({
             sdSizePreset: 'portrait-2-3',
             sdCustomWidth: 832,
             sdCustomHeight: 1216,
+            // --- ComfyUI 专用 ---
+            // API 格式工作流 JSON 文本（ComfyUI 里用「保存（API Format）」导出）。
+            comfyWorkflow: '',
+            // 参数绑定：角色 → { nodeId, input }。留空则用自动探测结果。
+            comfyBindings: {},
+            // 是否让插件自动探测绑定；关掉后完全按上面的手工绑定走。
+            comfyAutoDetect: true,
+            // 提交前的参数覆盖值（留空 = 不改，沿用工作流里的原值）。
+            comfyPrompt: '',
+            comfyNegativePrompt: '',
+            comfySteps: '',
+            comfyCfg: '',
+            comfySampler: '',
+            comfyScheduler: '',
+            comfySeed: '',
+            comfyRandomizeSeed: true,
+            comfyWidth: '',
+            comfyHeight: '',
+            comfyBatchSize: '',
+            comfyDenoise: '',
+            comfyCheckpoint: '',
+            comfyVae: '',
+            comfyFilenamePrefix: '',
+            // 是否用「生图比例」覆盖工作流里的宽高。
+            // 默认关：很多 ComfyUI 工作流（视频、放大、换脸）自带尺寸，乱改会跑坏。
+            comfyOverrideSize: false,
+            // 生成超时（秒）：本地大模型/视频工作流可能跑几分钟。
+            comfyTimeout: 600,
+            // 是否在生成中显示「取消」按钮（走 /interrupt）。
+            comfyAllowCancel: true,
             qualityModel: DEFAULT_API_CONFIG.qualityModel,
             balancedModel: DEFAULT_API_CONFIG.balancedModel,
             fastModel: DEFAULT_API_CONFIG.fastModel,
@@ -1890,6 +1923,16 @@ let removedProviderConfigCleared = false;
                 }
                 settings.sdCustomWidth = imageUtils.normalizeSdDimension(settings.sdCustomWidth, 832);
                 settings.sdCustomHeight = imageUtils.normalizeSdDimension(settings.sdCustomHeight, 1216);
+                // ComfyUI：老存档没有这些键，靠上面的默认值兜底；这里只做类型收敛。
+                settings.comfyWorkflow = String(settings.comfyWorkflow || '');
+                settings.comfyBindings = (settings.comfyBindings && typeof settings.comfyBindings === 'object' && !Array.isArray(settings.comfyBindings))
+                    ? settings.comfyBindings
+                    : {};
+                settings.comfyAutoDetect = settings.comfyAutoDetect !== false;
+                settings.comfyRandomizeSeed = settings.comfyRandomizeSeed !== false;
+                settings.comfyOverrideSize = settings.comfyOverrideSize === true;
+                settings.comfyAllowCancel = settings.comfyAllowCancel !== false;
+                settings.comfyTimeout = Math.max(30, Math.min(7200, Math.round(Number(settings.comfyTimeout) || 600)));
                 settings.imageGenCount = Math.min(8, Math.max(2, Math.round(Number(settings.imageGenCount) || 2)));
                 settings.fontFamilyVersion = 4;
                 applyFontFamily(settings.fontFamily);
@@ -2148,6 +2191,17 @@ let removedProviderConfigCleared = false;
             const bar = card.querySelector('.generated-image-progress-bar');
             card.classList.toggle('is-waiting', job.status === 'queued');
             if (bar) bar.style.width = `${progress}%`;
+            // 取消按钮：只在「正在跑且真有可取消的任务」时露出来。
+            const cancelButton = card.querySelector('.generated-image-cancel');
+            if (cancelButton) {
+                const canCancel = isComfyProvider.value
+                    && settings.comfyAllowCancel
+                    && !!task?.cancel
+                    && ['queued', 'running'].includes(job.status);
+                cancelButton.hidden = !canCancel;
+                if (canCancel) cancelButton.dataset.imageCancel = '1';
+                else delete cancelButton.dataset.imageCancel;
+            }
 
             if (job.status === 'queued') {
                 if (label) label.textContent = job.queuePosition
@@ -2205,7 +2259,9 @@ let removedProviderConfigCleared = false;
                     task,
                     card,
                     job,
-                    data: job.directImage ? job.imageUrl : undefined
+                    // 只有「图片本体就在 imageUrl 里」（SD 的 base64 data URL）才当 data 传。
+                    // ComfyUI 的 imageUrl 是远程 /view 地址，必须让归档按 url 去下载。
+                    data: job.directImage && !job.remoteImage ? job.imageUrl : undefined
                 });
             }
         };
@@ -2474,9 +2530,12 @@ let removedProviderConfigCleared = false;
         }, { deep: true });
 
         const savedImageEndpointOptions = computed(() => {
+            const providerTag = (provider) => (
+                provider === 'comfyui' ? 'ComfyUI' : provider === 'stable-diffusion' ? 'SD' : 'NAI'
+            );
             const list = (settings.savedImageEndpoints || []).map(item => ({
                 value: item.id,
-                label: `${item.name} (${item.provider === 'stable-diffusion' ? 'SD' : 'NAI'})`
+                label: `${item.name} (${providerTag(item.provider)})`
             }));
             const isCustom = !settings.savedImageEndpoints?.some(e => e.id === activeImageEndpointId.value);
             if (isCustom || !activeImageEndpointId.value) {
@@ -2517,7 +2576,7 @@ let removedProviderConfigCleared = false;
                 return;
             }
             const active = getActiveImageEndpoint();
-            const defaultName = active?.name || (isSdProvider.value ? '本地 Forge 节点' : 'NovelAI 节点');
+            const defaultName = active?.name || (isComfyProvider.value ? '本地 ComfyUI 节点' : isSdProvider.value ? '本地 Forge 节点' : 'NovelAI 节点');
             const name = window.prompt('请输入此生图配置的名称：', defaultName);
             if (!name || !name.trim()) return;
 
@@ -2672,17 +2731,486 @@ let removedProviderConfigCleared = false;
             return { imageUrl, info: result?.info || '', width, height };
         };
 
+        // ===== ComfyUI（API 格式工作流）=====
+        // 与 NAI/SD 的差异：
+        //   1. 提交的不是「参数集合」而是整张节点图（API 格式 prompt）
+        //   2. 进度不是 HTTP 轮询出来的，而是服务端通过 WebSocket 推的 progress_state 事件
+        //   3. 图片不在响应体里，而是按 filename 去 /view 取（或直接拼 /view 地址给 <img>）
+        // 因此最终仍产出与其余两条链路一致的 job 形状，复用渲染 / 缓存 / 归档。
+
+        const isComfyProvider = computed(() => settings.imageProvider === 'comfyui');
+        const comfyUtils = window.RPHubComfyUtils;
+
+        // 当前工作流的解析结果（响应式，设置页与生成链路共用）。
+        const comfyWorkflowState = reactive({
+            ok: false,
+            error: '',
+            nodes: [],
+            // 自动探测出的绑定
+            detected: {},
+            // 实际生效的绑定（手工优先，缺项回落到探测）
+            effective: {}
+        });
+
+        const comfyObjectInfo = ref({});
+        const comfyCapabilities = reactive({
+            loaded: false,
+            loading: false,
+            error: '',
+            models: [],
+            vaes: [],
+            samplers: [],
+            schedulers: []
+        });
+
+        const reparseComfyWorkflow = () => {
+            const parsed = comfyUtils.parseComfyWorkflow(settings.comfyWorkflow);
+            comfyWorkflowState.ok = parsed.ok;
+            comfyWorkflowState.error = parsed.error;
+            comfyWorkflowState.nodes = parsed.nodes;
+            comfyWorkflowState.detected = parsed.ok ? comfyUtils.detectComfyBindings(parsed.nodes) : {};
+            const manual = comfyUtils.normalizeComfyBindings(settings.comfyBindings, parsed.nodes);
+            // 自动探测开着时，手工绑定优先，未绑的项用探测结果补齐。
+            comfyWorkflowState.effective = settings.comfyAutoDetect
+                ? { ...comfyWorkflowState.detected, ...manual }
+                : manual;
+            return comfyWorkflowState;
+        };
+        watch(
+            () => [settings.comfyWorkflow, settings.comfyBindings, settings.comfyAutoDetect],
+            reparseComfyWorkflow,
+            { immediate: true, deep: true }
+        );
+
+        // 组装本次提交的完整 prompt：工作流深拷贝 + 参数覆盖。
+        const buildComfyPrompt = (tags = '') => {
+            const state = reparseComfyWorkflow();
+            if (!state.ok) throw new Error(state.error || 'ComfyUI 工作流不可用');
+            const parsed = comfyUtils.parseComfyWorkflow(settings.comfyWorkflow);
+            const values = {};
+
+            // 正向提示词：风格画师串 + 额外前缀 + AI 输出的角色标签，与 SD 的拼装口径一致。
+            const promptText = buildComfyPositivePrompt(tags);
+            if (promptText) values.prompt = promptText;
+            // 负面提示词刻意**不**回落到 SD 的 sdNegativePrompt：
+            // 两套生图方式各有一份参数，串用会让「切到 ComfyUI 却带着 SD 的负面词」变得难以排查。
+            // 留空即不覆盖，工作流里原本写好的负面提示词照常生效。
+            const negative = String(settings.comfyNegativePrompt || '').trim();
+            if (negative) values.negativePrompt = negative;
+
+            const { width, height } = getSdSize();
+            // 宽高：显式填了才覆盖；否则仅当用户开了「用生图比例覆盖」才改，
+            // 避免把自带尺寸的工作流（视频/放大/换脸）改坏。
+            if (String(settings.comfyWidth).trim()) values.width = Math.round(Number(settings.comfyWidth));
+            else if (settings.comfyOverrideSize) values.width = width;
+            if (String(settings.comfyHeight).trim()) values.height = Math.round(Number(settings.comfyHeight));
+            else if (settings.comfyOverrideSize) values.height = height;
+
+            const numeric = [
+                ['steps', settings.comfySteps],
+                ['cfg', settings.comfyCfg],
+                ['denoise', settings.comfyDenoise],
+                ['batchSize', settings.comfyBatchSize]
+            ];
+            for (const [role, raw] of numeric) {
+                if (String(raw).trim() === '') continue;
+                const num = Number(raw);
+                if (Number.isFinite(num)) values[role] = num;
+            }
+            for (const [role, raw] of [
+                ['sampler', settings.comfySampler],
+                ['scheduler', settings.comfyScheduler],
+                ['checkpoint', settings.comfyCheckpoint],
+                ['vae', settings.comfyVae],
+                ['filenamePrefix', settings.comfyFilenamePrefix]
+            ]) {
+                const text = String(raw || '').trim();
+                if (text) values[role] = text;
+            }
+
+            // 种子：勾了随机就每次换一个；否则用手填值（留空则用工作流原值）。
+            const seedRaw = String(settings.comfySeed).trim();
+            if (settings.comfyRandomizeSeed) {
+                values.seed = Math.floor(Math.random() * 1e15);
+            } else if (seedRaw !== '') {
+                const seed = Number(seedRaw);
+                if (Number.isFinite(seed)) values.seed = Math.round(seed);
+            }
+
+            const { prompt, applied, skipped } = comfyUtils.applyComfyParamValues(
+                parsed.prompt, comfyWorkflowState.effective, values
+            );
+            return { prompt, applied, skipped, width, height };
+        };
+
+        // 正向提示词拼装：沿用 SD 那套（风格画师串 → 自定义前缀 → LoRA → 角色标签）。
+        const buildComfyPositivePrompt = (tags) => {
+            const parts = [];
+            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            if (styleArtists) parts.push(styleArtists);
+            const extra = String(settings.comfyPrompt || '').trim();
+            if (extra) parts.push(extra);
+            const prefix = String(settings.sdPromptPrefix || '').trim();
+            if (prefix) parts.push(prefix);
+            if (tags) parts.push(tags);
+            return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
+        };
+
+        // ComfyUI 的 /prompt 提交：{ prompt, client_id }。
+        // client_id 用于让服务端把 WS 事件定向推给我们（多标签页并存时不会串）。
+        const comfyClientId = (() => {
+            try {
+                const key = 'rphub_comfy_client_id';
+                let id = window.localStorage.getItem(key);
+                if (!id) {
+                    id = (crypto?.randomUUID?.() || `rphub-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+                    window.localStorage.setItem(key, id);
+                }
+                return id;
+            } catch {
+                return `rphub-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            }
+        })();
+
+        const fetchComfyJson = async (path, options = {}) => {
+            const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
+            if (!baseUrl) throw new Error('未配置 ComfyUI 地址');
+            const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+            const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
+            const text = await response.text();
+            let payload = null;
+            try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
+            if (!response.ok) {
+                // ComfyUI 的错误体形如 { error: { message, details }, node_errors: {...} }。
+                // node_errors 是「哪个节点的哪个输入不对」，对用户最有价值，必须带出来。
+                const detail = payload?.error?.message || payload?.error?.details || payload?.error || text || `HTTP ${response.status}`;
+                let message = typeof detail === 'string' ? detail : JSON.stringify(detail);
+                const nodeErrors = payload?.node_errors;
+                if (nodeErrors && typeof nodeErrors === 'object') {
+                    const first = Object.entries(nodeErrors)[0];
+                    if (first) message += `（节点 ${first[0]}：${JSON.stringify(first[1]).slice(0, 300)}）`;
+                }
+                throw new Error(message);
+            }
+            return payload;
+        };
+
+        // 提交工作流并返回 prompt_id。
+        const submitComfyPrompt = async (prompt) => {
+            const result = await fetchComfyJson('/prompt', {
+                method: 'POST',
+                body: JSON.stringify({ prompt, client_id: comfyClientId })
+            });
+            if (!result?.prompt_id) throw new Error('ComfyUI 未返回 prompt_id');
+            return { promptId: String(result.prompt_id), nodeErrors: result.node_errors || {} };
+        };
+
+        // 打开一条 WS 连接收进度事件，并把百分比回调给调用方。
+        // 返回 { close }，调用方负责在结束时关掉，避免连接泄漏。
+        const openComfySocket = (promptId, handlers = {}) => {
+            const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
+            if (!baseUrl) return null;
+            let wsUrl = '';
+            try {
+                const url = new URL(baseUrl, window.location.href);
+                url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+                url.pathname = `${url.pathname.replace(/\/+$/, '')}/ws`;
+                url.search = `?clientId=${encodeURIComponent(comfyClientId)}`;
+                wsUrl = url.href;
+            } catch {
+                return null;
+            }
+            let socket = null;
+            try {
+                socket = new WebSocket(wsUrl);
+            } catch {
+                return null;
+            }
+            let closed = false;
+            const close = () => {
+                closed = true;
+                try { socket?.close(); } catch { /* 已断开 */ }
+            };
+            socket.onmessage = (event) => {
+                if (closed || typeof event.data !== 'string') return;
+                let message = null;
+                try { message = JSON.parse(event.data); } catch { return; }
+                const data = message?.data || {};
+                // 只认自己这个 prompt 的事件，避免同机器其它任务串进进度条。
+                if (data.prompt_id && promptId && String(data.prompt_id) !== String(promptId)) return;
+                switch (message?.type) {
+                    case 'progress_state':
+                        handlers.onProgress?.(data);
+                        break;
+                    case 'executing':
+                        // node 为 null 表示该 prompt 执行结束（成功或失败，需再查 history 确认）。
+                        if (data.node === null) handlers.onExecuted?.(data);
+                        else handlers.onNode?.(data);
+                        break;
+                    case 'execution_error':
+                        handlers.onError?.(data);
+                        break;
+                    case 'execution_interrupted':
+                        handlers.onInterrupted?.(data);
+                        break;
+                    case 'status':
+                        handlers.onStatus?.(data);
+                        break;
+                    default:
+                        break;
+                }
+            };
+            socket.onerror = () => handlers.onSocketError?.();
+            return { close, get readyState() { return socket?.readyState; } };
+        };
+
+        // 拉 /history/{id}，直到拿到 outputs（executing:null 之后 history 可能还差一拍）。
+        const fetchComfyHistory = async (promptId) => {
+            const history = await fetchComfyJson(`/history/${encodeURIComponent(promptId)}`);
+            return history?.[promptId] || null;
+        };
+
+        // 生成主流程：提交 → 等 WS / 轮询 → 取输出文件 → 转成 job。
+        const generateWithComfy = async ({ tags, onProgress, registerCancel }) => {
+            const built = buildComfyPrompt(tags);
+            const timeoutMs = Math.max(30, Number(settings.comfyTimeout) || 600) * 1000;
+
+            onProgress?.({ status: 'running', generationProgress: { percent: 5 } });
+            const { promptId } = await submitComfyPrompt(built.prompt);
+
+            let cancelled = false;
+            // 取消：调用 /interrupt 中止当前执行，再清掉队列里这一条。
+            const cancel = async () => {
+                if (cancelled) return;
+                cancelled = true;
+                try {
+                    await fetchComfyJson('/interrupt', { method: 'POST', body: '{}' });
+                } catch { /* 服务端可能已经跑完 */ }
+                try {
+                    await fetchComfyJson('/queue', {
+                        method: 'POST',
+                        body: JSON.stringify({ delete: [promptId] })
+                    });
+                } catch { /* 不在队列里就算了 */ }
+            };
+            registerCancel?.(cancel);
+
+            let lastPercent = 5;
+            let done = false;
+            let failure = '';
+            let interrupted = false;
+
+            const socket = openComfySocket(promptId, {
+                onProgress: (data) => {
+                    const percent = comfyUtils.computeComfyProgress(data);
+                    if (percent === null) {
+                        onProgress?.({ status: 'running', generationProgress: { percent: lastPercent } });
+                        return;
+                    }
+                    // 进度只增不减，避免多节点来回跳。
+                    lastPercent = Math.max(lastPercent, Math.min(99, percent));
+                    onProgress?.({ status: 'running', generationProgress: { percent: lastPercent } });
+                },
+                onExecuted: () => { done = true; },
+                onError: (data) => {
+                    failure = data?.exception_message || data?.exception_type || 'ComfyUI 执行出错';
+                    done = true;
+                },
+                onInterrupted: () => { interrupted = true; done = true; },
+                onSocketError: () => { /* WS 不可用时靠下面的轮询兜底 */ }
+            });
+
+            try {
+                const startedAt = Date.now();
+                let entry = null;
+                while (!done && !cancelled) {
+                    if (Date.now() - startedAt > timeoutMs) {
+                        throw new Error(`ComfyUI 生成超时（超过 ${Math.round(timeoutMs / 1000)} 秒）`);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 700));
+                    // WS 断线时用 history 当进度来源：有 outputs 即完成。
+                    try {
+                        entry = await fetchComfyHistory(promptId);
+                        if (entry) {
+                            const status = entry.status?.status_str;
+                            if (status === 'error') {
+                                const message = entry.status?.messages?.find(m => m[0] === 'execution_error')?.[1]?.exception_message;
+                                failure = message || 'ComfyUI 执行出错';
+                                break;
+                            }
+                            const files = comfyUtils.collectComfyOutputs(entry);
+                            if (files.length) break;
+                        }
+                    } catch { /* 还没写进 history，继续等 */ }
+                }
+
+                socket?.close();
+                if (cancelled) throw Object.assign(new Error('已取消生成'), { name: 'AbortError' });
+                if (interrupted) throw Object.assign(new Error('生成已被中断'), { name: 'AbortError' });
+                if (failure) throw new Error(failure);
+
+                // 最终确认一次 history（WS 说结束时也要落到这里取文件名）。
+                if (!entry || !comfyUtils.collectComfyOutputs(entry).length) {
+                    entry = await fetchComfyHistory(promptId);
+                }
+                const files = comfyUtils.collectComfyOutputs(entry);
+                if (!files.length) throw new Error('ComfyUI 执行完成但没有产出图片（请确认工作流里有 SaveImage 之类的输出节点）');
+
+                // 首个输出即卡片要显示的图；/view 地址可直接放进 <img>。
+                const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
+                const first = files[0];
+                const imageUrl = first.url.startsWith('http') ? first.url : `${baseUrl}${first.url}`;
+                const { width, height } = built;
+                return {
+                    imageUrl,
+                    width,
+                    height,
+                    files,
+                    promptId
+                };
+            } finally {
+                socket?.close();
+                registerCancel?.(null);
+            }
+        };
+
+        // 拉取 ComfyUI 的节点定义（object_info），用于给「底模 / VAE / 采样器」提供下拉。
+        // object_info 全量有几百 KB～几 MB，只在用户手动点「拉取」时取，不在生成路径上取。
+        const refreshComfyCapabilities = async (isManual = false) => {
+            const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
+            if (!baseUrl || !isComfyProvider.value) {
+                if (isManual) showToast('请先填写 ComfyUI 地址并切换至 ComfyUI', 'warning');
+                return { ok: false };
+            }
+            comfyCapabilities.loading = true;
+            comfyCapabilities.error = '';
+            try {
+                if (isManual) showToast('正在从 ComfyUI 拉取节点信息...', 'info');
+                // 这里只取与本功能相关的节点，避免把整份 object_info（可能数 MB）拉进内存。
+                const names = ['CheckpointLoaderSimple', 'VAELoader', 'KSampler', 'KSamplerAdvanced', 'KSamplerSelect', 'EmptyLatentImage', 'SaveImage'];
+                const results = await Promise.all(names.map(name => (
+                    fetchComfyJson(`/object_info/${encodeURIComponent(name)}`).catch(() => null)
+                )));
+                const info = {};
+                results.forEach(payload => { if (payload) Object.assign(info, payload); });
+                comfyObjectInfo.value = info;
+                comfyCapabilities.models = comfyUtils.pickComfyComboOptions(info, 'CheckpointLoaderSimple', 'ckpt_name');
+                comfyCapabilities.vaes = comfyUtils.pickComfyComboOptions(info, 'VAELoader', 'vae_name');
+                comfyCapabilities.samplers = comfyUtils.pickComfyComboOptions(info, 'KSampler', 'sampler_name');
+                comfyCapabilities.schedulers = comfyUtils.pickComfyComboOptions(info, 'KSampler', 'scheduler');
+                comfyCapabilities.loaded = true;
+                if (isManual) {
+                    showToast(`已获取 ${comfyCapabilities.models.length} 个底模、${comfyCapabilities.samplers.length} 个采样器`, 'success');
+                }
+                return { ok: true, ...comfyCapabilities };
+            } catch (error) {
+                comfyCapabilities.error = error.message || '拉取失败';
+                comfyCapabilities.loaded = false;
+                if (isManual) showToast(`拉取 ComfyUI 节点信息失败：${error.message}`, 'error');
+                return { ok: false, error: comfyCapabilities.error };
+            } finally {
+                comfyCapabilities.loading = false;
+            }
+        };
+
+        // 下拉选项：首项固定为「不覆盖」（空值 = 沿用工作流里的原值）。
+        const buildComfyOptionList = (items, emptyLabel) => {
+            const seen = new Set(['']);
+            const list = [{ value: '', label: emptyLabel }];
+            for (const item of items || []) {
+                const value = String(item?.value || '');
+                if (!value || seen.has(value)) continue;
+                seen.add(value);
+                list.push({ value, label: item.label || value });
+            }
+            return list;
+        };
+        const comfyModelOptions = computed(() => buildComfyOptionList(comfyCapabilities.models, '不覆盖（用工作流里的底模）'));
+        const comfyVaeOptions = computed(() => buildComfyOptionList(comfyCapabilities.vaes, '不覆盖（用工作流里的 VAE）'));
+        const comfySamplerOptions = computed(() => buildComfyOptionList(comfyCapabilities.samplers, '不覆盖（用工作流里的采样器）'));
+        const comfySchedulerOptions = computed(() => buildComfyOptionList(comfyCapabilities.schedulers, '不覆盖（用工作流里的调度器）'));
+
+        // ===== ComfyUI 设置页接线 =====
+        const comfyWorkflowFileInput = ref(null);
+
+        const triggerComfyWorkflowFile = () => comfyWorkflowFileInput.value?.click?.();
+
+        const handleComfyWorkflowFile = async (event) => {
+            const file = event?.target?.files?.[0];
+            // 先清空 input，否则连续选同一个文件不会触发 change。
+            if (event?.target) event.target.value = '';
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const parsed = comfyUtils.parseComfyWorkflow(text);
+                if (!parsed.ok) {
+                    showToast(`该文件不是可用的 API 工作流：${parsed.error}`, 'error');
+                    return;
+                }
+                settings.comfyWorkflow = text;
+                // 换了工作流，旧的手工绑定多半已失效，清掉让自动识别重新接管。
+                settings.comfyBindings = {};
+                showToast(`已载入工作流（${parsed.nodes.length} 个节点）`, 'success');
+            } catch (error) {
+                showToast(`读取文件失败：${error.message}`, 'error');
+            }
+        };
+
+        // 绑定表格的取值：手工绑定优先，其次显示自动识别结果（只读展示）。
+        const comfyBindingInputValue = (role, field) => {
+            const manual = settings.comfyBindings?.[role];
+            if (manual && String(manual[field] ?? '') !== '') return String(manual[field]);
+            const detected = comfyWorkflowState.detected?.[role];
+            return detected ? String(detected[field] ?? '') : '';
+        };
+
+        const setComfyBinding = (role, field, value) => {
+            const text = String(value ?? '').trim();
+            const next = { ...(settings.comfyBindings || {}) };
+            const current = { ...(next[role] || {}) };
+            if (text) current[field] = text;
+            else delete current[field];
+            if (current.nodeId && current.input) next[role] = current;
+            else delete next[role];
+            settings.comfyBindings = next;
+        };
+
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
             const request = new URL(requestUrl, window.location.href);
             const token = request.searchParams.get('token') || settings.imageGenKey.trim();
             request.searchParams.set('token', token);
             const key = fresh ? `${request.href}#${Date.now()}-${Math.random()}` : request.href;
             if (generatedImageTasks.has(key)) return generatedImageTasks.get(key);
-            const task = { key, requestUrl: request.href, baseUrl: request.origin, token, cards: new Set(), job: null };            const publish = (job) => {
+            const task = { key, requestUrl: request.href, baseUrl: request.origin, token, cards: new Set(), job: null };
+            const publish = (job) => {
                 task.job = job;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
             };
             task.promise = (async () => {
+                // ComfyUI：提交 API 工作流 → WS/轮询进度 → /history 取输出文件名。
+                if (isComfyProvider.value) {
+                    // 在卡片上挂一个「取消」按钮，绑到本次任务的 cancel 回调。
+                    const job = await generateWithComfy({
+                        tags: request.searchParams.get('tag') || '',
+                        onProgress: (progress) => publish({ ...progress, cancel: task.cancel }),
+                        registerCancel: (cancel) => {
+                            task.cancel = cancel;
+                            if (task.job) publish({ ...task.job, cancel });
+                        }
+                    });
+                    const finished = {
+                        status: 'done',
+                        imageUrl: job.imageUrl,
+                        directImage: true,
+                        // 远程 /view 地址：不能再当 base64 处理，归档时走 URL 下载。
+                        remoteImage: true,
+                        width: job.width,
+                        height: job.height
+                    };
+                    publish(finished);
+                    cacheCompletedImageJob(finished, task, request);
+                    return finished;
+                }
                 // Stable Diffusion：sdapi 一次 POST 直接返回 base64，没有任务队列。
                 if (isSdProvider.value) {
                     publish({ status: 'running', generationProgress: { percent: 10 } });
@@ -2734,12 +3262,23 @@ let removedProviderConfigCleared = false;
         };
 
         const ensureGeneratedImageProgressUi = (card) => {
-            if (card.querySelector('.generated-image-progress')) return;
-            const progress = document.createElement('div');
-            progress.className = 'generated-image-progress';
-            progress.setAttribute('aria-live', 'polite');
-            progress.innerHTML = '<svg class="generated-image-spinner" viewBox="0 0 50 50" aria-hidden="true"><circle class="generated-image-spinner-path" cx="25" cy="25" r="20" fill="none" stroke-width="2"></circle></svg><span class="generated-image-progress-label">等待生成</span><span class="generated-image-progress-track"><i class="generated-image-progress-bar"></i></span>';
-            card.appendChild(progress);
+            if (!card.querySelector('.generated-image-progress')) {
+                const progress = document.createElement('div');
+                progress.className = 'generated-image-progress';
+                progress.setAttribute('aria-live', 'polite');
+                progress.innerHTML = '<svg class="generated-image-spinner" viewBox="0 0 50 50" aria-hidden="true"><circle class="generated-image-spinner-path" cx="25" cy="25" r="20" fill="none" stroke-width="2"></circle></svg><span class="generated-image-progress-label">等待生成</span><span class="generated-image-progress-track"><i class="generated-image-progress-bar"></i></span>';
+                card.appendChild(progress);
+            }
+            // 取消按钮只在 ComfyUI 链路可用时出现（其余两条链路没有可中断的服务端任务）。
+            if (!card.querySelector('.generated-image-cancel')) {
+                const cancel = document.createElement('button');
+                cancel.type = 'button';
+                cancel.className = 'generated-image-cancel';
+                cancel.textContent = '取消生成';
+                cancel.setAttribute('aria-label', '取消生成');
+                cancel.hidden = true;
+                card.querySelector('.generated-image-progress')?.appendChild(cancel);
+            }
         };
 
         const loadGeneratedImageCard = (card, requestUrl = card?.dataset.imageRequest, options = {}) => {
@@ -2808,6 +3347,30 @@ let removedProviderConfigCleared = false;
         });
 
         const handleGeneratedImageReroll = async (event, messageIndex) => {
+            // 取消生成：按钮在卡片进度层内，同样走这个委托入口。
+            const cancelButton = event.target.closest('.generated-image-cancel');
+            if (cancelButton) {
+                event.preventDefault();
+                event.stopPropagation();
+                const card = cancelButton.closest('.generated-image-card');
+                const task = card ? [...generatedImageTasks.values()].find(item => item.cards?.has(card)) : null;
+                if (!task?.cancel) {
+                    showToast('该任务无法取消', 'info');
+                    return;
+                }
+                cancelButton.disabled = true;
+                cancelButton.textContent = '正在取消…';
+                try {
+                    await task.cancel();
+                    showToast('已发送取消请求', 'info');
+                } catch (error) {
+                    showToast(`取消失败：${error.message}`, 'error');
+                } finally {
+                    cancelButton.disabled = false;
+                    cancelButton.textContent = '取消生成';
+                }
+                return;
+            }
             const button = event.target.closest('.generated-image-reroll');
             if (!button) return;
             event.preventDefault();
@@ -4141,6 +4704,14 @@ let removedProviderConfigCleared = false;
             if (!baseUrl) {
                 imageGenStatus.value = 'idle';
                 imageGenLatency.value = null;
+                return;
+            }
+            // ComfyUI 的根路径不返回 200（会去重定向到前端），带 Origin 时还可能被
+            // origin_only 中间件拦成 403。用 /system_stats 做探活才准。
+            if (isComfyProvider.value) {
+                await checkConnectionStatus(imageGenStatus, imageGenLatency, 'ComfyUI', signal => (
+                    fetch(`${baseUrl}/system_stats`, { signal })
+                ), () => true);
                 return;
             }
             await checkConnectionStatus(imageGenStatus, imageGenLatency, 'Image API', signal => (
@@ -7398,7 +7969,10 @@ let removedProviderConfigCleared = false;
             // 两种方式的差别只在于「URL 携带什么参数」：
             //   NovelAI   把 token/model/artist/size/steps 等全塞进 URL（服务端按 query 取用）
             //   SD(Forge) 参数走 POST body，URL 只带 tag（正则的 $1 捕获）与展示用的尺寸信息
-            const imageRequestUrl = isSdProvider.value
+            //   ComfyUI   参数走 POST body 的工作流 JSON，URL 同样只带 tag 与展示用尺寸
+            const imageRequestUrl = isComfyProvider.value
+                ? `${baseUrl}/view?tag=$1&provider=comfyui&size=${settings.imageSize}&w=${sdSize.width}&h=${sdSize.height}`
+                : isSdProvider.value
                 ? `${baseUrl}/sdapi/v1/txt2img?tag=$1&provider=stable-diffusion&size=${settings.imageSize}&w=${sdSize.width}&h=${sdSize.height}`
                 : `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative={{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}&nocache=0&noise_schedule=karras`;
             const imageGenRegexContent = {
@@ -7460,6 +8034,10 @@ let removedProviderConfigCleared = false;
             settings.imageStyle,
             settings.customImageArtists,
             settings.imageSize,
+            // ComfyUI 的尺寸覆盖 / 比例变更同样要重建正则 URL 里的 w/h。
+            settings.comfyOverrideSize,
+            settings.comfyWidth,
+            settings.comfyHeight,
             // SD 自定义分辨率变更也要重建正则，URL 里的 w/h 才会跟着更新。
             settings.sdCustomSizeEnabled,
             settings.sdCustomWidth,
@@ -8939,6 +9517,11 @@ let removedProviderConfigCleared = false;
             // 生图方式与 SD 专用
             isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
+            // 生图方式与 ComfyUI 专用
+            isComfyProvider, comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,
+            comfyModelOptions, comfyVaeOptions, comfySamplerOptions, comfySchedulerOptions,
+            comfyWorkflowFileInput, triggerComfyWorkflowFile, handleComfyWorkflowFile,
+            comfyBindingInputValue, setComfyBinding,
             activeImageEndpointId, savedImageEndpointOptions, selectImageEndpoint, saveCurrentImageEndpoint, deleteActiveImageEndpoint,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
             getToolCallModeText, hasThinkingOrTools, isMessageThinkingOrRunning, isThinkingSummaryOpen, toggleThinkingSummary, markThinkingSummaryDetailOpened, getTimelineSteps,

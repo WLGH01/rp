@@ -1770,7 +1770,7 @@
                                                 menu-class="text-sm">
                                             </custom-select>
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                NovelAI 走异步任务轮询；Stable Diffusion 走 Forge/A1111 的 sdapi 同步返回。
+                                                NovelAI 走异步任务轮询；Stable Diffusion 走 Forge/A1111 的 sdapi 同步返回；ComfyUI 提交「API 格式」工作流并按其节点图出图。
                                             </p>
                                         </div>
 
@@ -1780,8 +1780,11 @@
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生图接口地址</label>
                                             <input v-model="settings.imageGenBaseUrl" type="text"
                                                 class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
-                                                :placeholder="isSdProvider ? 'http://127.0.0.1:7860' : 'https://你的生图服务地址'">
+                                                :placeholder="isComfyProvider ? 'http://127.0.0.1:8188' : (isSdProvider ? 'http://127.0.0.1:7860' : 'https://你的生图服务地址')">
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">留空则不启用自动生图，应用不会访问任何内置生图服务。</p>
+                                            <p v-if="isComfyProvider" class="mt-2 text-xs text-amber-600 leading-relaxed">
+                                                ComfyUI 直连需要跨域许可：给 ComfyUI 加 <code class="px-1 rounded bg-amber-50">--enable-cors-header</code> 启动参数，或在本站 nginx 里做一层反代后填本站地址。
+                                            </p>
                                         </div>
 
                                         <!-- Image Key -->
@@ -1789,10 +1792,11 @@
                                             class="generation-setting-card">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                                                {{ isSdProvider ? 'API 鉴权（可选）' : '自动生图密钥' }}</label>
+                                                {{ isSdProvider ? 'API 鉴权（可选）' : (isComfyProvider ? '鉴权（可选，暂不支持）' : '自动生图密钥') }}</label>
                                             <input v-model="settings.imageGenKey" type="password"
-                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
-                                                :placeholder="isSdProvider ? 'user:password（服务端启用 --api-auth 时填）' : '你的生图服务密钥'">
+                                                :disabled="isComfyProvider"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm disabled:bg-gray-50 disabled:text-gray-400"
+                                                :placeholder="isSdProvider ? 'user:password（服务端启用 --api-auth 时填）' : (isComfyProvider ? 'ComfyUI 默认无需鉴权' : '你的生图服务密钥')">
                                         </div>
 
                                         <!-- Image Model (NovelAI only) -->
@@ -1994,6 +1998,197 @@
                                                     <div class="settings-toggle settings-toggle--teal"></div>
                                                 </div>
                                             </label>
+                                        </div>
+                                    </div>
+
+                                    <!-- ComfyUI 专用参数 -->
+                                    <div v-if="isComfyProvider" class="mt-6 pt-6 border-t border-gray-100 space-y-4">
+                                        <div class="flex items-center justify-between gap-3">
+                                            <h5 class="text-xs font-bold text-gray-500 uppercase tracking-wider">ComfyUI 工作流</h5>
+                                            <button type="button" @click="refreshComfyCapabilities(true)"
+                                                class="px-2 py-0.5 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md active:scale-95 transition-all shrink-0 flex items-center gap-1">
+                                                <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                                拉取节点信息
+                                            </button>
+                                        </div>
+
+                                        <!-- 工作流 JSON -->
+                                        <div class="generation-setting-card">
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">工作流 JSON（API 格式）</label>
+                                            <textarea v-model="settings.comfyWorkflow" rows="6"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-xs font-mono focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
+                                                placeholder='在 ComfyUI 里用「工作流 → 导出（API）」保存，然后把这个 JSON 整个粘到这里'></textarea>
+                                            <div class="mt-2 flex items-center gap-3 flex-wrap">
+                                                <button type="button" @click="triggerComfyWorkflowFile"
+                                                    class="px-2.5 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg active:scale-95 transition-all">
+                                                    选择 .json 文件
+                                                </button>
+                                                <input ref="comfyWorkflowFileInput" type="file" accept=".json,application/json" class="hidden" @change="handleComfyWorkflowFile">
+                                                <button type="button" @click="settings.comfyWorkflow = ''"
+                                                    class="px-2.5 py-1 text-xs font-bold text-gray-600 bg-white hover:bg-gray-50 border border-gray-200 rounded-lg active:scale-95 transition-all">
+                                                    清空
+                                                </button>
+                                                <span v-if="comfyWorkflowState.ok" class="text-xs text-teal-700 font-bold">
+                                                    已解析 {{ comfyWorkflowState.nodes.length }} 个节点
+                                                </span>
+                                                <span v-else-if="settings.comfyWorkflow" class="text-xs text-rose-600">
+                                                    {{ comfyWorkflowState.error }}
+                                                </span>
+                                            </div>
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                必须是 API 格式（节点 id → 节点对象），不是 ComfyUI 画布的界面图格式。工作流的节点结构由你自己控制，插件只按下面的绑定改写其中几个输入。
+                                            </p>
+                                        </div>
+
+                                        <!-- 参数绑定 -->
+                                        <div class="generation-setting-card">
+                                            <label class="flex items-center justify-between gap-3 text-left cursor-pointer group mb-3">
+                                                <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                    自动识别参数节点
+                                                </span>
+                                                <div class="relative inline-flex flex-none items-center">
+                                                    <input type="checkbox" v-model="settings.comfyAutoDetect" class="settings-toggle-input sr-only">
+                                                    <div class="settings-toggle settings-toggle--teal"></div>
+                                                </div>
+                                            </label>
+                                            <div v-if="!comfyWorkflowState.ok" class="text-xs text-gray-400">
+                                                粘贴工作流后，这里会列出每个参数对应的节点与输入名。
+                                            </div>
+                                            <div v-else class="space-y-2">
+                                                <div v-for="role in comfyRoles" :key="role.value" class="grid grid-cols-3 gap-2 items-center">
+                                                    <span class="text-xs text-gray-600 font-medium">{{ role.label }}</span>
+                                                    <input :value="comfyBindingInputValue(role.value, 'nodeId')"
+                                                        @input="setComfyBinding(role.value, 'nodeId', $event.target.value)"
+                                                        type="text" placeholder="节点 id"
+                                                        class="bg-white border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:border-teal-400 focus:outline-none">
+                                                    <input :value="comfyBindingInputValue(role.value, 'input')"
+                                                        @input="setComfyBinding(role.value, 'input', $event.target.value)"
+                                                        type="text" placeholder="输入名"
+                                                        class="bg-white border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:border-teal-400 focus:outline-none">
+                                                </div>
+                                                <p class="text-xs text-gray-400 leading-relaxed pt-1">
+                                                    节点 id 与输入名见 ComfyUI 的 API 导出 JSON。留空表示「不控制该项」。
+                                                    自动识别开启时，填写的项会覆盖自动结果。
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <!-- 参数覆盖 -->
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">额外正向提示词（可选）</label>
+                                                <textarea v-model="settings.comfyPrompt" rows="2"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
+                                                    placeholder="追加在风格预设之后、AI 输出的画面标签之前"></textarea>
+                                            </div>
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">负面提示词（可选）</label>
+                                                <textarea v-model="settings.comfyNegativePrompt" rows="2"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
+                                                    placeholder="留空 = 不改工作流里的负面提示词（与 SD 的负面词互相独立）"></textarea>
+                                            </div>
+
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">采样步数（留空不覆盖）</label>
+                                                <input v-model="settings.comfySteps" type="number" min="1" max="150"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">CFG（留空不覆盖）</label>
+                                                <input v-model="settings.comfyCfg" type="number" min="0" max="30" step="0.5"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">采样器</label>
+                                                <custom-select v-model="settings.comfySampler" :options="comfySamplerOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">调度器</label>
+                                                <custom-select v-model="settings.comfyScheduler" :options="comfySchedulerOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">底模</label>
+                                                <custom-select v-model="settings.comfyCheckpoint" :options="comfyModelOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">VAE</label>
+                                                <custom-select v-model="settings.comfyVae" :options="comfyVaeOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                                    <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                        每次随机种子
+                                                    </span>
+                                                    <div class="relative inline-flex flex-none items-center">
+                                                        <input type="checkbox" v-model="settings.comfyRandomizeSeed" class="settings-toggle-input sr-only">
+                                                        <div class="settings-toggle settings-toggle--teal"></div>
+                                                    </div>
+                                                </label>
+                                                <input v-if="!settings.comfyRandomizeSeed" v-model="settings.comfySeed" type="number" min="0"
+                                                    class="mt-3 w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="固定种子">
+                                            </div>
+
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                                    <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                        用「生图比例」覆盖工作流尺寸
+                                                    </span>
+                                                    <div class="relative inline-flex flex-none items-center">
+                                                        <input type="checkbox" v-model="settings.comfyOverrideSize" class="settings-toggle-input sr-only">
+                                                        <div class="settings-toggle settings-toggle--teal"></div>
+                                                    </div>
+                                                </label>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    默认关闭：很多 ComfyUI 工作流（视频、放大、换脸）自带尺寸，乱改会跑坏。开启后按上面的「生图比例」写入宽高。
+                                                </p>
+                                                <div v-if="settings.comfyOverrideSize" class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">宽度（留空用比例值）</label>
+                                                        <input v-model="settings.comfyWidth" type="number" :min="sdSizeLimits.min" :max="sdSizeLimits.max" :step="sdSizeLimits.step"
+                                                            class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">高度（留空用比例值）</label>
+                                                        <input v-model="settings.comfyHeight" type="number" :min="sdSizeLimits.min" :max="sdSizeLimits.max" :step="sdSizeLimits.step"
+                                                            class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生成超时（秒）</label>
+                                                <input v-model.number="settings.comfyTimeout" type="number" min="30" max="7200"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">视频/大模型工作流请调大。</p>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                                    <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                        显示「取消生成」按钮
+                                                    </span>
+                                                    <div class="relative inline-flex flex-none items-center">
+                                                        <input type="checkbox" v-model="settings.comfyAllowCancel" class="settings-toggle-input sr-only">
+                                                        <div class="settings-toggle settings-toggle--teal"></div>
+                                                    </div>
+                                                </label>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    生成中在图片上出现取消按钮，点击后调用 ComfyUI 的 /interrupt 中断本次执行。
+                                                </p>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
