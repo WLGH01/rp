@@ -440,6 +440,26 @@ try {
     assertEqual('输入框里没变的键不影响指纹（qualityToggle 显式同值）',
         fp() === fp({ naiOfficialQualityToggle: true }), true);
 
+    // 第 51 条：切「分辨率」不是改参数，历史横图不该重跑（官方 API 会花 Anlas）。
+    assertEqual('官方分辨率 832x1216 → 1216x832：指纹不变',
+        fp() === fp({ naiOfficialResolution: '1216x832' }), true);
+    assertEqual('URL 里的 size/w/h 变化不影响指纹',
+        fp() === imageUtils2.resolveImageCacheFingerprint({
+            settings: baseSettings,
+            requestUrl: 'http://x/ai/generate-image?tag=1girl&provider=novelai-official&size=横图&w=1216&h=832'
+        }), true);
+    assertEqual('切成竖图后历史横图条目仍然复用',
+        imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp({ naiOfficialResolution: '1216x832' })), true);
+    assertEqual('老指纹（尺寸进了指纹的旧算法）升级后仍命中',
+        imageUtils2.shouldReuseCachedImageJob({
+            imageFingerprint: JSON.stringify({
+                provider: 'novelai-official',
+                baseUrl: '',
+                profile: imageUtils2.captureImageProfile(baseSettings),
+                request: { provider: 'novelai-official', size: '竖图', w: '832', h: '1216' }
+            })
+        }, fp()), true);
+
     // 复用判定：有指纹就要完全一致；老条目（没指纹）放行，避免升级后历史图全部重跑。
     assertEqual('指纹一致 → 复用缓存', imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp()), true);
     assertEqual('指纹不一致 → 不复用（重跑）',

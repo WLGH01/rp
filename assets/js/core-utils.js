@@ -1439,29 +1439,100 @@ window.RPHubUtils = {
     // 避免升级后把历史图片全部重跑（官方 API 会花 Anlas）。
     const IMAGE_CACHE_VOLATILE_PARAMS = Object.freeze(['tag', 'token', 'nocache', 't']);
 
+    // 只决定「画布多大」的字段与参数：它们**不进指纹**。
+    //
+    // 起因（第 51 条）：用户拿官方 API 出了一批横图，把分辨率切成竖图后，
+    // 前面那批横图被判成「参数变了」而全部重跑（官方 API 花 Anlas，而且是白花）。
+    // 比例是「接下来出多大」的意思，不是「把历史改写成竖图」的意思：
+    //   - 历史图按自己生成时的真实像素渲染（缓存条目里存着 width/height 与 sizeLabel）；
+    //   - 想按新比例重出某一张，点卡片右上角 ↻（走 fresh，绕过缓存重跑）；
+    //   - 新消息是新 tag，本来就会按当前比例生成。
+    // 因此这些字段留在「生图预设」里（切预设仍会带上），但一律不参与缓存复用判定。
+    const IMAGE_CACHE_SIZE_FIELDS = Object.freeze([
+        // 通用语义比例（网关 / SD / ComfyUI 的 w/h 都由它推出来）
+        'imageSize',
+        // NovelAI 官方 API：真正的画布尺寸来自分辨率档位或自定义宽高
+        'naiOfficialResolution', 'naiOfficialCustomSizeEnabled',
+        'naiOfficialCustomWidth', 'naiOfficialCustomHeight',
+        // SD 自定义分辨率
+        'sdCustomSizeEnabled', 'sdCustomWidth', 'sdCustomHeight',
+        // ComfyUI 尺寸覆盖
+        'comfyWidth', 'comfyHeight', 'comfyOverrideSize'
+    ]);
+    // 请求 URL 里同样代表画布尺寸的参数（各链路拼 URL 时都带上了）。
+    const IMAGE_CACHE_SIZE_PARAMS = Object.freeze(['size', 'w', 'h']);
+
+    // 键排序后的稳定序列化：老存档里的指纹是按「旧字段表 + 旧过滤规则」算出来的字符串，
+    // 升级后若直接比字符串，历史图会被判成「参数变了」而全部重跑一遍（正是这次要修的现象）。
+    // 所以比较前先把两边都归一化（解析 → 丢掉尺寸类字段 → 键排序 → 再比），
+    // 这样旧条目只需「本来就没变」就能继续命中缓存，不必为算法升级付一次全量重跑。
+    const canonicalizeFingerprintValue = (value) => {
+        if (Array.isArray(value)) return value.map(canonicalizeFingerprintValue);
+        if (value && typeof value === 'object') {
+            return Object.keys(value).sort().reduce((acc, key) => {
+                acc[key] = canonicalizeFingerprintValue(value[key]);
+                return acc;
+            }, {});
+        }
+        return value === undefined ? null : value;
+    };
+
+    const strippedFingerprint = (parsed) => {
+        if (!parsed || typeof parsed !== 'object') return parsed;
+        if (parsed.profile && typeof parsed.profile === 'object') {
+            IMAGE_CACHE_SIZE_FIELDS.forEach(field => { delete parsed.profile[field]; });
+        }
+        // 老版本的指纹里，URL 参数直接铺在顶层（没有 request 这一层包着）。
+        IMAGE_CACHE_SIZE_PARAMS.forEach(param => { delete parsed[param]; });
+        if (parsed.request && typeof parsed.request === 'object') {
+            IMAGE_CACHE_SIZE_PARAMS.forEach(param => { delete parsed.request[param]; });
+        }
+        return parsed;
+    };
+
+    const normalizedFingerprintCache = new Map();
+    const normalizeImageCacheFingerprint = (fingerprint) => {
+        const text = typeof fingerprint === 'string' ? fingerprint : JSON.stringify(fingerprint ?? '');
+        if (!text) return '';
+        if (normalizedFingerprintCache.has(text)) return normalizedFingerprintCache.get(text);
+        let normalized = text;
+        try {
+            normalized = JSON.stringify(canonicalizeFingerprintValue(strippedFingerprint(JSON.parse(text))));
+        } catch { /* 不是 JSON 就原样比较（理论上不会有） */ }
+        // 卡片数量有限，但给个上限避免长期停留时无限增长。
+        if (normalizedFingerprintCache.size < 500) normalizedFingerprintCache.set(text, normalized);
+        return normalized;
+    };
+
     const resolveImageCacheFingerprint = ({ settings = {}, requestUrl = '' } = {}) => {
+        const profile = captureImageProfile(settings);
+        IMAGE_CACHE_SIZE_FIELDS.forEach(field => { delete profile[field]; });
         const parts = {
             provider: settings.imageProvider || '',
             baseUrl: settings.imageGenBaseUrl || '',
-            profile: captureImageProfile(settings)
+            profile
         };
         if (requestUrl) {
             try {
                 // 请求 URL 里也带着一部分出图参数（网关的 steps/sampler/negative、SD 的 w/h）。
                 const params = [...new URL(requestUrl, 'http://localhost').searchParams.entries()]
-                    .filter(([key]) => !IMAGE_CACHE_VOLATILE_PARAMS.includes(key))
+                    .filter(([key]) => !IMAGE_CACHE_VOLATILE_PARAMS.includes(key)
+                        && !IMAGE_CACHE_SIZE_PARAMS.includes(key))
                     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
                 parts.request = Object.fromEntries(params);
             } catch { /* 非法 URL 就只按设置算指纹 */ }
         }
-        return JSON.stringify(parts);
+        // 归一化后返回：新老条目并存时，比较结果只取决于「真正影响画面的参数」。
+        return normalizeImageCacheFingerprint(parts);
     };
 
-    // 缓存条目能不能复用：没记指纹的老条目一律复用（升级兼容），有指纹就必须完全一致。
+    // 缓存条目能不能复用：没记指纹的老条目一律复用（升级兼容），有指纹就必须完全一致
+    // （「完全一致」= 归一化后一致，即尺寸类参数怎么变都算一致）。
     const shouldReuseCachedImageJob = (entry, fingerprint) => {
         if (!entry) return false;
         if (!entry.imageFingerprint) return true;
-        return entry.imageFingerprint === fingerprint;
+        return normalizeImageCacheFingerprint(entry.imageFingerprint)
+            === normalizeImageCacheFingerprint(fingerprint);
     };
 
 
@@ -2627,6 +2698,10 @@ window.RPHubUtils = {
 
     window.RPHubImageUtils = Object.freeze({
         IMAGE_PROFILE_FIELDS,
+        // 尺寸/比例类字段与 URL 参数：留在生图预设里，但不进缓存指纹。
+        IMAGE_CACHE_SIZE_FIELDS,
+        IMAGE_CACHE_SIZE_PARAMS,
+        normalizeImageCacheFingerprint,
         resolveNaiNegativePrompt,
         resolveImageCacheFingerprint,
         shouldReuseCachedImageJob,

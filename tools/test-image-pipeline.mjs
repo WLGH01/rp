@@ -1102,4 +1102,120 @@ assertTrue('File 以 markRaw 存入响应式数组（否则 FileReader 拒绝代
 assertTrue('不支持的格式列进列表并标注原因', characterPage.includes('不支持的格式（仅 .json / .png）'));
 assertTrue('导入完成后跳到刚导入的角色', characterPage.includes('currentCharacterIndex.value = lastImportedIndex'));
 
+// --- 15. 缓存指纹：切换比例/分辨率不算「参数变了」 ---
+// 线上现象（第 51 条）：用官方 API 出一批横图后把分辨率切成竖图，前面那批横图被判成
+// 「参数变了」而全部重跑（白花 Anlas）。根因是比例/尺寸类字段与 URL 里的 size/w/h
+// 也进了缓存指纹。这里把「尺寸不进指纹、其余参数照旧进」两件事都钉住。
+section('15) 缓存指纹：切换比例/分辨率不得让历史图重跑');
+
+const fpBase = {
+    imageProvider: 'novelai-official',
+    imageGenBaseUrl: '',
+    imageStyle: 'vertical',
+    customImageArtists: '',
+    imageModel: 'nai-diffusion-4-5-full',
+    imageSize: '横图',
+    naiOfficialModel: 'nai-diffusion-4-5-full',
+    naiOfficialResolution: '1216x832',
+    naiOfficialSteps: 28,
+    naiOfficialScale: 5,
+    naiOfficialSampler: 'k_euler_ancestral',
+    naiOfficialUcPreset: 4,
+    naiOfficialQualityToggle: false,
+    naiOfficialVarietyBoost: false,
+    naiOfficialNegativePrompt: '',
+    naiOfficialSeed: ''
+};
+const officialUrl = (size, w, h) => `http://x/ai/generate-image?tag=1girl&provider=novelai-official&size=${size}&w=${w}&h=${h}`;
+const fpOf = (patch = {}, url) => imageUtils.resolveImageCacheFingerprint({
+    settings: { ...fpBase, ...patch },
+    requestUrl: url || officialUrl('横图', 1216, 832)
+});
+const fpJson = (fingerprint) => JSON.parse(fingerprint);
+
+// 尺寸字段清单必须与「生图预设字段表」对得上：改名/删字段时这里会先炸。
+assertTrue('被排除的尺寸字段都还在生图预设字段表里（改名不会静默漏掉）',
+    imageUtils.IMAGE_CACHE_SIZE_FIELDS.every(field => imageUtils.IMAGE_PROFILE_FIELDS.includes(field)));
+assertTrue('比例仍留在生图预设里（切预设照样带比例）',
+    imageUtils.IMAGE_PROFILE_FIELDS.includes('imageSize')
+    && imageUtils.captureImageProfile(fpBase).naiOfficialResolution === '1216x832');
+assertTrue('尺寸字段确实不在指纹里（结构级）',
+    !fpJson(fpOf()).profile.imageSize
+    && !fpJson(fpOf()).profile.naiOfficialResolution
+    && !('w' in fpJson(fpOf()).request)
+    && !('size' in fpJson(fpOf()).request));
+assertEqual('URL 里其余参数仍然留下（provider）', fpJson(fpOf()).request.provider, 'novelai-official');
+assertEqual('网关 URL 的 steps 仍在指纹里',
+    fpJson(imageUtils.resolveImageCacheFingerprint({
+        settings: fpBase,
+        requestUrl: 'http://x/generate?tag=a&steps=40&size=横图&w=1216&h=832&sampler=k_euler'
+    })).request.steps, '40');
+
+// 用户场景：官方 API 横图（1216×832）→ 竖图（832×1216）
+const fpHorizontal = fpOf();
+const fpVertical = fpOf({ naiOfficialResolution: '832x1216' }, officialUrl('竖图', 832, 1216));
+assertEqual('官方分辨率 横→竖：指纹不变', fpHorizontal === fpVertical, true);
+assertEqual('切换后历史横图条目仍然复用（不重跑、不烧 Anlas）',
+    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: fpHorizontal }, fpVertical), true);
+assertEqual('通用「生图比例」横→竖：指纹不变', fpOf({ imageSize: '横图' }) === fpOf({ imageSize: '竖图' }), true);
+assertEqual('SD 自定义分辨率：指纹不变',
+    fpOf({ imageProvider: 'stable-diffusion', sdCustomWidth: 1216, sdCustomHeight: 832 })
+    === fpOf({ imageProvider: 'stable-diffusion', sdCustomWidth: 832, sdCustomHeight: 1216 }), true);
+assertEqual('ComfyUI 尺寸覆盖：指纹不变',
+    fpOf({ imageProvider: 'comfyui', comfyWidth: 1216, comfyHeight: 832, comfyOverrideSize: true })
+    === fpOf({ imageProvider: 'comfyui', comfyWidth: 832, comfyHeight: 1216, comfyOverrideSize: true }), true);
+
+// 但真正改变画面的参数必须照旧重跑，否则会退回第 43 条那个「改了参数却像没生效」。
+const fpChanged = [
+    ['负面提示词', { naiOfficialNegativePrompt: 'bad anatomy' }],
+    ['步数', { naiOfficialSteps: 40 }],
+    ['采样器', { naiOfficialSampler: 'k_euler' }],
+    ['模型', { naiOfficialModel: 'nai-diffusion-5-full' }],
+    ['画风', { imageStyle: 'r18' }],
+    ['生图方式', { imageProvider: 'novelai' }],
+    ['服务地址', { imageGenBaseUrl: 'http://elsewhere' }]
+];
+fpChanged.forEach(([label, patch]) => {
+    const changed = fpOf(patch);
+    assertEqual(`改了${label} → 指纹变化且不复用`,
+        imageUtils.shouldReuseCachedImageJob({ imageFingerprint: fpHorizontal }, changed), false);
+});
+assertEqual('URL 里的 steps 变化 → 不复用',
+    imageUtils.shouldReuseCachedImageJob(
+        { imageFingerprint: imageUtils.resolveImageCacheFingerprint({ settings: fpBase, requestUrl: 'http://x/generate?tag=a&steps=40' }) },
+        imageUtils.resolveImageCacheFingerprint({ settings: fpBase, requestUrl: 'http://x/generate?tag=a&steps=28' })
+    ), false);
+
+// 升级兼容：老存档里的指纹是「带尺寸字段」的旧算法算出来的字符串，
+// 直接比字符串会让升级后历史图全部重跑一次，所以比较前两边都要归一化。
+const legacyFingerprint = JSON.stringify({
+    provider: 'novelai-official',
+    baseUrl: '',
+    profile: {
+        ...imageUtils.captureImageProfile(fpBase)
+    },
+    request: { provider: 'novelai-official', size: '横图', w: '1216', h: '832' }
+});
+assertEqual('老指纹（带尺寸字段）在新比例下仍然命中',
+    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: legacyFingerprint }, fpVertical), true);
+const legacyChanged = JSON.stringify({
+    provider: 'novelai-official',
+    baseUrl: '',
+    profile: { ...imageUtils.captureImageProfile({ ...fpBase, naiOfficialSteps: 40 }) },
+    request: { provider: 'novelai-official', size: '横图', w: '1216', h: '832' }
+});
+assertEqual('老指纹里真正变了的参数仍然判为不复用',
+    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: legacyChanged }, fpVertical), false);
+const shuffledKeys = JSON.stringify({
+    baseUrl: '',
+    profile: Object.fromEntries(Object.entries(imageUtils.captureImageProfile(fpBase)).reverse()),
+    request: { h: '832', size: '横图', w: '1216', provider: 'novelai-official' },
+    provider: 'novelai-official'
+});
+assertEqual('键顺序不影响比较结果（老存档字段顺序可能不同）',
+    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: shuffledKeys }, fpVertical), true);
+assertEqual('没有指纹的老条目仍然放行（升级不重跑）',
+    imageUtils.shouldReuseCachedImageJob({ status: 'done', imageUrl: 'x' }, fpVertical), true);
+assertEqual('非 JSON 指纹不会炸，也不会误判', imageUtils.shouldReuseCachedImageJob({ imageFingerprint: 'v1' }, 'v1'), true);
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);
