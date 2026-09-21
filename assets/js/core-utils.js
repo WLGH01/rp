@@ -1112,9 +1112,13 @@ window.RPHubUtils = {
                 sampler: 'k_dpmpp_2m_sde',
                 noiseSchedule: 'karras'
             }),
-            // 网关当前使用的默认负面词（原样取自 nai.sta1n.cn/api/settings 的 defaultNegative）。
-            naiGatewayDefaultNegative: '{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,{{poorly drawn hands}},signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality',
+            // 默认负面词：网关历史值（就是原来硬编码在生图 URL 里的那条，含 ink eyes/owres/uta 等残字）。
+            // 网关与官方共用同一份，两边默认就发同一段文本，避免「配置看起来一样、出图不一样」。
+            naiDefaultNegative: '{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}',
             // 网关采样器：value 必须用官方采样器 id（网关原样转给 NovelAI）。
+            // 上一版（提交 5fe9b75）的默认值：网关服务端的「干净版」。仅在加载设置时做一次性比对，
+            // 命中就清空该字段（= 用内置默认），用户自己写过的文本不受影响。
+            naiLegacyCleanNegative: '{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},mutated hands,{{{mutation}}},normal quality,poorly drawn face,{{poorly drawn hands}},signature,text,{{too many fingers}},{{{ugly}}},username,watermark,worst quality',
             naiGatewaySamplers: Object.freeze([
                 { value: 'k_dpmpp_2m_sde', label: 'DPM++ 2M SDE（网关默认）' },
                 { value: 'k_dpmpp_2m', label: 'DPM++ 2M' },
@@ -1539,6 +1543,13 @@ window.RPHubUtils = {
             entries[tag] = entry;
         }
         return { entries, dropped };
+    };
+
+    // 两条 NAI 链路（RP Hub 网关 / 官方 API）共用的负面词取值：
+    // 留空 = 用内置默认（网关历史值），这与 SD 面板「留空用内置默认」的语义一致。
+    const resolveNaiNegativePrompt = (value) => {
+        const text = String(value ?? '').trim();
+        return text || String(window.RPHubConfig?.uiOptions?.naiDefaultNegative || '');
     };
 
     // ===== NAI（RP Hub 网关）出图参数写回生图 URL =====
@@ -2616,6 +2627,7 @@ window.RPHubUtils = {
 
     window.RPHubImageUtils = Object.freeze({
         IMAGE_PROFILE_FIELDS,
+        resolveNaiNegativePrompt,
         resolveImageCacheFingerprint,
         shouldReuseCachedImageJob,
         applyNaiGatewayUrlParams,

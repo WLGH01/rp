@@ -641,7 +641,7 @@ const app = createApp({
             // 两次都不成就直接失败，用户在卡片上手动点「重新生成」即可。
             naiOfficialRetryMax: 2,
             naiOfficialRetryDelays: '3,5',
-            // 官方负面提示词（除了 ucPreset 之外的附加内容，留空则只用预设）。
+            // 官方负面提示词：留空 = 用内置默认（与网关同一份文本）。
             naiOfficialNegativePrompt: '',
             // 种子：留空 = 每次随机（官方语义 seed 0 由后端随机）。
             naiOfficialSeed: '',
@@ -669,7 +669,8 @@ const app = createApp({
             naiGatewayNoiseSchedule: 'karras',
             // 默认与网关当前使用的默认负面词逐字一致；要两边完全对齐，就把同一段文本
             // 分别贴到「NAI 网关负面提示词」和官方面板的「附加负面提示词」。
-            naiGatewayNegativePrompt: window.RPHubConfig?.uiOptions?.naiGatewayDefaultNegative || '',
+            // 默认与内置默认负面词一致（网关与官方共用同一份，保证两边发出去的文本相同）。
+            naiGatewayNegativePrompt: window.RPHubConfig?.uiOptions?.naiDefaultNegative || '',
             imageGenCount: 2,
             // --- Stable Diffusion（Forge / A1111 sdapi）专用 ---
             // 底模：留空表示用服务端当前已加载的模型。
@@ -2045,8 +2046,16 @@ let removedProviderConfigCleared = false;
                 settings.naiGatewayCfg = Math.max(0, Math.min(1, Number(settings.naiGatewayCfg) || gatewayDefaults.cfg || 0));
                 settings.naiGatewaySampler = String(settings.naiGatewaySampler || gatewayDefaults.sampler || 'k_dpmpp_2m_sde');
                 settings.naiGatewayNoiseSchedule = String(settings.naiGatewayNoiseSchedule || gatewayDefaults.noiseSchedule || 'karras');
-                // 留空 = 用网关自己的默认负面词（不往 URL 里塞空值）。
+                // 留空 = 用内置默认负面词（不往 URL 里塞空值）。
                 settings.naiGatewayNegativePrompt = String(settings.naiGatewayNegativePrompt ?? '');
+                // 一次性迁移：上一版的默认值是网关服务端的「干净版」，这一版两条链路统一用内置默认。
+                // 只把「恰好等于上一版默认值」的当作用户没自定义过 → 清空（即落到新默认）；
+                // 用户自己写过的文本一律不动。
+                const legacyCleanNegative = window.RPHubConfig?.uiOptions?.naiLegacyCleanNegative || '';
+                if (legacyCleanNegative) {
+                    if (settings.naiGatewayNegativePrompt === legacyCleanNegative) settings.naiGatewayNegativePrompt = '';
+                    if (settings.naiOfficialNegativePrompt === legacyCleanNegative) settings.naiOfficialNegativePrompt = '';
+                }
                 settings.naiOfficialCustomSizeEnabled = settings.naiOfficialCustomSizeEnabled === true;
                 settings.naiOfficialSeed = String(settings.naiOfficialSeed ?? '');
                 // 官方专属的密钥：老存档没有这个键，收敛成字符串即可。
@@ -3484,11 +3493,9 @@ let removedProviderConfigCleared = false;
         const naiOfficialIsFree = computed(() => naiOfficialUtils.isNaiOfficialFreeTier(settings));
         const naiOfficialFreeHint = computed(() => naiOfficialUtils.describeNaiOfficialFreeStatus(settings));
 
-        // 负面提示词：官方是 ucPreset 档位 + 附加文本，这里把附加文本拼上角色级通用负面词。
-        const buildNaiOfficialNegative = () => {
-            const extra = String(settings.naiOfficialNegativePrompt || '').trim();
-            return extra;
-        };
+        // 负面提示词：官方是 ucPresetId 档位 + 附加文本，这里给的是附加文本。
+        // 留空 = 用内置默认（与网关同一份），这样两条链路默认发出去的就是同一段负面词。
+        const buildNaiOfficialNegative = () => imageUtils.resolveNaiNegativePrompt(settings.naiOfficialNegativePrompt);
 
         // 正向提示词：风格画师串 → 额外前缀 → 角色标签（与其余链路同一套拼装口径）。
         const buildNaiOfficialPrompt = (tags) => {
@@ -3521,8 +3528,8 @@ let removedProviderConfigCleared = false;
             if (value === '' || value === null || value === undefined) return naiGatewayDefaults[key] ?? '';
             return value;
         };
-        // 留空 = 交给网关自己的默认负面词（不往 URL 里塞空值）。
-        const naiGatewayNegative = () => String(settings.naiGatewayNegativePrompt || '').trim();
+        // 留空 = 用内置默认负面词（与官方那条是同一份文本）。
+        const naiGatewayNegative = () => imageUtils.resolveNaiNegativePrompt(settings.naiGatewayNegativePrompt);
 
         // 调用官方 API 生成一张图。
         // onProgress 用「已接收字节 / 总字节」估算——官方一次性返回 ZIP，没有服务端进度可查。

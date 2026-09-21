@@ -1852,10 +1852,10 @@
                                             <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">负面提示词（网关）</label>
                                             <textarea v-model="settings.naiGatewayNegativePrompt" rows="3"
                                                 class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
-                                                placeholder="留空 = 用网关自己的默认负面词"></textarea>
+                                                placeholder="留空 = 用内置默认负面词（与官方那条同一份）"></textarea>
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                这里是写进生图 URL 的 <code class="px-1 rounded bg-amber-50">negative</code> 参数，默认已填上网关当前使用的默认负面词。
-                                                它与官方面板的「附加负面提示词」是两套：<span class="font-bold">要让两边完全一致，就把同一段文本分别贴到这两处</span>。
+                                                这里是写进生图 URL 的 <code class="px-1 rounded bg-amber-50">negative</code> 参数，留空即用内置默认。
+                                                它与官方面板的「附加负面提示词」共用同一份默认文本；<span class="font-bold">要让两边完全一致，两处都留空（或贴同一段文本）即可</span>。
                                             </p>
                                         </div>
 
@@ -2215,9 +2215,10 @@
                                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">附加负面提示词（可选）</label>
                                                 <textarea v-model="settings.naiOfficialNegativePrompt" rows="2"
                                                     class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
-                                                    placeholder="留空则只用上面的 UC 预设"></textarea>
+                                                    placeholder="留空 = 用内置默认负面词（与网关那条同一份）"></textarea>
                                                 <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                    官方把负面词拆成「UC 预设档位 + 附加文本」两部分，这里填的是附加部分。
+                                                    官方把负面词拆成「UC 预设档位 + 附加文本」两部分，这里填的是附加部分；
+                                                    留空即用内置默认，与网关的负面提示词是同一份文本。
                                                 </p>
                                             </div>
 

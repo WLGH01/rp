@@ -903,9 +903,24 @@ assertEqual('网关默认 scale 6', gatewayDefaults.scale, 6);
 assertEqual('网关默认 cfg 0', gatewayDefaults.cfg, 0);
 assertEqual('网关默认采样器 k_dpmpp_2m_sde', gatewayDefaults.sampler, 'k_dpmpp_2m_sde');
 assertEqual('网关默认噪声计划 karras', gatewayDefaults.noiseSchedule, 'karras');
-assertTrue('网关默认负面词与网关当前默认一致（带权重语法）',
-    /^\{\{\{\{bad anatomy\}\}\}\}/.test(sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaultNegative)
-    && /worst quality$/.test(sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaultNegative));
+// 默认负面词：两条链路（网关 / 官方）共用同一份，就是原来硬编码在网关 URL 里的旧值。
+const defaultNegative = sandbox.window.RPHubConfig.uiOptions.naiDefaultNegative;
+assertTrue('内置默认负面词仍是旧值（含 owres/uta 等残字与手型词）',
+    /^\{\{\{\{bad anatomy\}\}\}\}/.test(defaultNegative)
+    && defaultNegative.includes('owres')
+    && defaultNegative.includes('uta')
+    && /\{shaka sign\}$/.test(defaultNegative));
+assertEqual('默认负面词词数 53', defaultNegative.split(',').length, 53);
+assertTrue('上一版干净版仍作为一次性迁移比对常量保留',
+    sandbox.window.RPHubConfig.uiOptions.naiLegacyCleanNegative !== defaultNegative
+    && sandbox.window.RPHubConfig.uiOptions.naiLegacyCleanNegative.includes('worst quality'));
+// 留空 = 用内置默认；写了就用写的（两条链路共用同一个取值函数）
+assertEqual('留空 → 内置默认', imageUtils.resolveNaiNegativePrompt(''), defaultNegative);
+assertEqual('只有空白 → 内置默认', imageUtils.resolveNaiNegativePrompt('   '), defaultNegative);
+assertEqual('undefined → 内置默认', imageUtils.resolveNaiNegativePrompt(undefined), defaultNegative);
+assertEqual('自定义文本原样使用', imageUtils.resolveNaiNegativePrompt(' my-neg '), 'my-neg');
+assertEqual('默认值本身原样使用', imageUtils.resolveNaiNegativePrompt(defaultNegative), defaultNegative);
+
 assertTrue('网关采样器下拉有 k_dpmpp_2m_sde',
     sandbox.window.RPHubConfig.uiOptions.naiGatewaySamplers.some(item => item.value === 'k_dpmpp_2m_sde'));
 // 这些参数决定画面，必须进「生图预设」字段表（同时也是缓存指纹的一部分）。
