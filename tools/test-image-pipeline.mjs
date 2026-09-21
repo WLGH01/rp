@@ -874,15 +874,19 @@ assertTrue('端点用 /ai/generate-image', appSource.includes('/ai/generate-imag
 assertTrue('鉴权用 Bearer（不是 URL token）', /'Authorization':\s*`Bearer \$\{token\}`/.test(appSource));
 assertTrue('探活用 /user/subscription', appSource.includes('/user/subscription'));
 assertTrue('官方 token 可回落到通用密钥', appSource.includes('settings.naiOfficialToken || settings.imageGenKey'));
-// 官方密钥与地址是「自定义」的：独立字段、独立优先级，不与网关那套互相覆盖。
+// 密钥是独立的（不与网关那套互相覆盖）；地址则**只有一个**，与其余生图方式共用通用字段。
 assertTrue('官方有独立密钥字段', appSource.includes('naiOfficialToken:'));
-assertTrue('官方有独立地址字段', appSource.includes('naiOfficialBaseUrl:'));
-assertTrue('官方专属地址优先于通用地址',
-    /const dedicated = normalizeServiceBaseUrl\(settings\.naiOfficialBaseUrl\)[\s\S]{0,220}normalizeServiceBaseUrl\(settings\.imageGenBaseUrl\)/.test(appSource));
 assertTrue('index.html 暴露官方密钥输入框', comfyIndexSource.includes('settings.naiOfficialToken'));
-assertTrue('index.html 暴露官方地址输入框', comfyIndexSource.includes('settings.naiOfficialBaseUrl'));
-assertTrue('官方地址随预设保存（换预设即换通道）',
-    imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialBaseUrl'));
+// 两个地址框功能完全一样，已合并成一个：官方地址只从通用字段取，留空用官方默认。
+assertTrue('官方地址只从通用字段解析（不再有专属地址字段）',
+    /const naiOfficialBaseUrl = \(\) => \{[\s\S]{0,260}normalizeServiceBaseUrl\(settings\.imageGenBaseUrl\)/.test(appSource));
+assertTrue('官方不再暴露专属地址输入框', !comfyIndexSource.includes('settings.naiOfficialBaseUrl'));
+assertTrue('官方专属地址不再进预设字段', !imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialBaseUrl'));
+assertTrue('历史遗留的专属地址键被清理', appSource.includes('delete settings.naiOfficialBaseUrl'));
+// 尺寸只有一个来源：官方用「分辨率」档位，通用的「生图比例」在官方下隐藏（避免两个控件打架）。
+assertTrue('官方下隐藏通用「生图比例」',
+    /<!-- Image Size[\s\S]{0,400}v-if="!isNaiOfficialProvider"[\s\S]{0,400}settings\.imageSize/.test(comfyIndexSource));
+assertTrue('官方「分辨率」仍在', comfyIndexSource.includes('naiOfficialResolutionOptions'));
 // 密钥不该随预设走
 assertTrue('官方 token 不随生图预设保存（避免切预设换密钥）',
     !imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialToken'));
@@ -898,6 +902,49 @@ assertTrue('免费判定走纯函数（不在模板里重算）',
     appSource.includes('naiOfficialUtils.isNaiOfficialFreeTier'));
 // 归档 model 要区分官方 API
 assertTrue('归档 model 区分官方 API', /isNaiOfficialProvider\.value[\s\S]{0,120}naiOfficialModel/.test(appSource));
+
+section('12h) 官方 API：账户额度（订阅等级 / 试用张数 / 训练步数）');
+// 前提事实：官方公开 API 不返回 Anlas。断言我们确实没有去请求一个不存在的端点/字段，
+//（注释里出现「Anlas」是在说明这件事，所以只查是否真的去读了该字段或打了该路径）。
+assertTrue('app.js 没有请求 Anlas 端点',
+    !/[`'"][^`'"]*\/anlas/i.test(appSource) && !/\.anlas\b/i.test(appSource));
+assertTrue('官方账户查询用 /user/subscription', appSource.includes('${baseUrl}/user/subscription'));
+assertTrue('官方账户查询用 /user/information', appSource.includes('${baseUrl}/user/information'));
+
+const acct = naiOff.resolveNaiOfficialAccount({
+    subscription: {
+        tier: 3, active: true, expiresAt: 1789000000000,
+        trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 }
+    },
+    information: { trialImagesLeft: 27, trialActionsLeft: 100 }
+});
+assertEqual('Opus 档位标签', acct.tierLabel, 'Opus');
+assertEqual('订阅生效', acct.active, true);
+assertEqual('到期时间保留', acct.expiresAt, 1789000000000);
+assertEqual('试用剩余张数', acct.trialImagesLeft, 27);
+assertEqual('训练步数为两者之和', acct.trainingStepsLeft, 35);
+assertEqual('已购训练步数分开记', acct.purchasedTrainingSteps, 5);
+
+assertEqual('免费试用档（tier 0）标签', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 0 } }).tierLabel, '免费试用（Paper）');
+assertEqual('Tablet 档', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 1 } }).tierLabel, 'Tablet');
+assertEqual('Scroll 档', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 2 } }).tierLabel, 'Scroll');
+assertEqual('未知档位有兜底', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 9 } }).tierLabel, '等级 9');
+// 缺字段不能崩，且不能编造数字
+const partialAcct = naiOff.resolveNaiOfficialAccount({ subscription: { tier: 3 } });
+assertEqual('缺 trainingStepsLeft 时步数为 0', partialAcct.trainingStepsLeft, 0);
+assertEqual('缺 trialImagesLeft 时为 null（不假装是 0）', partialAcct.trialImagesLeft, null);
+assertEqual('expiresAt 缺失时为 null', partialAcct.expiresAt, null);
+assertEqual('完全空响应返回 null', naiOff.resolveNaiOfficialAccount({}), null);
+assertEqual('null 入参安全', naiOff.resolveNaiOfficialAccount(null), null);
+// expiresAt 为 0（免费档常见）不该显示成 1970 年
+assertEqual('expiresAt=0 视为无到期时间', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 0, expiresAt: 0 } }).expiresAt, null);
+
+const label = naiOff.describeNaiOfficialAccount(acct);
+assertTrue('额度文案含档位', /Opus/.test(label));
+assertTrue('额度文案含试用张数', /试用剩余 27 张/.test(label));
+assertTrue('额度文案含训练步数', /训练步数 35/.test(label));
+assertEqual('空账户文案为空串', naiOff.describeNaiOfficialAccount(null), '');
+assertTrue('订阅未生效时会点明', /订阅未生效/.test(naiOff.describeNaiOfficialAccount({ tierLabel: 'Opus', active: false, trialImagesLeft: null, trainingStepsLeft: 0 })));
 
 // --- 13. 夜间模式（移植自上游 1.9.6，1.9.7 优化观感）---
 // 主题必须是「零依赖 + 样式前同步执行」，否则深色下会闪白。

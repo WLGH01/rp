@@ -91,7 +91,32 @@ http.createServer(async (request, response) => {
     if (p === '/user/subscription') {
         requests.push({ kind: 'subscription', auth: auth ? 'present' : 'missing' });
         if (!auth.startsWith('Bearer ')) return json(response, 401, { statusCode: 401, message: 'Unauthorized' });
-        return json(response, 200, { tier: 3, active: true, trainingStepsLeft: { fixedTrainingStepsLeft: 0, purchasedTrainingSteps: 0 } });
+        return json(response, 200, {
+            tier: 3,
+            active: true,
+            expiresAt: 1789000000000,
+            perks: { maxPriorityActions: 30, startPriority: 30, contextTokens: 8192, unlimitedMaxPriority: true, moduleTrainingSteps: 30 },
+            trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 }
+        });
+    }
+
+    // 账户信息端点：免费试用剩余张数在这里（官方把额度拆在 subscription / information 两处）
+    if (p === '/user/information') {
+        requests.push({ kind: 'information', auth: auth ? 'present' : 'missing' });
+        if (!auth.startsWith('Bearer ')) return json(response, 401, { statusCode: 401, message: 'Unauthorized' });
+        return json(response, 200, {
+            emailVerified: true,
+            emailVerificationLetterSent: false,
+            hasPlaintextEmail: true,
+            plaintextEmail: 'mock@example.com',
+            allowMarketingEmails: false,
+            trialActivated: true,
+            trialActionsLeft: 100,
+            trialImagesLeft: 27,
+            accountCreatedAt: 1700000000000,
+            banStatus: 'None',
+            banMessage: ''
+        });
     }
 
     if (p === '/ai/generate-image' && request.method === 'POST') {

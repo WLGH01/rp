@@ -619,8 +619,6 @@ const app = createApp({
             // 官方 access token（pst 开头），走 Authorization: Bearer。
             // 与通用 imageGenKey 分开存：两套 NAI 方式各用各的密钥，互不覆盖。
             naiOfficialToken: '',
-            // 官方接口地址：留空用 https://image.novelai.net；填中转/反代即可自定义通道。
-            naiOfficialBaseUrl: '',
             naiOfficialModel: 'nai-diffusion-5-full',
             // 分辨率档位：默认选竖图 832×1216（1MP 以内，Opus 免费）。
             naiOfficialResolution: '832x1216',
@@ -2012,9 +2010,10 @@ let removedProviderConfigCleared = false;
                 settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost !== false;
                 settings.naiOfficialCustomSizeEnabled = settings.naiOfficialCustomSizeEnabled === true;
                 settings.naiOfficialSeed = String(settings.naiOfficialSeed ?? '');
-                // 官方专属的密钥与地址：老存档没有这两个键，收敛成字符串即可。
+                // 官方专属的密钥：老存档没有这个键，收敛成字符串即可。
                 settings.naiOfficialToken = String(settings.naiOfficialToken ?? '');
-                settings.naiOfficialBaseUrl = String(settings.naiOfficialBaseUrl ?? '');
+                // 早期版本曾有一个「官方专属地址」字段，现已合并到通用 imageGenBaseUrl；清掉残留。
+                delete settings.naiOfficialBaseUrl;
                 if (!(window.RPHubConfig?.uiOptions?.novelaiOfficialResolutions || []).some(item => item.value === settings.naiOfficialResolution)) {
                     settings.naiOfficialResolution = '832x1216';
                 }
@@ -3416,11 +3415,9 @@ let removedProviderConfigCleared = false;
         //   4. 参数（含 V4/V5 的 v4_prompt 结构）全部在 parameters 里
         // 因为没有轮询，进度只能用「读取响应的字节数」近似——见 fetch 的 onProgress。
 
-        // 官方接口地址优先级：官方专属地址 → 通用生图地址 → 官方默认。
-        // 专属地址在前，这样两套 NAI 方式可以各指各的通道（例如网关填 sta1n、官方填自己的中转）。
+        // 官方接口地址：与其余生图方式共用「生图接口地址」这一个字段（不再单独设一个，
+        // 两个框功能完全一样，且只有通用字段会被预设保存）。留空即用官方默认。
         const naiOfficialBaseUrl = () => {
-            const dedicated = normalizeServiceBaseUrl(settings.naiOfficialBaseUrl);
-            if (dedicated) return dedicated;
             const configured = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
             return configured || (window.RPHubConfig?.uiOptions?.novelaiOfficialBaseUrl || 'https://image.novelai.net');
         };
@@ -3533,6 +3530,72 @@ let removedProviderConfigCleared = false;
                 seed: payload.parameters.seed
             };
         };
+
+        // 官方账户/额度查询。
+        // 注意：官方公开 API 不返回 Anlas 余额（详见 core-utils 的说明），
+        // 因此这里查的是官方真正给得出的项：订阅等级、是否生效、到期时间、
+        // 免费试用剩余张数、模块训练步数剩余。
+        const naiOfficialAccount = reactive({
+            loaded: false,
+            loading: false,
+            error: '',
+            data: null
+        });
+
+        const fetchNaiOfficialAccount = async (isManual = false) => {
+            if (!isNaiOfficialProvider.value) {
+                if (isManual) showToast('请先切换到「NovelAI 官方 API」', 'warning');
+                return { ok: false };
+            }
+            const token = naiOfficialToken();
+            if (!token) {
+                if (isManual) showToast('请先填写官方 Access Token', 'warning');
+                return { ok: false };
+            }
+            naiOfficialAccount.loading = true;
+            naiOfficialAccount.error = '';
+            try {
+                const baseUrl = naiOfficialBaseUrl();
+                const headers = { 'Authorization': `Bearer ${token}` };
+                // 两个端点各管一半信息：订阅档位在 subscription，试用张数在 information。
+                const [subRes, infoRes] = await Promise.all([
+                    fetch(`${baseUrl}/user/subscription`, { headers }),
+                    fetch(`${baseUrl}/user/information`, { headers })
+                ]);
+                if (subRes.status === 401 || infoRes.status === 401) {
+                    throw new Error('鉴权失败（401）：token 不正确或已过期');
+                }
+                if (subRes.status === 402) {
+                    throw new Error('需要有效订阅（402）');
+                }
+                const subscription = subRes.ok ? await subRes.json().catch(() => null) : null;
+                const information = infoRes.ok ? await infoRes.json().catch(() => null) : null;
+                if (!subscription && !information) {
+                    throw new Error(`查询失败（HTTP ${subRes.status}/${infoRes.status}）`);
+                }
+                const data = naiOfficialUtils.resolveNaiOfficialAccount({ subscription, information });
+                naiOfficialAccount.data = data;
+                naiOfficialAccount.loaded = true;
+                if (isManual) {
+                    showToast(`已获取账户信息：${naiOfficialUtils.describeNaiOfficialAccount(data)}`, 'success');
+                }
+                return { ok: true, data };
+            } catch (error) {
+                naiOfficialAccount.error = error.message || '查询失败';
+                naiOfficialAccount.loaded = false;
+                if (isManual) showToast(`查询账户信息失败：${error.message}`, 'error');
+                return { ok: false, error: naiOfficialAccount.error };
+            } finally {
+                naiOfficialAccount.loading = false;
+            }
+        };
+
+        // 给界面直接用的文案（等级 · 试用剩余 N 张 · 训练步数）。
+        const naiOfficialAccountLabel = computed(() => {
+            if (naiOfficialAccount.error) return naiOfficialAccount.error;
+            if (!naiOfficialAccount.loaded) return '';
+            return naiOfficialUtils.describeNaiOfficialAccount(naiOfficialAccount.data);
+        });
 
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
             const request = new URL(requestUrl, window.location.href);
@@ -5115,6 +5178,8 @@ let removedProviderConfigCleared = false;
             checkApiStatus();
             checkImageGenStatus();
             fetchQuota();
+            // 官方方式顺带把账户额度一起刷新（同一个 token、同一台服务）。
+            if (isNaiOfficialProvider.value) fetchNaiOfficialAccount(false);
         };
 
         const createAbortReason = (message = 'Operation aborted') => {
@@ -9910,6 +9975,7 @@ let removedProviderConfigCleared = false;
             // 生图方式与 ComfyUI 专用
             isComfyProvider, isNaiProvider, isNaiOfficialProvider,
             naiOfficialSize, naiOfficialSizeLabel, naiOfficialIsFree, naiOfficialFreeHint,
+            naiOfficialAccount, naiOfficialAccountLabel, fetchNaiOfficialAccount,
             naiOfficialModelOptions, naiOfficialResolutionOptions, naiOfficialSamplerOptions,
             naiOfficialNoiseScheduleOptions, naiOfficialUcPresetOptions,
             naiOfficialSizeLimits, naiOfficialFreeSteps,

@@ -216,6 +216,37 @@ try {
     section('7) 探活端点可用');
     const sub = await fetch(`${base}/user/subscription`, { headers: { Authorization: 'Bearer t' } });
     assertEqual('带 token 时 200', sub.status, 200);
+
+    section('8) 账户额度查询（订阅等级 / 试用张数 / 训练步数）');
+    // 复刻 app.js 的 fetchNaiOfficialAccount：两个端点并行取，再交给纯函数整理。
+    const accountOf = async (token = 'pst-test-token') => {
+        const headers = { Authorization: `Bearer ${token}` };
+        const [subRes, infoRes] = await Promise.all([
+            fetch(`${base}/user/subscription`, { headers }),
+            fetch(`${base}/user/information`, { headers })
+        ]);
+        if (subRes.status === 401 || infoRes.status === 401) throw new Error('鉴权失败（401）');
+        const subscription = subRes.ok ? await subRes.json().catch(() => null) : null;
+        const information = infoRes.ok ? await infoRes.json().catch(() => null) : null;
+        return nai.resolveNaiOfficialAccount({ subscription, information });
+    };
+
+    const account = await accountOf();
+    assertEqual('档位识别为 Opus', account.tierLabel, 'Opus');
+    assertEqual('订阅生效', account.active, true);
+    assertEqual('试用剩余张数取到', account.trialImagesLeft, 27);
+    assertEqual('训练步数为固定+已购', account.trainingStepsLeft, 35);
+    assertTrue('额度文案可直接展示', /Opus/.test(nai.describeNaiOfficialAccount(account)));
+
+    // 无 token 时必须报错，不能静默返回空数据
+    let noAuth = '';
+    try { await accountOf(''); } catch (e) { noAuth = e.message; }
+    assertTrue('无 token 时明确报鉴权失败', /401/.test(noAuth));
+
+    // 两个端点都要带鉴权
+    const seenAcct = await (await fetch(`${base}/__requests`)).json();
+    const infoReq = seenAcct.filter(r => r.kind === 'information').pop();
+    assertTrue('information 端点带上了 Bearer', infoReq?.auth === 'present');
 } catch (error) {
     failures += 1;
     checks += 1;

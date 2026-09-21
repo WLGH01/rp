@@ -1389,7 +1389,7 @@ window.RPHubUtils = {
         // NovelAI 官方 API：出图参数随预设走。
         // 刻意不含 naiOfficialToken —— 鉴权信息统一由 imageGenKey 管理，
         // 放进 profile 会让切预设时静默换掉密钥。
-        'naiOfficialBaseUrl',
+        // 地址也只有一个（通用 imageGenBaseUrl），由预设的 url 字段承载。
         'naiOfficialModel', 'naiOfficialResolution',
         'naiOfficialCustomSizeEnabled', 'naiOfficialCustomWidth', 'naiOfficialCustomHeight',
         'naiOfficialSteps', 'naiOfficialScale', 'naiOfficialSampler', 'naiOfficialNoiseSchedule',
@@ -2130,7 +2130,58 @@ window.RPHubUtils = {
         return `data:image/png;base64,${btoa(binary)}`;
     };
 
+    // 官方订阅等级（来自官方库的 SubscriptionTier 枚举）：0=PAPER 是免费试用档。
+    const NAI_OFFICIAL_TIER_LABELS = Object.freeze(['免费试用（Paper）', 'Tablet', 'Scroll', 'Opus']);
+
+    // 把官方账户接口的响应整理成可直接显示的形态。
+    //
+    // 【重要事实】NovelAI 官方公开 API **不返回 Anlas 余额**：
+    // swagger 里 anlas 出现 0 次，/user/subscription 与 /user/information 的 schema
+    // 都没有该字段；维护中的社区实现也只把 Anlas 当「会被扣」的概念，从不查询余额。
+    // 所以这里展示官方**真正给得出**的额度信息，不编造 Anlas：
+    //   订阅等级 / 是否生效 / 到期时间 / 试用剩余张数 / 模块训练步数剩余
+    const resolveNaiOfficialAccount = (payload) => {
+        // 注意默认参数只对 undefined 生效，传 null 会在解构时抛错——这里统一收口。
+        const source = (payload && typeof payload === 'object') ? payload : {};
+        const sub = (source.subscription && typeof source.subscription === 'object') ? source.subscription : null;
+        const info = (source.information && typeof source.information === 'object') ? source.information : null;
+        if (!sub && !info) return null;
+        const tierRaw = Number(sub?.tier);
+        const tier = Number.isFinite(tierRaw) ? tierRaw : null;
+        const steps = sub?.trainingStepsLeft || {};
+        const fixed = Number(steps.fixedTrainingStepsLeft) || 0;
+        const purchased = Number(steps.purchasedTrainingSteps) || 0;
+        const expiry = Number(sub?.expiresAt);
+        const trial = Number(info?.trialImagesLeft);
+        const trialActions = Number(info?.trialActionsLeft);
+        return {
+            tier,
+            tierLabel: tier === null ? '未知' : (NAI_OFFICIAL_TIER_LABELS[tier] || `等级 ${tier}`),
+            active: sub?.active === true,
+            expiresAt: Number.isFinite(expiry) && expiry > 0 ? expiry : null,
+            // 免费试用剩余张数：对应官方 FAQ 里「注册送 30 张（≤1024×1024）」的那个计数器。
+            trialImagesLeft: Number.isFinite(trial) ? trial : null,
+            trialActionsLeft: Number.isFinite(trialActions) ? trialActions : null,
+            trainingStepsLeft: fixed + purchased,
+            fixedTrainingStepsLeft: fixed,
+            purchasedTrainingSteps: purchased
+        };
+    };
+
+    // 额度文案：一句话讲清「还能免费用多少 / 订阅状态」。
+    const describeNaiOfficialAccount = (account) => {
+        if (!account) return '';
+        const parts = [account.tierLabel];
+        if (account.active === false) parts.push('订阅未生效');
+        if (account.trialImagesLeft !== null) parts.push(`试用剩余 ${account.trialImagesLeft} 张`);
+        if (account.trainingStepsLeft > 0) parts.push(`训练步数 ${account.trainingStepsLeft}`);
+        return parts.join(' · ');
+    };
+
     window.RPHubNaiOfficialUtils = Object.freeze({
+        NAI_OFFICIAL_TIER_LABELS,
+        resolveNaiOfficialAccount,
+        describeNaiOfficialAccount,
         normalizeNaiOfficialDimension,
         resolveNaiOfficialSize,
         isNaiOfficialFreeTier,
