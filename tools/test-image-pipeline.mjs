@@ -1073,4 +1073,33 @@ assertTrue('深色覆盖开场过渡层（防启动闪白）', themeCss.includes
 assertTrue('深色覆盖聊天根容器（壁纸半透明处不露浅底）', themeCss.includes('.chat-view-root'));
 assertTrue('深色覆盖本机设置卡片', themeCss.includes('.generation-setting-card'));
 
+// --- 14. 批量导入角色卡 ---
+// 逻辑写在 character/index.html 的内联 setup 里，这里按仓库惯例做源码级断言，
+// 保证「多选/拖拽 → 逐卡汇报 → 坏卡不中断」这条链路不被后续改动弄断。
+section('14) 批量导入角色卡：多选/拖拽、逐卡汇报、坏卡不中断');
+const characterPage = readFileSync(join(root, 'character/index.html'), 'utf8');
+
+assertTrue('侧栏有批量导入入口', characterPage.includes('@click="openBatchImport"'));
+assertTrue('弹窗由 batchImport.show 驱动', characterPage.includes("'modal-open': batchImport.show"));
+assertTrue('支持多选（input multiple）', /<input type="file" class="hidden" multiple accept="\.png,\.json/.test(characterPage));
+assertTrue('支持拖拽放入', characterPage.includes('@drop.prevent="onBatchImportDrop"'));
+assertTrue('拖拽高亮不因划过子元素闪断', characterPage.includes('isInsideDropZone(event)'));
+assertTrue('逐个文件展示状态（待导入/已导入/已跳过/失败）', [
+    "pending: '待导入'",
+    "ok: '已导入'",
+    "skip: '已跳过'",
+    "fail: '失败'"
+].every(label => characterPage.includes(label)));
+assertTrue('展示导入进度条', characterPage.includes('class="progress progress-primary w-full"'));
+assertTrue('同一批里重复选择的文件自动忽略', characterPage.includes('已忽略 ${ignored} 个重复选择的文件'));
+assertTrue('可跳过与已有卡片重复的角色', characterPage.includes('v-model="batchImport.skipDuplicates"'));
+assertTrue('重复判定用「名称 + 开场白」指纹', characterPage.includes('const characterFingerprint = (char) =>'));
+assertTrue('坏卡逐个捕获，不中断整批', /catch \(err\) \{\s*item\.status = 'fail'/.test(characterPage));
+assertTrue('顺序处理（不并发铺开整个批次）', characterPage.includes('for (const item of queue)'));
+assertTrue('批量与单张共用同一解析器（避免两套逻辑分叉）',
+    (characterPage.match(/parseCharacterCardFile\(/g) || []).length >= 2);
+assertTrue('File 以 markRaw 存入响应式数组（否则 FileReader 拒绝代理对象）', characterPage.includes('file: markRaw(file)'));
+assertTrue('不支持的格式列进列表并标注原因', characterPage.includes('不支持的格式（仅 .json / .png）'));
+assertTrue('导入完成后跳到刚导入的角色', characterPage.includes('currentCharacterIndex.value = lastImportedIndex'));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

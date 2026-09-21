@@ -535,6 +535,92 @@
             </form>
         </dialog>
 
+        <!-- Batch Character Import Modal -->
+        <dialog class="modal modal-bottom sm:modal-middle" :class="{ 'modal-open': batchImport.show }"
+            aria-labelledby="batch-import-title" @keydown.esc="closeBatchImport">
+            <div class="modal-box bg-base-100 max-w-none sm:max-w-2xl">
+                <h3 id="batch-import-title" class="font-bold text-lg flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="text-primary" aria-hidden="true">
+                        <path d="m12 3-8.5 4.72a1 1 0 0 0 0 1.75L12 14.2l8.5-4.73a1 1 0 0 0 0-1.75Z" />
+                        <path d="m3.5 13.2 8.5 4.73 8.5-4.73" />
+                        <path d="m3.5 17.6 8.5 4.73 8.5-4.73" />
+                    </svg>
+                    批量导入角色卡
+                </h3>
+                <p class="text-sm text-base-content/50 mt-2">
+                    可一次选择或拖入多个 <code>.json</code> / <code>.png</code> 角色卡，逐个解析并汇报每张卡的结果，坏卡不会中断整批导入。
+                </p>
+
+                <label
+                    class="mt-5 flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed p-6 text-center cursor-pointer transition-colors"
+                    :class="batchImport.dragActive ? 'border-primary bg-primary/10' : 'border-base-300 hover:border-primary/50 hover:bg-base-200/40'"
+                    @dragover.prevent="onBatchImportDragOver" @dragleave.prevent="onBatchImportDragLeave"
+                    @drop.prevent="onBatchImportDrop">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                        class="text-primary/80" aria-hidden="true">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" x2="12" y1="15" y2="3" />
+                    </svg>
+                    <span class="text-sm font-bold">拖入文件，或点击选择</span>
+                    <span class="text-xs text-base-content/45">支持多选；同一批里重复选择同一文件会自动忽略</span>
+                    <input type="file" class="hidden" multiple accept=".png,.json,application/json,image/png"
+                        @change="onBatchImportSelect" />
+                </label>
+
+                <div v-if="batchImport.items.length" class="mt-4">
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <span class="text-xs text-base-content/50">
+                            共 {{ batchImportStats.total }} 个 · 成功 {{ batchImportStats.ok }} · 跳过 {{ batchImportStats.skip }} · 失败 {{ batchImportStats.fail }}
+                        </span>
+                        <button type="button" class="btn btn-xs btn-ghost" :disabled="batchImport.running"
+                            @click="clearBatchImportFiles">清空列表</button>
+                    </div>
+                    <progress v-if="batchImport.running" class="progress progress-primary w-full"
+                        :value="batchImportStats.processed" :max="batchImportStats.total"></progress>
+                    <div class="max-h-64 overflow-y-auto custom-scrollbar space-y-1.5 pr-1 mt-1">
+                        <div v-for="item in batchImport.items" :key="item.id"
+                            class="flex items-center gap-2 rounded-lg border border-base-200 bg-base-200/30 px-3 py-2">
+                            <span class="badge badge-sm shrink-0 border-0" :class="{
+                                    'badge-ghost': item.status === 'pending',
+                                    'badge-success': item.status === 'ok',
+                                    'badge-warning': item.status === 'skip',
+                                    'badge-error': item.status === 'fail'
+                                }">{{ batchImportStatusLabel(item) }}</span>
+                            <span class="min-w-0 flex-1 truncate text-sm" :title="item.name">{{ item.name }}</span>
+                            <span v-if="item.message" class="shrink-0 max-w-[45%] truncate text-xs text-base-content/50"
+                                :title="item.message">{{ item.message }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <label class="mt-4 flex items-center gap-2 cursor-pointer select-none text-sm">
+                    <input type="checkbox" class="checkbox checkbox-sm checkbox-primary" v-model="batchImport.skipDuplicates"
+                        :disabled="batchImport.running" />
+                    跳过重复角色卡（名称与开场白都和已有卡片一致）
+                </label>
+
+                <div class="modal-action">
+                    <button type="button" class="btn btn-ghost" :disabled="batchImport.running" @click="closeBatchImport">
+                        关闭
+                    </button>
+                    <button type="button" class="btn btn-primary text-white"
+                        :disabled="batchImport.running || batchImportStats.pending === 0" @click="startBatchImport">
+                        <span v-if="batchImport.running" class="loading loading-spinner loading-sm"></span>
+                        <span v-if="batchImport.running">导入中 {{ batchImportStats.processed }} / {{ batchImportStats.total }}</span>
+                        <span v-else-if="batchImportStats.pending === 0 && batchImportStats.total > 0">已全部处理</span>
+                        <span v-else>开始导入</span>
+                    </button>
+                </div>
+            </div>
+            <form method="dialog" class="modal-backdrop">
+                <button @click="closeBatchImport">关闭</button>
+            </form>
+        </dialog>
+
         <!-- Selective Export Modal -->
         <dialog class="modal modal-bottom sm:modal-middle" :class="{ 'modal-open': exportPicker.show }">
             <div class="modal-box bg-base-100 max-w-2xl">
@@ -1438,6 +1524,17 @@
                             <input type="file" class="hidden" accept=".png,.json,application/json,image/png"
                                 @change="importCharacterCard" />
                         </label>
+                        <button @click="openBatchImport"
+                            class="btn btn-sm btn-outline btn-circle border-base-300 hover:border-primary hover:bg-primary hover:text-white shrink-0"
+                            title="批量导入角色卡" aria-label="批量导入角色卡">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
+                                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" aria-hidden="true">
+                                <path d="m12 3-8.5 4.72a1 1 0 0 0 0 1.75L12 14.2l8.5-4.73a1 1 0 0 0 0-1.75Z" />
+                                <path d="m3.5 13.2 8.5 4.73 8.5-4.73" />
+                                <path d="m3.5 17.6 8.5 4.73 8.5-4.73" />
+                            </svg>
+                        </button>
                         <button @click="createNewCharacter"
                             class="btn btn-sm btn-primary btn-circle text-white shadow-lg shadow-primary/30 shrink-0">
                             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
@@ -1544,7 +1641,7 @@
     </div>
 
     <script>
-        const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue;
+        const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, markRaw } = Vue;
         const AddItemButton = {
             emits: ['add'],
             template: `
@@ -2127,53 +2224,235 @@
                     });
                 };
 
-                const applyImportedCharacter = (rawData, avatarUrl = null) => {
-                    const importedCharacter = buildCharacterFromImport(rawData, avatarUrl);
+                const appendImportedCharacter = (importedCharacter, { open = false } = {}) => {
                     characters.value.push(importedCharacter);
-                    currentCharacterIndex.value = characters.value.length - 1;
-                    activeTab.value = 'basic';
-                    isSidebarOpen.value = false;
+                    if (open) {
+                        currentCharacterIndex.value = characters.value.length - 1;
+                        activeTab.value = 'basic';
+                        isSidebarOpen.value = false;
+                    }
+                    return importedCharacter;
+                };
+
+                const applyImportedCharacter = (importedCharacter) => {
+                    appendImportedCharacter(importedCharacter, { open: true });
                     showToast(`已导入角色卡：${importedCharacter.name || '未命名角色'}`, 'success');
                 };
 
-                const importCharacterCard = (event) => {
+                const isJsonCardFile = (file) => file.type === 'application/json' || /\.json$/i.test(file.name || '');
+                const isPngCardFile = (file) => file.type === 'image/png' || /\.png$/i.test(file.name || '');
+
+                const readFileAsText = (file) => new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (event) => resolve(event.target.result);
+                    reader.onerror = () => reject(new Error('文件读取失败'));
+                    reader.readAsText(file);
+                });
+
+                const readFileAsArrayBuffer = (file) => new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (event) => resolve(event.target.result);
+                    reader.onerror = () => reject(new Error('文件读取失败'));
+                    reader.readAsArrayBuffer(file);
+                });
+
+                // 单文件解析：失败时抛出带原因的错误，方便批量逐个汇报，而不是整批中断。
+                const parseCharacterCardFile = async (file) => {
+                    if (isJsonCardFile(file)) {
+                        const text = await readFileAsText(file);
+                        let rawData;
+                        try {
+                            rawData = JSON.parse(text);
+                        } catch (err) {
+                            throw new Error('JSON 格式错误');
+                        }
+                        return buildCharacterFromImport(rawData);
+                    }
+
+                    if (isPngCardFile(file)) {
+                        const buffer = await readFileAsArrayBuffer(file);
+                        let rawData;
+                        try {
+                            ({ data: rawData } = cardUtils.parsePngCharacterData(buffer));
+                        } catch (err) {
+                            throw new Error('PNG 里没有角色卡数据');
+                        }
+                        const blob = new Blob([buffer], { type: 'image/png' });
+                        const avatarUrl = await cardUtils.blobToDataUrl(blob);
+                        return buildCharacterFromImport(rawData, avatarUrl);
+                    }
+
+                    throw new Error('不支持的格式（仅 .json / .png）');
+                };
+
+                const importCharacterCard = async (event) => {
                     const file = event.target.files?.[0];
                     if (!file) return;
                     event.target.value = '';
 
-                    if (file.type === 'application/json' || file.name.toLowerCase().endsWith('.json')) {
-                        const reader = new FileReader();
-                        reader.onload = (e) => {
-                            try {
-                                applyImportedCharacter(JSON.parse(e.target.result));
-                            } catch (err) {
-                                showToast('JSON 角色卡解析失败', 'error');
-                                console.error('JSON import error:', err);
-                            }
-                        };
-                        reader.readAsText(file);
+                    try {
+                        applyImportedCharacter(await parseCharacterCardFile(file));
+                    } catch (err) {
+                        showToast(`角色卡导入失败：${err.message}`, 'error');
+                        console.error('Character import error:', err);
+                    }
+                };
+
+                // --- 批量导入角色卡 ---
+                let batchImportItemSeq = 0;
+                const batchImport = reactive({
+                    show: false,
+                    dragActive: false,
+                    running: false,
+                    skipDuplicates: true,
+                    items: []
+                });
+
+                const batchImportStats = computed(() => {
+                    const items = batchImport.items;
+                    const count = (status) => items.filter(item => item.status === status).length;
+                    const ok = count('ok');
+                    const skip = count('skip');
+                    const fail = count('fail');
+                    return {
+                        total: items.length,
+                        ok,
+                        skip,
+                        fail,
+                        processed: ok + skip + fail,
+                        pending: items.length - ok - skip - fail
+                    };
+                });
+
+                const BATCH_IMPORT_STATUS_LABELS = { pending: '待导入', ok: '已导入', skip: '已跳过', fail: '失败' };
+                const batchImportStatusLabel = (item) => BATCH_IMPORT_STATUS_LABELS[item.status] || '待导入';
+
+                const openBatchImport = () => {
+                    batchImport.show = true;
+                };
+
+                const closeBatchImport = () => {
+                    if (batchImport.running) {
+                        showToast('导入进行中，请稍候', 'warning');
+                        return;
+                    }
+                    batchImport.show = false;
+                };
+
+                const addBatchImportFiles = (fileList) => {
+                    const files = Array.from(fileList || []);
+                    if (!files.length) return;
+
+                    const known = new Set(batchImport.items.map(item => `${item.name}|${item.size}|${item.lastModified}`));
+                    let added = 0;
+                    let ignored = 0;
+
+                    for (const file of files) {
+                        const key = `${file.name}|${file.size}|${file.lastModified}`;
+                        if (known.has(key)) {
+                            ignored += 1;
+                            continue;
+                        }
+                        known.add(key);
+                        const supported = isJsonCardFile(file) || isPngCardFile(file);
+                        batchImport.items.push({
+                            id: ++batchImportItemSeq,
+                            name: file.name,
+                            // File 是平台对象，被 reactive 代理后 FileReader 会拒绝读取，所以标成 raw。
+                            file: markRaw(file),
+                            status: supported ? 'pending' : 'fail',
+                            message: supported ? '' : '不支持的格式（仅 .json / .png）'
+                        });
+                        added += 1;
+                    }
+
+                    if (ignored) showToast(`已忽略 ${ignored} 个重复选择的文件`, 'info');
+                    if (!added && !ignored) showToast('没有可导入的文件', 'warning');
+                };
+
+                const onBatchImportSelect = (event) => {
+                    addBatchImportFiles(event.target.files);
+                    event.target.value = '';
+                };
+
+                const isInsideDropZone = (event) => !!(event.relatedTarget && event.currentTarget.contains(event.relatedTarget));
+
+                const onBatchImportDragOver = (event) => {
+                    if (isInsideDropZone(event)) return;
+                    batchImport.dragActive = true;
+                };
+
+                const onBatchImportDragLeave = (event) => {
+                    if (isInsideDropZone(event)) return;
+                    batchImport.dragActive = false;
+                };
+
+                const onBatchImportDrop = (event) => {
+                    batchImport.dragActive = false;
+                    addBatchImportFiles(event.dataTransfer?.files);
+                };
+
+                const clearBatchImportFiles = () => {
+                    if (batchImport.running) return;
+                    batchImport.items = [];
+                };
+
+                const characterFingerprint = (char) => [
+                    String(char?.name || '').trim().toLowerCase(),
+                    String(char?.first_mes || '').trim().slice(0, 160)
+                ].join('\u0000');
+
+                const startBatchImport = async () => {
+                    if (batchImport.running) return;
+                    const queue = batchImport.items.filter(item => item.status === 'pending');
+                    if (!queue.length) {
+                        showToast('没有待导入的文件', 'info');
                         return;
                     }
 
-                    if (file.type === 'image/png' || file.name.toLowerCase().endsWith('.png')) {
-                        const reader = new FileReader();
-                        reader.onload = async (e) => {
+                    batchImport.running = true;
+                    const known = batchImport.skipDuplicates
+                        ? new Set(characters.value.map(characterFingerprint))
+                        : null;
+                    let lastImportedIndex = null;
+
+                    try {
+                        for (const item of queue) {
                             try {
-                                const buffer = e.target.result;
-                                const { data } = cardUtils.parsePngCharacterData(buffer);
-                                const blob = new Blob([buffer], { type: 'image/png' });
-                                const avatarUrl = await cardUtils.blobToDataUrl(blob);
-                                applyImportedCharacter(data, avatarUrl);
+                                const character = await parseCharacterCardFile(item.file);
+                                const fingerprint = characterFingerprint(character);
+                                if (known && known.has(fingerprint)) {
+                                    item.status = 'skip';
+                                    item.message = '疑似重复';
+                                } else {
+                                    appendImportedCharacter(character);
+                                    if (known) known.add(fingerprint);
+                                    lastImportedIndex = characters.value.length - 1;
+                                    item.status = 'ok';
+                                    item.message = character.name ? `名称：${character.name}` : '';
+                                }
                             } catch (err) {
-                                showToast('PNG 角色卡解析失败', 'error');
-                                console.error('PNG import error:', err);
+                                item.status = 'fail';
+                                item.message = err?.message || '解析失败';
+                                console.error('Batch import error:', item.name, err);
                             }
-                        };
-                        reader.readAsArrayBuffer(file);
-                        return;
+                            await nextTick();
+                            // 让出主线程一帧，长批次导入时状态与进度能持续刷新。
+                            await new Promise(resolve => setTimeout(resolve, 0));
+                        }
+                    } finally {
+                        batchImport.running = false;
                     }
 
-                    showToast('只支持导入 .json 或 .png 角色卡', 'error');
+                    const stats = batchImportStats.value;
+                    if (lastImportedIndex !== null) {
+                        currentCharacterIndex.value = lastImportedIndex;
+                        activeTab.value = 'basic';
+                    }
+                    showToast(
+                        `批量导入完成：成功 ${stats.ok}，跳过 ${stats.skip}，失败 ${stats.fail}`,
+                        stats.ok === 0 && stats.fail > 0 ? 'error' : 'success'
+                    );
                 };
 
 
@@ -3974,6 +4253,18 @@ JSON 字段（世界书/正则脚本）必须输出为合法的 JSON 数组，**
                     toggleFlag,
                     handleImageUpload,
                     importCharacterCard,
+                    batchImport,
+                    batchImportStats,
+                    batchImportStatusLabel,
+                    openBatchImport,
+                    closeBatchImport,
+                    onBatchImportSelect,
+                    onBatchImportDragOver,
+                    onBatchImportDragLeave,
+                    onBatchImportDrop,
+                    addBatchImportFiles,
+                    clearBatchImportFiles,
+                    startBatchImport,
                     cacheAvatar,
                     rerollAvatar,
                     generateCharacter,
