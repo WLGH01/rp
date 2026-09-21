@@ -1800,7 +1800,7 @@
                                         </div>
 
                                         <!-- Image Model (NovelAI only) -->
-                                        <div v-if="!isSdProvider" class="generation-setting-card">
+                                        <div v-if="isNaiProvider" class="generation-setting-card">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生图版本</label>
                                             <custom-select v-model="settings.imageModel" :options="imageModelOptions"
@@ -2012,6 +2012,33 @@
                                             </button>
                                         </div>
 
+                                        <!-- 工作流库：保存多份 JSON，按名字切换 -->
+                                        <div class="generation-setting-card">
+                                            <div class="flex items-center justify-between gap-2 mb-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider">工作流库</label>
+                                                <span class="text-xs text-gray-400">{{ comfyLibrary.length }} / 50</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <div class="flex-1 min-w-0">
+                                                    <custom-select v-model="comfyLibrarySelection" :options="comfyLibraryOptions"
+                                                        button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100 bg-white shadow-sm w-full"
+                                                        menu-class="text-sm">
+                                                    </custom-select>
+                                                </div>
+                                                <button type="button" @click="saveComfyWorkflowToLibrary"
+                                                    class="px-2.5 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg active:scale-95 transition-all shrink-0">
+                                                    {{ comfyLibrarySelection ? '更新' : '保存到库' }}
+                                                </button>
+                                                <button v-if="comfyLibrarySelection" type="button" @click="deleteComfyWorkflowFromLibrary"
+                                                    class="px-2.5 py-1 text-xs font-bold text-rose-600 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shrink-0">
+                                                    删除
+                                                </button>
+                                            </div>
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                可保存多份 API 工作流随时切换（文生图/图生图/视频各存一份）。选择后会把该工作流的 JSON 与参数绑定一并载入；手动改过 JSON 即脱离库，此时「保存到库」会新建而不是覆盖。
+                                            </p>
+                                        </div>
+
                                         <!-- 工作流 JSON -->
                                         <div class="generation-setting-card">
                                             <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">工作流 JSON（API 格式）</label>
@@ -2019,12 +2046,12 @@
                                                 class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-xs font-mono focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
                                                 placeholder='在 ComfyUI 里用「工作流 → 导出（API）」保存，然后把这个 JSON 整个粘到这里'></textarea>
                                             <div class="mt-2 flex items-center gap-3 flex-wrap">
-                                                <button type="button" @click="triggerComfyWorkflowFile"
+                                                <button type="button" @click="importComfyWorkflowFile"
                                                     class="px-2.5 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg active:scale-95 transition-all">
-                                                    选择 .json 文件
+                                                    导入 .json 文件
                                                 </button>
-                                                <input ref="comfyWorkflowFileInput" type="file" accept=".json,application/json" class="hidden" @change="handleComfyWorkflowFile">
-                                                <button type="button" @click="settings.comfyWorkflow = ''"
+                                                <input ref="comfyWorkflowFileInput" type="file" accept=".json,application/json" multiple class="hidden" @change="handleComfyWorkflowFile">
+                                                <button type="button" @click="settings.comfyWorkflow = ''; settings.comfyActiveWorkflowId = ''"
                                                     class="px-2.5 py-1 text-xs font-bold text-gray-600 bg-white hover:bg-gray-50 border border-gray-200 rounded-lg active:scale-95 transition-all">
                                                     清空
                                                 </button>
@@ -2036,7 +2063,7 @@
                                                 </span>
                                             </div>
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                必须是 API 格式（节点 id → 节点对象），不是 ComfyUI 画布的界面图格式。工作流的节点结构由你自己控制，插件只按下面的绑定改写其中几个输入。
+                                                必须是 API 格式（节点 id → 节点对象），不是 ComfyUI 画布的界面图格式。支持一次选多个文件，会分别存进工作流库。工作流的节点结构由你自己控制，插件只按下面的绑定改写其中几个输入。
                                             </p>
                                         </div>
 

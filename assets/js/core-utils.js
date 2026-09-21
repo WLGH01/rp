@@ -1475,7 +1475,15 @@ window.RPHubUtils = {
         for (const [nodeId, node] of Object.entries(parsed)) {
             if (!node || typeof node !== 'object') continue;
             if (!node.class_type) {
-                return { ok: false, prompt: null, nodes: [], error: `节点 ${nodeId} 缺少 class_type 字段` };
+                // 顶层出现非节点键（如误把 _meta 放在最外层）时服务端会整份拒绝
+                //（execution.py 的 validate_prompt 逐个顶层键要求 class_type），
+                // 因此这里也说清楚是哪个键，而不是笼统报「缺少 class_type」。
+                return {
+                    ok: false,
+                    prompt: null,
+                    nodes: [],
+                    error: `顶层键 ${nodeId} 不是节点（缺少 class_type）。注意 _meta 之类的元信息要放在节点内部，不能放在最外层`
+                };
             }
             nodes.push({ id: String(nodeId), classType: String(node.class_type), inputs: node.inputs || {} });
         }
@@ -1493,14 +1501,21 @@ window.RPHubUtils = {
 
     // 各角色对应的「候选类名 → 候选输入名」，按优先级排列。
     // 探测是通用规则，不针对某个具体工作流；探测不到时用户可在设置页手改。
+    //
+    // textLike=true 的角色，其输入名在不同节点上写法不一（text / prompt / text_g…），
+    // 因此找不到候选名时可以退而用第一个标量输入；
+    // 其余角色的输入名是明确的（cfg 就是 cfg），**找不到就必须跳过**——
+    // 否则会退化成「绑到第一个标量输入」，把 cfg 写进 steps 之类的字段，静默改坏生成参数。
     const COMFY_ROLE_RULES = Object.freeze({
         prompt: {
             classes: ['CLIPTextEncode', 'BNK_CLIPTextEncodeAdvanced', 'CLIPTextEncodeSDXL', 'TextEncodeQwenImageEdit', 'PromptExpansion'],
-            inputs: ['text', 'prompt', 'positive', 'text_g', 'text_l']
+            inputs: ['text', 'prompt', 'positive', 'text_g', 'text_l'],
+            textLike: true
         },
         negativePrompt: {
             classes: ['CLIPTextEncode', 'BNK_CLIPTextEncodeAdvanced', 'CLIPTextEncodeSDXL'],
-            inputs: ['text', 'prompt']
+            inputs: ['text', 'prompt'],
+            textLike: true
         },
         width: { classes: ['EmptyLatentImage', 'EmptySD3LatentImage', 'EmptyLatentImagePresets'], inputs: ['width'] },
         height: { classes: ['EmptyLatentImage', 'EmptySD3LatentImage', 'EmptyLatentImagePresets'], inputs: ['height'] },
@@ -1584,7 +1599,10 @@ window.RPHubUtils = {
             }
 
             const inputs = scalarComfyInputs(chosen);
-            const input = rule.inputs.find(name => inputs.includes(name)) || inputs[0];
+            // 先按候选名精确匹配；文本类角色才允许退回第一个标量输入。
+            // 其余角色退回第一个输入会把 cfg 写成 steps（静默改坏参数），因此宁可不绑。
+            let input = rule.inputs.find(name => inputs.includes(name));
+            if (!input && rule.textLike) input = inputs[0];
             if (!input) continue;
             bindings[role] = { nodeId: chosen.id, input };
         }
@@ -1725,8 +1743,99 @@ window.RPHubUtils = {
         return [];
     };
 
+    // ===== ComfyUI 工作流库：保存多个工作流并按名字切换 =====
+    //
+    // 与生图预设（savedImageEndpoints）的关系：
+    //   生图预设 = 「连哪个服务」+ 一套出图参数（其中包含 comfyWorkflow）
+    //   工作流库 = 「这个服务上可以跑哪几张图」，是给 ComfyUI 用的、可复用的资产
+    // 因此工作流库存的是「名字 + JSON + 绑定」，切工作流即把 JSON/绑定写进当前生图参数。
+
+    const COMFY_LIBRARY_LIMIT = 50;
+
+    // 给工作流起一个可读的默认名字：优先 JSON 里的 _meta.title（ComfyUI 导出会带），
+    // 其次按节点构成猜测（文生图 / 图生图 / 视频…），最后退回序号。
+    const suggestComfyWorkflowName = (nodes, fallbackIndex = 0) => {
+        const list = Array.isArray(nodes) ? nodes : [];
+        const classes = new Set(list.map(node => String(node?.classType || '')));
+        const has = (re) => [...classes].some(name => re.test(name));
+        if (has(/SaveVideo|VideoCombine|SaveWEBM|SaveAnimated/)) return `视频工作流 ${fallbackIndex}`;
+        if (has(/LoadImage|LoadImageMask|ImageBatch|LoadImageSet/)) return `图生图工作流 ${fallbackIndex}`;
+        if (has(/KSampler|SamplerCustom/)) return `文生图工作流 ${fallbackIndex}`;
+        if (has(/Upscale|ImageScale/)) return `放大工作流 ${fallbackIndex}`;
+        return `工作流 ${fallbackIndex}`;
+    };
+
+    // 从 API 格式 JSON 里尽量读出一个天然的名字（ComfyUI 的导出会写 _meta.title）。
+    const readComfyWorkflowTitle = (text) => {
+        try {
+            const parsed = typeof text === 'string' ? JSON.parse(text) : text;
+            const title = parsed?._meta?.title || parsed?._meta?.name;
+            return typeof title === 'string' ? title.trim() : '';
+        } catch {
+            return '';
+        }
+    };
+
+    // 整理工作流库：丢掉坏条目、去重 id、夹住数量上限。
+    // 存档里可能有用户手改坏的数据，这里一律当不可信输入处理。
+    const normalizeComfyWorkflowLibrary = (library) => {
+        const list = Array.isArray(library) ? library : [];
+        const seen = new Set();
+        const out = [];
+        for (const item of list) {
+            if (!item || typeof item !== 'object') continue;
+            const workflow = String(item.workflow || '');
+            if (!workflow.trim()) continue;
+            let id = String(item.id || '').trim() || `comfy-wf-${out.length}-${Date.now()}`;
+            while (seen.has(id)) id = `${id}-1`;
+            seen.add(id);
+            out.push({
+                id,
+                name: String(item.name || '').trim() || suggestComfyWorkflowName([], out.length + 1),
+                workflow,
+                bindings: (item.bindings && typeof item.bindings === 'object' && !Array.isArray(item.bindings))
+                    ? item.bindings
+                    : {},
+                // 记住保存时刻的自动探测开关，恢复时一并还原，避免「换工作流后绑定语义变了」。
+                autoDetect: item.autoDetect !== false,
+                note: String(item.note || '')
+            });
+            if (out.length >= COMFY_LIBRARY_LIMIT) break;
+        }
+        return out;
+    };
+
+    // 保存/更新一条工作流。传 id 且命中则覆盖，否则新增。
+    // 返回 { library, id, added }，由调用方决定提示文案。
+    const upsertComfyWorkflow = (library, entry = {}) => {
+        const list = normalizeComfyWorkflowLibrary(library);
+        const workflow = String(entry.workflow || '');
+        if (!workflow.trim()) return { library: list, id: '', added: false, error: '工作流为空' };
+        const name = String(entry.name || '').trim() || suggestComfyWorkflowName([], list.length + 1);
+        const targetId = String(entry.id || '').trim();
+        const index = targetId ? list.findIndex(item => item.id === targetId) : -1;
+        const record = {
+            id: index !== -1 ? list[index].id : `comfy-wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+            name,
+            workflow,
+            bindings: (entry.bindings && typeof entry.bindings === 'object') ? entry.bindings : {},
+            autoDetect: entry.autoDetect !== false,
+            note: String(entry.note || '')
+        };
+        if (index !== -1) list[index] = record;
+        else list.push(record);
+        return { library: list.slice(0, COMFY_LIBRARY_LIMIT), id: record.id, added: index === -1 };
+    };
+
+    const removeComfyWorkflow = (library, id) => normalizeComfyWorkflowLibrary(library)
+        .filter(item => item.id !== String(id || ''));
+
+    const findComfyWorkflow = (library, id) => normalizeComfyWorkflowLibrary(library)
+        .find(item => item.id === String(id || '')) || null;
+
     window.RPHubComfyUtils = Object.freeze({
         COMFY_ROLE_RULES,
+        COMFY_LIBRARY_LIMIT,
         normalizeComfyNodeRef,
         isComfyNodeLink,
         parseComfyWorkflow,
@@ -1740,7 +1849,13 @@ window.RPHubUtils = {
         computeComfyProgress,
         describeComfyProgress,
         comfyWorkflowHasSampler,
-        pickComfyComboOptions
+        pickComfyComboOptions,
+        suggestComfyWorkflowName,
+        readComfyWorkflowTitle,
+        normalizeComfyWorkflowLibrary,
+        upsertComfyWorkflow,
+        removeComfyWorkflow,
+        findComfyWorkflow
     });
 
     window.RPHubImageUtils = Object.freeze({

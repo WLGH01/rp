@@ -446,6 +446,28 @@ assertEqual('种子绑到 KSampler.seed', detected.seed, { nodeId: '3', input: '
 assertEqual('底模绑到 CheckpointLoaderSimple（不是 UNETLoader）', detected.checkpoint, { nodeId: '4', input: 'ckpt_name' });
 assertEqual('文件名前缀绑到 SaveImage', detected.filenamePrefix, { nodeId: '9', input: 'filename_prefix' });
 
+// 回归：节点里没有 cfg 这个输入时，绝不能退化成绑到第一个标量输入。
+// 曾经的写法是 `rule.inputs.find(...) || inputs[0]`，会把 cfg/sampler/seed 全绑到 steps，
+// 于是「传 cfg」实际改掉的是步数——静默改坏参数，且现象很难排查。
+const bareSampler = comfy.parseComfyWorkflow(JSON.stringify({
+    '3': { class_type: 'KSampler', inputs: { steps: 20, positive: ['6', 0], negative: ['7', 0] } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: 'a cat' } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: 'bad' } }
+})).nodes;
+const bareBindings = comfy.detectComfyBindings(bareSampler);
+assertEqual('没有 cfg 输入时不绑 cfg（而非绑到 steps）', bareBindings.cfg, undefined);
+assertEqual('没有 seed 输入时不绑 seed', bareBindings.seed, undefined);
+assertEqual('没有 sampler_name 输入时不绑 sampler', bareBindings.sampler, undefined);
+assertEqual('steps 仍然绑对', bareBindings.steps, { nodeId: '3', input: 'steps' });
+assertEqual('文本类角色仍可退回第一个标量输入', bareBindings.prompt, { nodeId: '6', input: 'text' });
+// 直接验证「写 cfg 不会动到 steps」
+const bareApplied = comfy.applyComfyParamValues(
+    JSON.parse(JSON.stringify({ '3': { class_type: 'KSampler', inputs: { steps: 20 } } })),
+    bareBindings, { cfg: 9 }
+);
+assertEqual('传 cfg 不会改写 steps', bareApplied.prompt['3'].inputs.steps, 20);
+assertEqual('未被绑定的参数不产生 applied', bareApplied.applied.length, 0);
+
 // 没有 KSampler 连线信息时（正负向都是孤立节点）退化成「第一个 / 第二个」，但绝不能相同
 const looseNodes = [
     { id: '1', classType: 'CLIPTextEncode', inputs: { text: 'pos', clip: ['9', 1] } },
@@ -563,6 +585,10 @@ assertEqual('comfyui 进入生图方式列表',
 assertTrue('ComfyUI 参数随预设保存（切预设不该串参数）',
     ['comfyWorkflow', 'comfyBindings', 'comfySteps', 'comfyPrompt']
         .every(field => imageUtils.IMAGE_PROFILE_FIELDS.includes(field)));
+// 工作流库是全局资产（多份工作流共享），不该跟着生图预设来回切。
+assertTrue('工作流库不随生图预设走（它是全局资产）',
+    !imageUtils.IMAGE_PROFILE_FIELDS.includes('comfyWorkflowLibrary')
+    && !imageUtils.IMAGE_PROFILE_FIELDS.includes('comfyActiveWorkflowId'));
 assertTrue('app.js 使用 RPHubComfyUtils', appSource.includes('window.RPHubComfyUtils'));
 assertTrue('生成链路走 generateWithComfy', appSource.includes('generateWithComfy'));
 assertTrue('提交前用 /prompt 且带 client_id', /submitComfyPrompt[\s\S]{0,400}client_id/.test(appSource));
@@ -578,6 +604,116 @@ assertTrue('index.html 暴露工作流输入框', comfyIndexSource.includes('set
 assertTrue('index.html 暴露参数绑定表格', comfyIndexSource.includes('setComfyBinding'));
 assertTrue('index.html 暴露取消开关', comfyIndexSource.includes('settings.comfyAllowCancel'));
 assertTrue('旧文案提到三种生图方式', comfyIndexSource.includes('ComfyUI 提交'));
+
+// --- 11. ComfyUI 工作流库：保存多份 JSON，按名字切换 ---
+section('11) ComfyUI：工作流库（多份保存/切换）');
+const wfA = JSON.stringify({ '3': { class_type: 'KSampler', inputs: { steps: 20 } }, '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'a' } } });
+const wfB = JSON.stringify({ '5': { class_type: 'LoadImage', inputs: { image: 'x.png' } }, '9': { class_type: 'SaveImage', inputs: {} } });
+
+assertEqual('空库被规范成空数组', comfy.normalizeComfyWorkflowLibrary(null), []);
+assertEqual('非数组被规范成空数组', comfy.normalizeComfyWorkflowLibrary('nope'), []);
+// 坏条目（没有 workflow 内容）不该进库，否则下拉里会出现点不开的空项
+assertEqual('缺 workflow 的条目被剔除', comfy.normalizeComfyWorkflowLibrary([{ name: 'x' }]).length, 0);
+assertEqual('空 workflow 的条目被剔除', comfy.normalizeComfyWorkflowLibrary([{ name: 'x', workflow: '   ' }]).length, 0);
+assertEqual('缺名字时自动补一个', comfy.normalizeComfyWorkflowLibrary([{ workflow: wfA }])[0].name.length > 0, true);
+assertEqual('缺 id 时自动补一个', Boolean(comfy.normalizeComfyWorkflowLibrary([{ workflow: wfA }])[0].id), true);
+// id 撞车必须去重，否则切换会选错条目
+const dupIds = comfy.normalizeComfyWorkflowLibrary([{ id: 'same', workflow: wfA }, { id: 'same', workflow: wfB }]);
+assertEqual('重复 id 被去重', dupIds[0].id === dupIds[1].id, false);
+assertEqual('重复 id 两条都保留', dupIds.length, 2);
+assertEqual('非对象条目被剔除', comfy.normalizeComfyWorkflowLibrary([null, 1, 'x', { workflow: wfA }]).length, 1);
+
+section('11b) ComfyUI：库的增删改查');
+let lib = [];
+const added = comfy.upsertComfyWorkflow(lib, { name: '文生图', workflow: wfA });
+lib = added.library;
+assertEqual('新增成功', added.added, true);
+assertEqual('新增后有 1 条', lib.length, 1);
+assertEqual('名字正确', lib[0].name, '文生图');
+assertEqual('空工作流被拒', comfy.upsertComfyWorkflow(lib, { name: 'x', workflow: '' }).error, '工作流为空');
+assertEqual('被拒时库不变', comfy.upsertComfyWorkflow(lib, { name: 'x', workflow: '' }).library.length, 1);
+
+const second = comfy.upsertComfyWorkflow(lib, { name: '图生图', workflow: wfB });
+lib = second.library;
+assertEqual('加第二条', lib.length, 2);
+assertEqual('两条 id 不同', lib[0].id !== lib[1].id, true);
+
+// 用 id 更新：应覆盖而不是新增
+const updated = comfy.upsertComfyWorkflow(lib, { id: lib[0].id, name: '文生图改', workflow: wfA });
+lib = updated.library;
+assertEqual('按 id 更新不是新增', updated.added, false);
+assertEqual('更新后仍是 2 条', lib.length, 2);
+assertEqual('名字被更新', lib.find(i => i.id === updated.id).name, '文生图改');
+
+// 保存时带上绑定与开关：切回来要一并还原
+const withBindings = comfy.upsertComfyWorkflow(lib, {
+    id: lib[0].id, name: '带绑定', workflow: wfA,
+    bindings: { prompt: { nodeId: '6', input: 'text' } }, autoDetect: false
+});
+lib = withBindings.library;
+const saved = comfy.findComfyWorkflow(lib, withBindings.id);
+assertEqual('绑定被保存', saved.bindings.prompt, { nodeId: '6', input: 'text' });
+assertEqual('探测开关被保存', saved.autoDetect, false);
+
+assertEqual('按 id 查得到', Boolean(comfy.findComfyWorkflow(lib, lib[0].id)), true);
+assertEqual('查不存在的返回 null', comfy.findComfyWorkflow(lib, 'nope'), null);
+assertEqual('删除后剩 1 条', comfy.removeComfyWorkflow(lib, lib[0].id).length, 1);
+assertEqual('删除不存在的 id 不报错', comfy.removeComfyWorkflow(lib, 'nope').length, 2);
+assertEqual('数量上限被夹住',
+    comfy.normalizeComfyWorkflowLibrary(
+        Array.from({ length: comfy.COMFY_LIBRARY_LIMIT + 10 }, (_, i) => ({ id: `w${i}`, workflow: wfA }))
+    ).length,
+    comfy.COMFY_LIBRARY_LIMIT);
+
+section('11c) ComfyUI：工作流命名建议');
+// ComfyUI 的 API 导出会写节点级 _meta.title；官方示例只有数字键。
+// 注意 _meta 属于「节点内部」，不是顶层键——顶层出现非节点键会被服务端整份拒绝
+//（execution.py 的 validate_prompt 逐个顶层键检查 class_type）。
+assertEqual('优先用 JSON 里的 title',
+    comfy.readComfyWorkflowTitle(JSON.stringify({ _meta: { title: '我的工作流' }, '3': { class_type: 'KSampler' } })),
+    '我的工作流');
+assertEqual('没有 _meta 时返回空串', comfy.readComfyWorkflowTitle('{}'), '');
+assertEqual('坏 JSON 不抛异常', comfy.readComfyWorkflowTitle('{oops'), '');
+// 真实的 API 导出形状：_meta 在节点内部，解析必须通过，且改写后元信息不能被丢掉
+const nodeMetaWorkflow = {
+    '3': { class_type: 'KSampler', _meta: { title: '采样器' }, inputs: { steps: 20, positive: ['6', 0], negative: ['7', 0] } },
+    '6': { class_type: 'CLIPTextEncode', _meta: { title: '正向' }, inputs: { text: 'a cat' } },
+    '7': { class_type: 'CLIPTextEncode', _meta: { title: '负向' }, inputs: { text: 'bad' } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'X' } }
+};
+const nodeMetaParsed = comfy.parseComfyWorkflow(JSON.stringify(nodeMetaWorkflow));
+assertEqual('节点级 _meta 不阻碍解析', nodeMetaParsed.ok, true);
+assertEqual('节点级 _meta 的节点被正常计入', nodeMetaParsed.nodes.length, 4);
+const nodeMetaApplied = comfy.applyComfyParamValues(
+    nodeMetaWorkflow, comfy.detectComfyBindings(nodeMetaParsed.nodes), { prompt: 'a dog', steps: 30 }
+);
+assertEqual('改写后节点的 _meta 仍保留（不丢用户元信息）',
+    nodeMetaApplied.prompt['3']._meta.title, '采样器');
+assertEqual('改写确实生效', nodeMetaApplied.prompt['6'].inputs.text, 'a dog');
+// 顶层混入非节点键：服务端会整份拒绝，我们本地就先拦下并说清楚
+const topLevelMeta = comfy.parseComfyWorkflow(JSON.stringify({ _meta: { title: 'T' }, '3': { class_type: 'KSampler', inputs: {} } }));
+assertEqual('顶层非节点键被拦下（与服务端 validate_prompt 行为一致）', topLevelMeta.ok, false);
+assertTrue('报错里点出是哪个键', topLevelMeta.error.includes('_meta'));
+assertTrue('按节点猜出「视频」',
+    /视频/.test(comfy.suggestComfyWorkflowName([{ id: '1', classType: 'SaveVideo', inputs: {} }], 1)));
+assertTrue('按节点猜出「图生图」',
+    /图生图/.test(comfy.suggestComfyWorkflowName([{ id: '1', classType: 'LoadImage', inputs: {} }], 1)));
+assertTrue('按节点猜出「文生图」',
+    /文生图/.test(comfy.suggestComfyWorkflowName([{ id: '1', classType: 'KSampler', inputs: {} }], 1)));
+assertTrue('认不出来时退回通用名',
+    comfy.suggestComfyWorkflowName([{ id: '1', classType: 'SomethingElse', inputs: {} }], 3).length > 0);
+
+section('11d) 回归：NAI 专属项不得出现在 SD / ComfyUI 下');
+// 「生图版本」是 NAI 的 V4.5/V5，只有 NovelAI 认识。
+// 曾经的写法是 v-if="!isSdProvider" —— 新增第三个生图方式后它就把 NAI 版本显示到了 ComfyUI 上。
+assertTrue('存在 isNaiProvider 判定（而不是用「不是 SD」反推）', appSource.includes('const isNaiProvider'));
+assertTrue('生图版本用 isNaiProvider 门控', /Image Model \(NovelAI only\)[\s\S]{0,200}isNaiProvider/.test(comfyIndexSource));
+assertTrue('生图版本不再用 !isSdProvider 门控', !comfyIndexSource.includes('v-if="!isSdProvider"'));
+// 归档索引里的 model 也不能一律写 NAI 版本名
+assertTrue('归档 model 按生图方式区分', appSource.includes('archiveModel'));
+assertTrue('ComfyUI 归档时读工作流里的底模', appSource.includes('comfyCheckpointFromWorkflow'));
+assertTrue('index.html 暴露工作流库下拉', comfyIndexSource.includes('comfyLibrarySelection'));
+assertTrue('index.html 暴露多文件导入', /accept="\.json,application\/json"\s+multiple/.test(comfyIndexSource));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
 process.exit(failures === 0 ? 0 : 1);

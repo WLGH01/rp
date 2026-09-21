@@ -653,6 +653,10 @@ const app = createApp({
             // --- ComfyUI 专用 ---
             // API 格式工作流 JSON 文本（ComfyUI 里用「保存（API Format）」导出）。
             comfyWorkflow: '',
+            // 工作流库：保存多份 JSON，按名字随时切换（全局资产，不随生图预设走）。
+            comfyWorkflowLibrary: [],
+            // 当前从库里选中的工作流 id；手改 JSON 后清空，表示「已脱离库」。
+            comfyActiveWorkflowId: '',
             // 参数绑定：角色 → { nodeId, input }。留空则用自动探测结果。
             comfyBindings: {},
             // 是否让插件自动探测绑定；关掉后完全按上面的手工绑定走。
@@ -686,6 +690,10 @@ const app = createApp({
             visionModel: ''
         });
         const v5UnsupportedImageStyles = new Set(['r18', 'lolita25d', 'anime']);
+        // 「生图版本」（NAI 的 V4.5/V5）只有 NovelAI 认识，SD 与 ComfyUI 各有自己的模型选择。
+        // 注意：判断必须写「只对 novelai 成立」，而不是「不是 SD」——
+        // 后者在新增第三个生图方式时会把它一起显示出来（NAI 版本串到 ComfyUI 的 bug 就是这么来的）。
+        const isNaiProvider = computed(() => (settings.imageProvider || 'novelai') === 'novelai');
         const availableImageStyleOptions = computed(() => settings.imageModel === 'nai-diffusion-5-full'
             ? imageStyleOptions.filter(option => !v5UnsupportedImageStyles.has(option.value))
             : imageStyleOptions);
@@ -1925,6 +1933,14 @@ let removedProviderConfigCleared = false;
                 settings.sdCustomHeight = imageUtils.normalizeSdDimension(settings.sdCustomHeight, 1216);
                 // ComfyUI：老存档没有这些键，靠上面的默认值兜底；这里只做类型收敛。
                 settings.comfyWorkflow = String(settings.comfyWorkflow || '');
+                // 工作流库：老存档没有这个键；坏条目由 normalize 统一兜掉。
+                settings.comfyWorkflowLibrary = comfyUtils.normalizeComfyWorkflowLibrary(settings.comfyWorkflowLibrary);
+                settings.comfyActiveWorkflowId = String(settings.comfyActiveWorkflowId || '');
+                // 指向库里不存在的那一条时清空关联，避免下拉显示空白。
+                if (settings.comfyActiveWorkflowId
+                    && !comfyUtils.findComfyWorkflow(settings.comfyWorkflowLibrary, settings.comfyActiveWorkflowId)) {
+                    settings.comfyActiveWorkflowId = '';
+                }
                 settings.comfyBindings = (settings.comfyBindings && typeof settings.comfyBindings === 'object' && !Array.isArray(settings.comfyBindings))
                     ? settings.comfyBindings
                     : {};
@@ -2290,6 +2306,21 @@ let removedProviderConfigCleared = false;
             }
         };
 
+        // 从当前工作流里读出它实际用的底模名（归档索引用）。
+        // 用户没在设置里显式选底模时，图其实是工作流里那个模型出的，索引要记对。
+        const comfyCheckpointFromWorkflow = () => {
+            try {
+                const parsed = comfyUtils.parseComfyWorkflow(settings.comfyWorkflow);
+                if (!parsed.ok) return '';
+                const binding = comfyWorkflowState.effective?.checkpoint;
+                const node = binding ? parsed.prompt?.[binding.nodeId] : null;
+                const value = node?.inputs?.[binding?.input];
+                return typeof value === 'string' ? value.trim() : '';
+            } catch {
+                return '';
+            }
+        };
+
         const archiveGeneratedImage = async ({ imageUrl, task, card, data, job, tagKey }) => {
             const api = typeof window.RPHubSync !== 'undefined' ? window.RPHubSync : null;
             if (!api?.archiveImage || !api.apiUrl) return null;
@@ -2302,12 +2333,19 @@ let removedProviderConfigCleared = false;
                 const size = Number(job?.width) && Number(job?.height)
                     ? `${job.width}x${job.height}`
                     : settings.imageSize;
+                // 归档里的 model 字段：按当前生图方式记「真正用的那个模型」。
+                // 否则 ComfyUI/SD 出的图会被打上 NAI 的版本名（settings.imageModel），归档索引就骗人了。
+                const archiveModel = isNaiProvider.value
+                    ? settings.imageModel
+                    : (isComfyProvider.value
+                        ? (String(settings.comfyCheckpoint || '').trim() || comfyCheckpointFromWorkflow() || 'comfyui')
+                        : (String(settings.sdModel || '').trim() || 'stable-diffusion'));
                 const result = await api.archiveImage({
                     url: data ? undefined : imageUrl,
                     data,
                     character,
                     prompt,
-                    model: settings.imageModel,
+                    model: archiveModel,
                     size,
                     // data URL 直接当来源会把 base64 前缀写进索引，这里只留标记。
                     source: String(imageUrl).startsWith('data:') ? 'local-cache' : String(imageUrl).slice(0, 300),
@@ -3131,29 +3169,153 @@ let removedProviderConfigCleared = false;
         const comfySchedulerOptions = computed(() => buildComfyOptionList(comfyCapabilities.schedulers, '不覆盖（用工作流里的调度器）'));
 
         // ===== ComfyUI 设置页接线 =====
+        // 手改 JSON（或换绑定）即视为脱离了库里那一条：
+        // 否则下次点「保存」会静默覆盖库中原有的工作流，用户以为只是临时试试。
+        watch(() => settings.comfyWorkflow, (now, before) => {
+            if (before === undefined || now === before) return;
+            const entry = comfyUtils.findComfyWorkflow(settings.comfyWorkflowLibrary, settings.comfyActiveWorkflowId);
+            if (entry && entry.workflow !== now) settings.comfyActiveWorkflowId = '';
+        });
+
         const comfyWorkflowFileInput = ref(null);
 
-        const triggerComfyWorkflowFile = () => comfyWorkflowFileInput.value?.click?.();
+        // 工作流库（全局资产）：保存多份 API JSON，按名字切换。
+        // 与生图预设的分工：预设管「连哪个服务 + 这套出图参数」，库管「这个服务上能跑哪几张图」。
+        const comfyLibrary = computed(() => comfyUtils.normalizeComfyWorkflowLibrary(settings.comfyWorkflowLibrary));
 
-        const handleComfyWorkflowFile = async (event) => {
-            const file = event?.target?.files?.[0];
-            // 先清空 input，否则连续选同一个文件不会触发 change。
-            if (event?.target) event.target.value = '';
-            if (!file) return;
-            try {
-                const text = await file.text();
-                const parsed = comfyUtils.parseComfyWorkflow(text);
-                if (!parsed.ok) {
-                    showToast(`该文件不是可用的 API 工作流：${parsed.error}`, 'error');
+        const comfyLibraryOptions = computed(() => {
+            const list = comfyLibrary.value.map(item => ({ value: item.id, label: item.name }));
+            const active = String(settings.comfyActiveWorkflowId || '');
+            // 当前 JSON 与库里任何一条都不对应（用户手改过），给一个明确的「未保存」状态。
+            if (!active || !list.some(item => item.value === active)) {
+                list.unshift({ value: '', label: comfyWorkflowState.ok ? '当前工作流（未保存到库）' : '未选择工作流' });
+            }
+            return list;
+        });
+
+        // 把库里某条载入到当前编辑状态（JSON + 绑定 + 探测开关）。
+        const applyComfyLibraryEntry = (entry) => {
+            if (!entry) return false;
+            settings.comfyWorkflow = entry.workflow;
+            settings.comfyBindings = { ...(entry.bindings || {}) };
+            settings.comfyAutoDetect = entry.autoDetect !== false;
+            settings.comfyActiveWorkflowId = entry.id;
+            return true;
+        };
+
+        const comfyLibrarySelection = computed({
+            get: () => {
+                const active = String(settings.comfyActiveWorkflowId || '');
+                // 只有确实存在于库里才回显该 id，否则回落到「未保存」项，避免下拉显示成空白。
+                return comfyLibrary.value.some(item => item.id === active) ? active : '';
+            },
+            set: (id) => {
+                const value = String(id || '');
+                if (!value) {
+                    // 选「未保存」只是解除关联，不丢当前 JSON。
+                    settings.comfyActiveWorkflowId = '';
                     return;
                 }
-                settings.comfyWorkflow = text;
-                // 换了工作流，旧的手工绑定多半已失效，清掉让自动识别重新接管。
-                settings.comfyBindings = {};
-                showToast(`已载入工作流（${parsed.nodes.length} 个节点）`, 'success');
-            } catch (error) {
-                showToast(`读取文件失败：${error.message}`, 'error');
+                const entry = comfyUtils.findComfyWorkflow(settings.comfyWorkflowLibrary, value);
+                if (!entry) return;
+                applyComfyLibraryEntry(entry);
+                showToast(`已载入工作流「${entry.name}」`, 'info');
             }
+        });
+
+        // 保存当前 JSON 到库。已关联库里某条则覆盖它，否则新建。
+        const saveComfyWorkflowToLibrary = () => {
+            const parsed = comfyUtils.parseComfyWorkflow(settings.comfyWorkflow);
+            if (!parsed.ok) {
+                showToast(`工作流不可用：${parsed.error}`, 'error');
+                return;
+            }
+            const activeId = String(settings.comfyActiveWorkflowId || '');
+            const existing = activeId
+                ? comfyUtils.findComfyWorkflow(settings.comfyWorkflowLibrary, activeId)
+                : null;
+            // 名字优先用 JSON 自带的标题（ComfyUI 导出会写 _meta.title），其次沿用旧名，最后按节点猜。
+            const suggested = comfyUtils.readComfyWorkflowTitle(settings.comfyWorkflow)
+                || existing?.name
+                || comfyUtils.suggestComfyWorkflowName(parsed.nodes, comfyLibrary.value.length + 1);
+            const name = window.prompt('保存为工作流（输入名称）：', suggested);
+            if (!name || !name.trim()) return;
+            const result = comfyUtils.upsertComfyWorkflow(settings.comfyWorkflowLibrary, {
+                id: activeId,
+                name: name.trim(),
+                workflow: settings.comfyWorkflow,
+                bindings: settings.comfyBindings,
+                autoDetect: settings.comfyAutoDetect
+            });
+            if (result.error) {
+                showToast(result.error, 'error');
+                return;
+            }
+            settings.comfyWorkflowLibrary = result.library;
+            settings.comfyActiveWorkflowId = result.id;
+            saveData();
+            showToast(result.added ? `已保存工作流「${name.trim()}」` : `已更新工作流「${name.trim()}」`, 'success');
+        };
+
+        const deleteComfyWorkflowFromLibrary = () => {
+            const activeId = String(settings.comfyActiveWorkflowId || '');
+            const entry = comfyUtils.findComfyWorkflow(settings.comfyWorkflowLibrary, activeId);
+            if (!entry) {
+                showToast('请先在「工作流库」里选择一个已保存的工作流再删除', 'info');
+                return;
+            }
+            if (!window.confirm(`确定要从工作流库删除「${entry.name}」吗？`)) return;
+            settings.comfyWorkflowLibrary = comfyUtils.removeComfyWorkflow(settings.comfyWorkflowLibrary, entry.id);
+            // 只解除关联，不销毁当前 JSON——用户可能还想继续用它或另存新名字。
+            settings.comfyActiveWorkflowId = '';
+            saveData();
+            showToast(`已删除工作流「${entry.name}」`, 'info');
+        };
+
+        const importComfyWorkflowFile = () => comfyWorkflowFileInput.value?.click?.();
+
+        // 选择 .json 文件：直接导入并自动存进库（这是「批量攒工作流」的主要入口）。
+        const handleComfyWorkflowFile = async (event) => {
+            const files = [...(event?.target?.files || [])];
+            // 先清空 input，否则连续选同一个文件不会触发 change。
+            if (event?.target) event.target.value = '';
+            if (!files.length) return;
+            let library = comfyUtils.normalizeComfyWorkflowLibrary(settings.comfyWorkflowLibrary);
+            let lastId = '';
+            const imported = [];
+            const failed = [];
+            for (const file of files) {
+                try {
+                    const text = await file.text();
+                    const parsed = comfyUtils.parseComfyWorkflow(text);
+                    if (!parsed.ok) {
+                        failed.push(`${file.name}（${parsed.error}）`);
+                        continue;
+                    }
+                    // 每个文件存成库里独立的一条，名字取文件名的去扩展名版本。
+                    const baseName = file.name.replace(/\.json$/i, '');
+                    const result = comfyUtils.upsertComfyWorkflow(library, {
+                        name: comfyUtils.readComfyWorkflowTitle(text) || baseName || `工作流 ${library.length + 1}`,
+                        workflow: text,
+                        bindings: {},
+                        autoDetect: true
+                    });
+                    library = result.library;
+                    lastId = result.id;
+                    imported.push(baseName);
+                } catch (error) {
+                    failed.push(`${file.name}（读取失败：${error.message}）`);
+                }
+            }
+            settings.comfyWorkflowLibrary = library;
+            // 只导入了一个就顺手载入，多选时保持用户当前选择不变。
+            if (imported.length === 1 && lastId) {
+                const entry = comfyUtils.findComfyWorkflow(library, lastId);
+                applyComfyLibraryEntry(entry);
+            }
+            saveData();
+            if (imported.length) showToast(`已导入 ${imported.length} 个工作流到库`, 'success');
+            if (failed.length) showToast(`有 ${failed.length} 个文件未能导入：${failed[0]}`, 'error');
         };
 
         // 绑定表格的取值：手工绑定优先，其次显示自动识别结果（只读展示）。
@@ -9518,10 +9680,12 @@ let removedProviderConfigCleared = false;
             isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
             // 生图方式与 ComfyUI 专用
-            isComfyProvider, comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,
+            isComfyProvider, isNaiProvider, comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,
             comfyModelOptions, comfyVaeOptions, comfySamplerOptions, comfySchedulerOptions,
-            comfyWorkflowFileInput, triggerComfyWorkflowFile, handleComfyWorkflowFile,
+            comfyWorkflowFileInput, importComfyWorkflowFile, handleComfyWorkflowFile,
             comfyBindingInputValue, setComfyBinding,
+            comfyLibrary, comfyLibraryOptions, comfyLibrarySelection,
+            saveComfyWorkflowToLibrary, deleteComfyWorkflowFromLibrary, importComfyWorkflowFile,
             activeImageEndpointId, savedImageEndpointOptions, selectImageEndpoint, saveCurrentImageEndpoint, deleteActiveImageEndpoint,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
             getToolCallModeText, hasThinkingOrTools, isMessageThinkingOrRunning, isThinkingSummaryOpen, toggleThinkingSummary, markThinkingSummaryDetailOpened, getTimelineSteps,
