@@ -357,6 +357,12 @@ assertTrue('任务完成时按真实像素刷新卡片比例（否则框不跟�
     /applyGeneratedImageCardAspect\(card, \{ requestUrl: card\.dataset\.imageRequest, job \}\)/.test(appSource));
 assertTrue('官方分辨率/自定义宽高进入重建正则的 watch',
     /settings\.imageSize,[\s\S]{0,500}settings\.naiOfficialResolution,[\s\S]{0,300}settings\.naiOfficialCustomHeight,/.test(appSource));
+// 第 53 条：换预设/换方式/改参数之后重新进入会话，历史图一律不自动重跑。
+assertTrue('参数变了不再删缓存条目、不再自动重跑',
+    !appSource.includes('completedImageJobsByTag.delete(tagKey)')
+    && appSource.includes('markGeneratedImageOutdated(card, outdated)'));
+assertTrue('改为在卡片上标「按旧参数出的」（↻ 高亮提示）',
+    readFileSync(join(root, 'assets/css/styles.css'), 'utf8').includes('.generated-image-card.is-image-outdated'));
 assertTrue('切换预设时载入 profile', /selectImageEndpoint[\s\S]{0,900}applyImageProfile\(found\.profile\)/.test(appSource));
 assertTrue('保存预设时带上 profile', /endpointData = \{[\s\S]{0,400}profile: captureImageProfile\(\)/.test(appSource));
 assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,220}writeActiveImageProfile\(\)/.test(appSource));
@@ -1171,8 +1177,8 @@ assertEqual('网关 URL 的 steps 仍在指纹里',
 const fpHorizontal = fpOf();
 const fpVertical = fpOf({ naiOfficialResolution: '832x1216' }, officialUrl('竖图', 832, 1216));
 assertEqual('官方分辨率 横→竖：指纹不变', fpHorizontal === fpVertical, true);
-assertEqual('切换后历史横图条目仍然复用（不重跑、不烧 Anlas）',
-    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: fpHorizontal }, fpVertical), true);
+assertEqual('切换后历史横图条目不算过期（不重跑、不烧 Anlas）',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: fpHorizontal }, fpVertical), false);
 assertEqual('通用「生图比例」横→竖：指纹不变', fpOf({ imageSize: '横图' }) === fpOf({ imageSize: '竖图' }), true);
 assertEqual('SD 自定义分辨率：指纹不变',
     fpOf({ imageProvider: 'stable-diffusion', sdCustomWidth: 1216, sdCustomHeight: 832 })
@@ -1181,7 +1187,9 @@ assertEqual('ComfyUI 尺寸覆盖：指纹不变',
     fpOf({ imageProvider: 'comfyui', comfyWidth: 1216, comfyHeight: 832, comfyOverrideSize: true })
     === fpOf({ imageProvider: 'comfyui', comfyWidth: 832, comfyHeight: 1216, comfyOverrideSize: true }), true);
 
-// 但真正改变画面的参数必须照旧重跑，否则会退回第 43 条那个「改了参数却像没生效」。
+// 真正改变画面的参数：只会被判成「这张图是按旧参数出的」——用来给卡片打提示，
+// **不再触发重跑**（第 53 条：历史图是快照，进旧会话/换预设都不该付重跑那笔 Anlas；
+//  想按新参数重出，由用户点卡片上的 ↻，走 fresh 路径）。
 const fpChanged = [
     ['负面提示词', { naiOfficialNegativePrompt: 'bad anatomy' }],
     ['步数', { naiOfficialSteps: 40 }],
@@ -1193,17 +1201,17 @@ const fpChanged = [
 ];
 fpChanged.forEach(([label, patch]) => {
     const changed = fpOf(patch);
-    assertEqual(`改了${label} → 指纹变化且不复用`,
-        imageUtils.shouldReuseCachedImageJob({ imageFingerprint: fpHorizontal }, changed), false);
+    assertEqual(`改了${label} → 判为「按旧参数出的」（只提示，不重跑）`,
+        imageUtils.isCachedImageJobOutdated({ imageFingerprint: fpHorizontal }, changed), true);
 });
-assertEqual('URL 里的 steps 变化 → 不复用',
-    imageUtils.shouldReuseCachedImageJob(
+assertEqual('URL 里的 steps 变化 → 判为「按旧参数出的」',
+    imageUtils.isCachedImageJobOutdated(
         { imageFingerprint: imageUtils.resolveImageCacheFingerprint({ settings: fpBase, requestUrl: 'http://x/generate?tag=a&steps=40' }) },
         imageUtils.resolveImageCacheFingerprint({ settings: fpBase, requestUrl: 'http://x/generate?tag=a&steps=28' })
-    ), false);
+    ), true);
 
 // 升级兼容：老存档里的指纹是「带尺寸字段」的旧算法算出来的字符串，
-// 直接比字符串会让升级后历史图全部重跑一次，所以比较前两边都要归一化。
+// 直接比字符串会让升级后历史图全部被当成「参数变了」，所以比较前两边都要归一化。
 const legacyFingerprint = JSON.stringify({
     provider: 'novelai-official',
     baseUrl: '',
@@ -1212,16 +1220,16 @@ const legacyFingerprint = JSON.stringify({
     },
     request: { provider: 'novelai-official', size: '横图', w: '1216', h: '832' }
 });
-assertEqual('老指纹（带尺寸字段）在新比例下仍然命中',
-    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: legacyFingerprint }, fpVertical), true);
+assertEqual('老指纹（带尺寸字段）在新比例下不算过期',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: legacyFingerprint }, fpVertical), false);
 const legacyChanged = JSON.stringify({
     provider: 'novelai-official',
     baseUrl: '',
     profile: { ...imageUtils.captureImageProfile({ ...fpBase, naiOfficialSteps: 40 }) },
     request: { provider: 'novelai-official', size: '横图', w: '1216', h: '832' }
 });
-assertEqual('老指纹里真正变了的参数仍然判为不复用',
-    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: legacyChanged }, fpVertical), false);
+assertEqual('老指纹里真正变了的参数仍然判为「按旧参数出的」',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: legacyChanged }, fpVertical), true);
 const shuffledKeys = JSON.stringify({
     baseUrl: '',
     profile: Object.fromEntries(Object.entries(imageUtils.captureImageProfile(fpBase)).reverse()),
@@ -1229,10 +1237,10 @@ const shuffledKeys = JSON.stringify({
     provider: 'novelai-official'
 });
 assertEqual('键顺序不影响比较结果（老存档字段顺序可能不同）',
-    imageUtils.shouldReuseCachedImageJob({ imageFingerprint: shuffledKeys }, fpVertical), true);
-assertEqual('没有指纹的老条目仍然放行（升级不重跑）',
-    imageUtils.shouldReuseCachedImageJob({ status: 'done', imageUrl: 'x' }, fpVertical), true);
-assertEqual('非 JSON 指纹不会炸，也不会误判', imageUtils.shouldReuseCachedImageJob({ imageFingerprint: 'v1' }, 'v1'), true);
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: shuffledKeys }, fpVertical), false);
+assertEqual('没有指纹的老条目一律不算过期（升级不重跑）',
+    imageUtils.isCachedImageJobOutdated({ status: 'done', imageUrl: 'x' }, fpVertical), false);
+assertEqual('非 JSON 指纹不会炸，也不会误判', imageUtils.isCachedImageJobOutdated({ imageFingerprint: 'v1' }, 'v1'), false);
 
 // --- 16. 角色卡管理：批量导入接线 ---
 // 主应用（index.html + app.js + ui-components.js）里「添加角色卡」菜单下的批量入口。

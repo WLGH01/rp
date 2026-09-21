@@ -805,6 +805,22 @@ const app = createApp({
             card.style.aspectRatio = `${width} / ${height}`;
         };
 
+        // 「这张图是按旧参数出的」提示：只在 ↻ 按钮上标一下，绝不自动重跑。
+        // 历史图是快照：换生图预设 / 换方式 / 改参数之后重新进入会话，旧图必须原样留着
+        // （官方 API 一张图就是一次实打实的 Anlas 消耗）；想按新参数重出由用户点 ↻。
+        const markGeneratedImageOutdated = (card, outdated) => {
+            if (!card) return;
+            const button = card.querySelector('.generated-image-reroll');
+            card.classList.toggle('is-image-outdated', !!outdated);
+            if (outdated) {
+                card.dataset.imageOutdated = '1';
+                if (button) button.title = '这张图是按旧参数出的，点此按当前参数重出';
+            } else {
+                delete card.dataset.imageOutdated;
+                if (button) button.title = '重新生成图片';
+            }
+        };
+
         const showApiProviderSelector = ref(false);
         const selectedApiProviderId = ref(DEFAULT_API_PROVIDER_ID);
         const customApiProviderOption = {
@@ -2395,6 +2411,8 @@ let removedProviderConfigCleared = false;
             // 卡片 object-fit: contain，框比图高就会在上下各留一大片空白（看起来「没自适应」）。
             // 这里用任务返回的真实像素再刷一次比例，框永远贴合图片本身。
             applyGeneratedImageCardAspect(card, { requestUrl: card.dataset.imageRequest, job });
+            // 这张是刚出的：摘掉「按旧参数出的」提示（缓存回显那条路径要保留它，所以按 isCached 区分）。
+            if (!isCached) markGeneratedImageOutdated(card, false);
             card.classList.remove('is-generating', 'is-generation-error', 'is-waiting');
             card.dataset.imageJobState = job.status;
 
@@ -3794,32 +3812,31 @@ let removedProviderConfigCleared = false;
             const tag = parsedUrl.searchParams.get('tag') || '';
             const tagKey = normalizeImageTagKey(tag);
 
-            // 若非主动重新生成（options.fresh !== true），且此 prompt 的图片已生成过，直接复用已有结果
-            // 彻底杜绝切换生图地址、切换预设或重新渲染消息时历史图片全部重新跑图的问题。
+            // 若非主动重新生成（options.fresh !== true），且此 prompt 的图片已生成过，直接复用已有结果。
+            // 这里的「复用」是无条件的：换生图地址、换生图预设/方式、改出图参数之后重新渲染消息或
+            // 重新进入会话，历史图一律原样回显，绝不自动重跑（官方 API 一张图就是一次 Anlas 消耗）。
+            // 参数变过的那些卡片只挂一个「按旧参数出的」提示，想按新参数重出由用户点 ↻（走 fresh）。
             if (!options.fresh && tagKey && completedImageJobsByTag.has(tagKey)) {
                 const cachedJob = completedImageJobsByTag.get(tagKey);
-                // 参数变了（负面/风格/模型/步数…）就不能复用旧图，按新参数重跑一张。
-                // 老条目没有指纹，按旧行为直接复用，避免升级后把历史图片全部重跑。
-                const currentFingerprint = imageUtils.resolveImageCacheFingerprint({
+                // 老条目没有指纹，一律不算过期（升级兼容）。
+                const outdated = imageUtils.isCachedImageJobOutdated(cachedJob, imageUtils.resolveImageCacheFingerprint({
                     settings,
                     requestUrl: requestUrl || ''
-                });
-                if (!imageUtils.shouldReuseCachedImageJob(cachedJob, currentFingerprint)) {
-                    completedImageJobsByTag.delete(tagKey);
-                    persistCompletedImageJob();
-                } else {
-                    card.dataset.imageRequest = requestUrl;
-                    card.dataset.imageJobState = cachedJob.status;
-                    // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。
-                    applyGeneratedImageCardAspect(card, { requestUrl, job: cachedJob });
-                    renderGeneratedImageJob(card, { baseUrl: parsedUrl.origin }, cachedJob, true);
-                    // 老条目（升级前生成的）里还存着整张 base64：按需补传到服务端并换回短地址。
-                    upgradeLegacyCachedImage(tagKey, cachedJob, card);
-                    return Promise.resolve(cachedJob);
-                }
+                }));
+                markGeneratedImageOutdated(card, outdated);
+                card.dataset.imageRequest = requestUrl;
+                card.dataset.imageJobState = cachedJob.status;
+                // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。
+                applyGeneratedImageCardAspect(card, { requestUrl, job: cachedJob });
+                renderGeneratedImageJob(card, { baseUrl: parsedUrl.origin }, cachedJob, true);
+                // 老条目（升级前生成的）里还存着整张 base64：按需补传到服务端并换回短地址。
+                upgradeLegacyCachedImage(tagKey, cachedJob, card);
+                return Promise.resolve(cachedJob);
             }
 
             ensureGeneratedImageProgressUi(card);
+            // 这张卡马上要（重新）出图：先摘掉上一轮的「按旧参数出的」提示。
+            markGeneratedImageOutdated(card, false);
             generatedImageTasks.forEach(task => task.cards.delete(card));
             card.querySelector('img')?.setAttribute('alt', '');
             const animationTime = performance.now();

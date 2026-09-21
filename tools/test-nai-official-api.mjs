@@ -448,25 +448,26 @@ try {
             settings: baseSettings,
             requestUrl: 'http://x/ai/generate-image?tag=1girl&provider=novelai-official&size=横图&w=1216&h=832'
         }), true);
-    assertEqual('切成竖图后历史横图条目仍然复用',
-        imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp({ naiOfficialResolution: '1216x832' })), true);
-    assertEqual('老指纹（尺寸进了指纹的旧算法）升级后仍命中',
-        imageUtils2.shouldReuseCachedImageJob({
+    assertEqual('切成竖图后历史横图条目不算过期',
+        imageUtils2.isCachedImageJobOutdated({ imageFingerprint: fp() }, fp({ naiOfficialResolution: '1216x832' })), false);
+    assertEqual('老指纹（尺寸进了指纹的旧算法）升级后不算过期',
+        imageUtils2.isCachedImageJobOutdated({
             imageFingerprint: JSON.stringify({
                 provider: 'novelai-official',
                 baseUrl: '',
                 profile: imageUtils2.captureImageProfile(baseSettings),
                 request: { provider: 'novelai-official', size: '竖图', w: '832', h: '1216' }
             })
-        }, fp()), true);
+        }, fp()), false);
 
-    // 复用判定：有指纹就要完全一致；老条目（没指纹）放行，避免升级后历史图全部重跑。
-    assertEqual('指纹一致 → 复用缓存', imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp()), true);
-    assertEqual('指纹不一致 → 不复用（重跑）',
-        imageUtils2.shouldReuseCachedImageJob({ imageFingerprint: fp() }, fp({ naiOfficialNegativePrompt: 'x' })), false);
-    assertEqual('老条目没有指纹 → 仍然复用（不烧额度）',
-        imageUtils2.shouldReuseCachedImageJob({ status: 'done', imageUrl: 'x' }, fp()), true);
-    assertEqual('没有条目 → 不复用', imageUtils2.shouldReuseCachedImageJob(null, fp()), false);
+    // 「过期」只表示「这张图是按旧参数出的」，用来给卡片打提示；
+    // 它**不再**触发重跑（第 53 条）：进旧会话/换预设都不该重跑历史图，想重出要点 ↻。
+    assertEqual('参数一致 → 不算过期', imageUtils2.isCachedImageJobOutdated({ imageFingerprint: fp() }, fp()), false);
+    assertEqual('参数变了 → 判为过期（只提示，不重跑）',
+        imageUtils2.isCachedImageJobOutdated({ imageFingerprint: fp() }, fp({ naiOfficialNegativePrompt: 'x' })), true);
+    assertEqual('老条目没有指纹 → 一律不算过期（不烧额度）',
+        imageUtils2.isCachedImageJobOutdated({ status: 'done', imageUrl: 'x' }, fp()), false);
+    assertEqual('没有条目 → 也不当作过期', imageUtils2.isCachedImageJobOutdated(null, fp()), false);
     // 请求 URL 里的出图参数（网关的 steps/sampler/negative）也要参与指纹
     const gwA = imageUtils2.resolveImageCacheFingerprint({ settings: baseSettings, requestUrl: 'http://x/generate?tag=a&steps=40&sampler=k_euler' });
     const gwB = imageUtils2.resolveImageCacheFingerprint({ settings: baseSettings, requestUrl: 'http://x/generate?tag=a&steps=28&sampler=k_euler' });

@@ -1825,6 +1825,12 @@
             height: 1.3rem;
         }
 
+        /* 这张图是按旧参数出的：只做提示（↻ 变琥珀色 + hover 文案），不自动重跑。
+           历史图是快照，想按新参数重出由用户点 ↻。 */
+        .generated-image-card.is-image-outdated .generated-image-reroll {
+            color: #f59e0b;
+        }
+
         .generated-image-progress {
             position: absolute;
             inset: 0;

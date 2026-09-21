@@ -1526,13 +1526,19 @@ window.RPHubUtils = {
         return normalizeImageCacheFingerprint(parts);
     };
 
-    // 缓存条目能不能复用：没记指纹的老条目一律复用（升级兼容），有指纹就必须完全一致
-    // （「完全一致」= 归一化后一致，即尺寸类参数怎么变都算一致）。
-    const shouldReuseCachedImageJob = (entry, fingerprint) => {
+    // 缓存条目跟**当前设置**相比，是不是「换过参数了」。
+    //
+    // 这个判定**不再**决定要不要重跑（第 53 条）：历史图是快照，改设置只影响之后新生成的图
+    // 与手动 ↻。起因是「更换生图预设/方式后进入旧会话，历史图全部重跑」——官方 API 一张图
+    // 就是一次实打实的消耗，进会话不该付这笔钱。现在它的唯一用途是给卡片打一个
+    // 「这张是按旧参数出的」提示（↻ 按钮高亮 + 文案），想按新参数重出由用户自己点 ↻。
+    // 没记指纹的老条目（升级兼容）一律不算过期。
+    const isCachedImageJobOutdated = (entry, fingerprint) => {
+        // 没有条目 = 本来就没有图可显示，谈不上「按旧参数出的」。
         if (!entry) return false;
-        if (!entry.imageFingerprint) return true;
+        if (!entry.imageFingerprint) return false;
         return normalizeImageCacheFingerprint(entry.imageFingerprint)
-            === normalizeImageCacheFingerprint(fingerprint);
+            !== normalizeImageCacheFingerprint(fingerprint);
     };
 
 
@@ -2704,7 +2710,7 @@ window.RPHubUtils = {
         normalizeImageCacheFingerprint,
         resolveNaiNegativePrompt,
         resolveImageCacheFingerprint,
-        shouldReuseCachedImageJob,
+        isCachedImageJobOutdated,
         applyNaiGatewayUrlParams,
         normalizeSdDimension,
         resolveSdSize,
