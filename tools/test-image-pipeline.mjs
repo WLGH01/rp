@@ -152,6 +152,16 @@ assertEqual('无 job 时读 URL 的 w/h', imageUtils.resolveGeneratedImageAspect
 assertEqual('无 job 无 w/h 时读语义比例', imageUtils.resolveGeneratedImageAspect(null, 'http://x/generate?size=方图'),
     { width: 1024, height: 1024 });
 assertEqual('全都没有 → 兜底竖图', imageUtils.resolveGeneratedImageAspect(null, ''), { width: 832, height: 1216 });
+// 官方 API 的真实画布尺寸来自「分辨率档位」，而正则 URL 里的 w/h 是拼 URL 当时的快照：
+// 用户改完分辨率后，URL 里可能还是上一次的 w/h（切设置不一定重建正则）。
+// 这时必须以任务返回的真实像素建框，否则横图会落在竖框里——
+// 卡片是 object-fit: contain，框比图高就在上下各留一大片空白（「怎么没有自适应」）。
+assertEqual('真实像素优先于过期的 URL w/h（横图不被塞进竖框）',
+    imageUtils.resolveGeneratedImageAspect({ width: 832, height: 1216 }, 'http://x/ai/generate-image?size=横图&w=1216&h=832'),
+    { width: 832, height: 1216 });
+assertEqual('没有真实像素时才退回 URL 的 w/h',
+    imageUtils.resolveGeneratedImageAspect({ status: 'done' }, 'http://x/ai/generate-image?size=横图&w=1216&h=832'),
+    { width: 1216, height: 832 });
 
 // --- 7. 每个生图预设自带一套出图参数（风格/SD 参数不再互相串改） ---
 section('7) 预设隔离：改一个预设不应影响其他预设');
@@ -341,6 +351,12 @@ assertTrue('缓存写入时固化 resolvedUrl', /cacheCompletedImageJob[\s\S]{0,
 assertTrue('渲染图片走统一解析函数', appSource.includes('resolveGeneratedImageUrl(job, task)'));
 assertTrue('SD 请求 URL 带上 w/h', appSource.includes('&w=${sdSize.width}&h=${sdSize.height}'));
 assertTrue('自定义分辨率开关进入重建正则的 watch', appSource.includes('settings.sdCustomWidth'));
+// 卡片比例必须贴合「真正出的那张图」：任务完成时按真实像素再刷一次；
+// 官方分辨率/自定义宽高也要进「重建正则」的 watch（否则 URL 里的 w/h 一直是旧值）。
+assertTrue('任务完成时按真实像素刷新卡片比例（否则框不跟着图片自适应）',
+    /applyGeneratedImageCardAspect\(card, \{ requestUrl: card\.dataset\.imageRequest, job \}\)/.test(appSource));
+assertTrue('官方分辨率/自定义宽高进入重建正则的 watch',
+    /settings\.imageSize,[\s\S]{0,500}settings\.naiOfficialResolution,[\s\S]{0,300}settings\.naiOfficialCustomHeight,/.test(appSource));
 assertTrue('切换预设时载入 profile', /selectImageEndpoint[\s\S]{0,900}applyImageProfile\(found\.profile\)/.test(appSource));
 assertTrue('保存预设时带上 profile', /endpointData = \{[\s\S]{0,400}profile: captureImageProfile\(\)/.test(appSource));
 assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,220}writeActiveImageProfile\(\)/.test(appSource));

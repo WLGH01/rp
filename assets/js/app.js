@@ -2387,6 +2387,12 @@ let removedProviderConfigCleared = false;
                 };
             }
             image.src = imageUrl;
+            // 卡片宽高比跟着「真正出的这张图」走，而不是建卡时那份 URL 快照：
+            // 正则里的 w/h 是拼 URL 当时的设置，用户改了生图比例 / 官方分辨率 / 自定义宽高后
+            // 它可能还是旧值（切设置并不一定重建正则），于是横图会落在竖框里——
+            // 卡片 object-fit: contain，框比图高就会在上下各留一大片空白（看起来「没自适应」）。
+            // 这里用任务返回的真实像素再刷一次比例，框永远贴合图片本身。
+            applyGeneratedImageCardAspect(card, { requestUrl: card.dataset.imageRequest, job });
             card.classList.remove('is-generating', 'is-generation-error', 'is-waiting');
             card.dataset.imageJobState = job.status;
 
@@ -8581,6 +8587,13 @@ let removedProviderConfigCleared = false;
             settings.imageStyle,
             settings.customImageArtists,
             settings.imageSize,
+            // NovelAI 官方 API 的画布尺寸来自「分辨率档位 / 自定义宽高」，不走 imageSize，
+            // 所以这几个字段也必须进这里：否则改完分辨率，正则里嵌的 w/h 还是上一次的旧值，
+            // 新卡片会按旧比例建框（横图落在竖框里，上下留一大片空白）。
+            settings.naiOfficialResolution,
+            settings.naiOfficialCustomSizeEnabled,
+            settings.naiOfficialCustomWidth,
+            settings.naiOfficialCustomHeight,
             // ComfyUI 的尺寸覆盖 / 比例变更同样要重建正则 URL 里的 w/h。
             settings.comfyOverrideSize,
             settings.comfyWidth,
