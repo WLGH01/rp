@@ -617,7 +617,10 @@ const app = createApp({
             imageProvider: 'novelai',
             // --- NovelAI 官方 API（image.novelai.net）专用 ---
             // 官方 access token（pst 开头），走 Authorization: Bearer。
+            // 与通用 imageGenKey 分开存：两套 NAI 方式各用各的密钥，互不覆盖。
             naiOfficialToken: '',
+            // 官方接口地址：留空用 https://image.novelai.net；填中转/反代即可自定义通道。
+            naiOfficialBaseUrl: '',
             naiOfficialModel: 'nai-diffusion-5-full',
             // 分辨率档位：默认选竖图 832×1216（1MP 以内，Opus 免费）。
             naiOfficialResolution: '832x1216',
@@ -2009,6 +2012,9 @@ let removedProviderConfigCleared = false;
                 settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost !== false;
                 settings.naiOfficialCustomSizeEnabled = settings.naiOfficialCustomSizeEnabled === true;
                 settings.naiOfficialSeed = String(settings.naiOfficialSeed ?? '');
+                // 官方专属的密钥与地址：老存档没有这两个键，收敛成字符串即可。
+                settings.naiOfficialToken = String(settings.naiOfficialToken ?? '');
+                settings.naiOfficialBaseUrl = String(settings.naiOfficialBaseUrl ?? '');
                 if (!(window.RPHubConfig?.uiOptions?.novelaiOfficialResolutions || []).some(item => item.value === settings.naiOfficialResolution)) {
                     settings.naiOfficialResolution = '832x1216';
                 }
@@ -3410,12 +3416,17 @@ let removedProviderConfigCleared = false;
         //   4. 参数（含 V4/V5 的 v4_prompt 结构）全部在 parameters 里
         // 因为没有轮询，进度只能用「读取响应的字节数」近似——见 fetch 的 onProgress。
 
+        // 官方接口地址优先级：官方专属地址 → 通用生图地址 → 官方默认。
+        // 专属地址在前，这样两套 NAI 方式可以各指各的通道（例如网关填 sta1n、官方填自己的中转）。
         const naiOfficialBaseUrl = () => {
+            const dedicated = normalizeServiceBaseUrl(settings.naiOfficialBaseUrl);
+            if (dedicated) return dedicated;
             const configured = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
             return configured || (window.RPHubConfig?.uiOptions?.novelaiOfficialBaseUrl || 'https://image.novelai.net');
         };
 
-        // 官方 token 优先用独立字段，回落到通用的生图密钥，方便用户只填一处。
+        // 官方 token：专属字段优先，留空才回落到通用生图密钥（方便只想填一处的人）。
+        // 两者独立保存，切到网关方式时不会把官方 token 顶掉。
         const naiOfficialToken = () => String(
             settings.naiOfficialToken || settings.imageGenKey || ''
         ).trim();

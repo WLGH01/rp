@@ -2,6 +2,8 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <!-- 主题需在样式之前同步执行，否则深色下会闪白。 -->
+    <script src="../assets/js/theme.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>小说生成</title>
     <!-- 全部第三方资源已固化到 ../assets/vendor/，离线可用。 -->
@@ -194,6 +196,7 @@
             transform: translateY(-20px) scale(0.95);
         }
     </style>
+    <link rel="stylesheet" href="../assets/css/theme.css">
 </head>
 <body class="h-screen flex flex-col md:flex-row overflow-hidden selection:bg-stone-300 selection:text-stone-900">
     <div id="app" class="w-full h-full flex relative">

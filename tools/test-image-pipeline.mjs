@@ -874,6 +874,15 @@ assertTrue('端点用 /ai/generate-image', appSource.includes('/ai/generate-imag
 assertTrue('鉴权用 Bearer（不是 URL token）', /'Authorization':\s*`Bearer \$\{token\}`/.test(appSource));
 assertTrue('探活用 /user/subscription', appSource.includes('/user/subscription'));
 assertTrue('官方 token 可回落到通用密钥', appSource.includes('settings.naiOfficialToken || settings.imageGenKey'));
+// 官方密钥与地址是「自定义」的：独立字段、独立优先级，不与网关那套互相覆盖。
+assertTrue('官方有独立密钥字段', appSource.includes('naiOfficialToken:'));
+assertTrue('官方有独立地址字段', appSource.includes('naiOfficialBaseUrl:'));
+assertTrue('官方专属地址优先于通用地址',
+    /const dedicated = normalizeServiceBaseUrl\(settings\.naiOfficialBaseUrl\)[\s\S]{0,220}normalizeServiceBaseUrl\(settings\.imageGenBaseUrl\)/.test(appSource));
+assertTrue('index.html 暴露官方密钥输入框', comfyIndexSource.includes('settings.naiOfficialToken'));
+assertTrue('index.html 暴露官方地址输入框', comfyIndexSource.includes('settings.naiOfficialBaseUrl'));
+assertTrue('官方地址随预设保存（换预设即换通道）',
+    imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialBaseUrl'));
 // 密钥不该随预设走
 assertTrue('官方 token 不随生图预设保存（避免切预设换密钥）',
     !imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialToken'));
@@ -890,5 +899,34 @@ assertTrue('免费判定走纯函数（不在模板里重算）',
 // 归档 model 要区分官方 API
 assertTrue('归档 model 区分官方 API', /isNaiOfficialProvider\.value[\s\S]{0,120}naiOfficialModel/.test(appSource));
 
-console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
-process.exit(failures === 0 ? 0 : 1);
+// --- 13. 夜间模式（移植自上游 1.9.6，1.9.7 优化观感）---
+// 主题必须是「零依赖 + 样式前同步执行」，否则深色下会闪白。
+section('13) 夜间模式：接线与防闪白');
+const themeJs = readFileSync(join(root, 'assets/js/theme.js'), 'utf8');
+const themeCss = readFileSync(join(root, 'assets/css/theme.css'), 'utf8');
+const indexSource2 = readFileSync(join(root, 'index.html'), 'utf8');
+assertTrue('theme.js 存在并暴露 RPHubTheme', themeJs.includes('window.RPHubTheme'));
+assertTrue('主题存 localStorage（跨会话记住）', themeJs.includes("localStorage.getItem(key)"));
+assertTrue('主题靠 data-app-theme 驱动', themeJs.includes('root.dataset.appTheme = theme'));
+assertTrue('三个入口用 postMessage 同步', themeJs.includes('RPHUB_THEME') && themeJs.includes('RPHUB_THEME_REQUEST'));
+// theme.js 必须排在 styles.css 之前：它是同步脚本，晚于样式就会先渲染浅色再切深色（闪白）
+const themeJsPos = indexSource2.indexOf('assets/js/theme.js');
+const stylesCssPos = indexSource2.indexOf('assets/css/styles.css');
+assertTrue('theme.js 在样式之前加载（防深色闪白）', themeJsPos > 0 && themeJsPos < stylesCssPos);
+assertTrue('theme.css 被引入', indexSource2.includes('assets/css/theme.css'));
+// 两个 iframe 页也要接入，否则切主题时它们不跟着变
+for (const page of ['character/index.html', 'novel/index.html']) {
+    const src = readFileSync(join(root, page), 'utf8');
+    assertTrue(`${page} 引入 theme.js`, src.includes('theme.js'));
+    assertTrue(`${page} 引入 theme.css`, src.includes('theme.css'));
+}
+assertTrue('导航面板有主题切换按钮', readFileSync(join(root, 'assets/js/ui-components.js'), 'utf8').includes('appearance-switch'));
+assertTrue('theme.css 无远程依赖（本机全离线）', !/https?:\/\//.test(themeCss) && !/@import/.test(themeCss));
+assertTrue('theme.css 定义深色变量', themeCss.includes('--night-canvas') && themeCss.includes('--night-text'));
+assertTrue('深色覆盖到 .app-main（主容器不露白）', themeCss.includes('body .app-main'));
+// 本机特有的容器也要覆盖，否则深色下会露白
+assertTrue('深色覆盖开场过渡层（防启动闪白）', themeCss.includes('.entry-transition'));
+assertTrue('深色覆盖聊天根容器（壁纸半透明处不露浅底）', themeCss.includes('.chat-view-root'));
+assertTrue('深色覆盖本机设置卡片', themeCss.includes('.generation-setting-card'));
+
+console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

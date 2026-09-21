@@ -1389,6 +1389,7 @@ window.RPHubUtils = {
         // NovelAI 官方 API：出图参数随预设走。
         // 刻意不含 naiOfficialToken —— 鉴权信息统一由 imageGenKey 管理，
         // 放进 profile 会让切预设时静默换掉密钥。
+        'naiOfficialBaseUrl',
         'naiOfficialModel', 'naiOfficialResolution',
         'naiOfficialCustomSizeEnabled', 'naiOfficialCustomWidth', 'naiOfficialCustomHeight',
         'naiOfficialSteps', 'naiOfficialScale', 'naiOfficialSampler', 'naiOfficialNoiseSchedule',

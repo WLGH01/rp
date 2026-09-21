@@ -82,8 +82,10 @@
             }
         }
     </script>
+    <script src="assets/js/theme.js"></script>
     <script>
         document.write('<link rel="stylesheet" href="assets/css/styles.css?v=' + new Date().getTime() + '">');
+        document.write('<link rel="stylesheet" href="assets/css/theme.css?v=' + new Date().getTime() + '">');
     </script>
 </head>
 <body class="bg-gray-50 text-gray-900 font-sans selection:bg-primary-200 selection:text-primary-900">
@@ -2027,6 +2029,30 @@
                                             <span v-else class="px-2 py-0.5 text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-md">
                                                 会消耗 Anlas
                                             </span>
+                                        </div>
+
+                                        <!-- 官方密钥与地址：与「NAI（RP Hub 网关）」的密钥彻底分离，
+                                             两套方式各自保存，互不覆盖。 -->
+                                        <div class="generation-setting-card">
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">官方 Access Token（独立保存）</label>
+                                            <input v-model="settings.naiOfficialToken" type="password"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                placeholder="pst 开头的 token（novelai.net → 账户设置 → Persistent Token）">
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                这里填的是 <span class="font-bold">NovelAI 官方</span>的 token，与上面「自动生图密钥」互不影响：留空时才会回落到通用密钥。
+                                                切到 NAI（RP Hub 网关）时用的是另一个密钥，两者不会互相覆盖。
+                                            </p>
+                                        </div>
+
+                                        <div class="generation-setting-card">
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">官方接口地址（可自定义）</label>
+                                            <input v-model="settings.naiOfficialBaseUrl" type="text"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                placeholder="https://image.novelai.net">
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                留空则用官方 <code class="px-1 rounded bg-gray-50">https://image.novelai.net</code>。
+                                                填中转/反代地址即可走自己的通道（路径固定为 <code class="px-1 rounded bg-gray-50">/ai/generate-image</code>）。
+                                            </p>
                                         </div>
 
                                         <!-- 分辨率档位：默认档位都在 1MP 免费线内 -->
