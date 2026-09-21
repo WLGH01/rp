@@ -1770,7 +1770,7 @@
                                                 menu-class="text-sm">
                                             </custom-select>
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                NovelAI 走异步任务轮询；Stable Diffusion 走 Forge/A1111 的 sdapi 同步返回；ComfyUI 提交「API 格式」工作流并按其节点图出图。
+                                                NAI（RP Hub 网关）走作者套壳的异步任务轮询；NovelAI 官方 API 直连 image.novelai.net（Bearer 鉴权，返回 ZIP）；Stable Diffusion 走 Forge/A1111 的 sdapi；ComfyUI 提交「API 格式」工作流。
                                             </p>
                                         </div>
 
@@ -1780,7 +1780,7 @@
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生图接口地址</label>
                                             <input v-model="settings.imageGenBaseUrl" type="text"
                                                 class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
-                                                :placeholder="isComfyProvider ? 'http://127.0.0.1:8188' : (isSdProvider ? 'http://127.0.0.1:7860' : 'https://你的生图服务地址')">
+                                                :placeholder="isComfyProvider ? 'http://127.0.0.1:8188' : (isSdProvider ? 'http://127.0.0.1:7860' : (isNaiOfficialProvider ? '留空 = https://image.novelai.net' : 'https://你的生图服务地址'))">
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">留空则不启用自动生图，应用不会访问任何内置生图服务。</p>
                                             <p v-if="isComfyProvider" class="mt-2 text-xs text-amber-600 leading-relaxed">
                                                 ComfyUI 直连需要跨域许可：给 ComfyUI 加 <code class="px-1 rounded bg-amber-50">--enable-cors-header</code> 启动参数，或在本站 nginx 里做一层反代后填本站地址。
@@ -1792,14 +1792,17 @@
                                             class="generation-setting-card">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                                                {{ isSdProvider ? 'API 鉴权（可选）' : (isComfyProvider ? '鉴权（可选，暂不支持）' : '自动生图密钥') }}</label>
+                                                {{ isSdProvider ? 'API 鉴权（可选）' : (isComfyProvider ? '鉴权（可选，暂不支持）' : (isNaiOfficialProvider ? '官方 Access Token' : '自动生图密钥')) }}</label>
                                             <input v-model="settings.imageGenKey" type="password"
                                                 :disabled="isComfyProvider"
                                                 class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm disabled:bg-gray-50 disabled:text-gray-400"
-                                                :placeholder="isSdProvider ? 'user:password（服务端启用 --api-auth 时填）' : (isComfyProvider ? 'ComfyUI 默认无需鉴权' : '你的生图服务密钥')">
+                                                :placeholder="isSdProvider ? 'user:password（服务端启用 --api-auth 时填）' : (isComfyProvider ? 'ComfyUI 默认无需鉴权' : (isNaiOfficialProvider ? 'pst 开头的 token（novelai.net 账户设置里获取）' : '你的生图服务密钥'))">
+                                            <p v-if="isNaiOfficialProvider" class="mt-2 text-xs text-amber-600 leading-relaxed">
+                                                官方 API 用 <code class="px-1 rounded bg-amber-50">Authorization: Bearer</code> 鉴权，token 以 <code class="px-1 rounded bg-amber-50">pst</code> 开头，在 NovelAI 账户设置的 Persistent Token 里获取。浏览器直连会受 CORS 限制，如报错可在本站 nginx 加一层反代到 image.novelai.net。
+                                            </p>
                                         </div>
 
-                                        <!-- Image Model (NovelAI only) -->
+                                        <!-- Image Model (NovelAI RP Hub gateway only) -->
                                         <div v-if="isNaiProvider" class="generation-setting-card">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生图版本</label>
@@ -1807,6 +1810,19 @@
                                                 button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
                                                 menu-class="text-sm">
                                             </custom-select>
+                                        </div>
+
+                                        <!-- NovelAI 官方 API 专用 -->
+                                        <div v-if="isNaiOfficialProvider" class="generation-setting-card">
+                                            <label
+                                                class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">官方模型</label>
+                                            <custom-select v-model="settings.naiOfficialModel" :options="naiOfficialModelOptions"
+                                                button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                menu-class="text-sm">
+                                            </custom-select>
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                V5 使用 <code class="px-1 rounded bg-gray-50">params_version 4</code>，其余版本用 3，插件会按所选模型自动切换。
+                                            </p>
                                         </div>
 
                                         <!-- SD Model (SD only) -->
@@ -1999,6 +2015,153 @@
                                                 </div>
                                             </label>
                                         </div>
+                                    </div>
+
+                                    <!-- NovelAI 官方 API 专用参数 -->
+                                    <div v-if="isNaiOfficialProvider" class="mt-6 pt-6 border-t border-gray-100 space-y-4">
+                                        <div class="flex items-center justify-between gap-3">
+                                            <h5 class="text-xs font-bold text-gray-500 uppercase tracking-wider">NovelAI 官方参数</h5>
+                                            <span v-if="naiOfficialIsFree" class="px-2 py-0.5 text-xs font-bold text-teal-700 bg-teal-50 border border-teal-200 rounded-md">
+                                                Opus 免费额度内
+                                            </span>
+                                            <span v-else class="px-2 py-0.5 text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-md">
+                                                会消耗 Anlas
+                                            </span>
+                                        </div>
+
+                                        <!-- 分辨率档位：默认档位都在 1MP 免费线内 -->
+                                        <div class="generation-setting-card">
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">分辨率</label>
+                                            <custom-select v-model="settings.naiOfficialResolution" :options="naiOfficialResolutionOptions"
+                                                button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                menu-class="text-sm">
+                                            </custom-select>
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                实际出图：<span class="font-bold text-teal-700">{{ naiOfficialSizeLabel }}</span>。
+                                                标「扣 Anlas」的档位超过 1MP 免费线，非 Opus 或超线都会按 Anlas 计费。
+                                            </p>
+                                        </div>
+
+                                        <!-- 自定义分辨率 -->
+                                        <div class="generation-setting-card">
+                                            <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                                <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                    自定义分辨率（宽 × 高）
+                                                </span>
+                                                <div class="relative inline-flex flex-none items-center">
+                                                    <input type="checkbox" v-model="settings.naiOfficialCustomSizeEnabled" class="settings-toggle-input sr-only">
+                                                    <div class="settings-toggle settings-toggle--teal"></div>
+                                                </div>
+                                            </label>
+                                            <div v-if="settings.naiOfficialCustomSizeEnabled" class="mt-3 space-y-3">
+                                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">宽度（像素）</label>
+                                                        <input v-model.number="settings.naiOfficialCustomWidth" type="number"
+                                                            :min="naiOfficialSizeLimits.min" :max="naiOfficialSizeLimits.max" :step="naiOfficialSizeLimits.step"
+                                                            class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">高度（像素）</label>
+                                                        <input v-model.number="settings.naiOfficialCustomHeight" type="number"
+                                                            :min="naiOfficialSizeLimits.min" :max="naiOfficialSizeLimits.max" :step="naiOfficialSizeLimits.step"
+                                                            class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                    </div>
+                                                </div>
+                                                <p class="text-xs text-gray-500 leading-relaxed">
+                                                    实际出图：<span class="font-bold text-teal-700">{{ naiOfficialSizeLabel }}</span>
+                                                </p>
+                                                <p v-if="naiOfficialFreeHint" class="text-xs text-amber-600 leading-relaxed">{{ naiOfficialFreeHint }}</p>
+                                                <p class="text-xs text-gray-400 leading-relaxed">
+                                                    官方要求宽高都是 64 的倍数，会按 64 对齐；范围 {{ naiOfficialSizeLimits.min }}–{{ naiOfficialSizeLimits.max }}。
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                                    采样步数<span class="text-teal-600">（≤ {{ naiOfficialFreeSteps }} 免费）</span>
+                                                </label>
+                                                <input v-model.number="settings.naiOfficialSteps" type="number" min="1" max="50"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Prompt Guidance（CFG）</label>
+                                                <input v-model.number="settings.naiOfficialScale" type="number" min="0" max="30" step="0.5"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">采样器</label>
+                                                <custom-select v-model="settings.naiOfficialSampler" :options="naiOfficialSamplerOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">噪声计划</label>
+                                                <custom-select v-model="settings.naiOfficialNoiseSchedule" :options="naiOfficialNoiseScheduleOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">负面提示词预设（UC）</label>
+                                                <custom-select v-model="settings.naiOfficialUcPreset" :options="naiOfficialUcPresetOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-teal-400 focus:ring-teal-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">CFG Rescale</label>
+                                                <input v-model.number="settings.naiOfficialCfgRescale" type="number" min="0" max="1" step="0.05"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                            </div>
+
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">附加负面提示词（可选）</label>
+                                                <textarea v-model="settings.naiOfficialNegativePrompt" rows="2"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
+                                                    placeholder="留空则只用上面的 UC 预设"></textarea>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    官方把负面词拆成「UC 预设档位 + 附加文本」两部分，这里填的是附加部分。
+                                                </p>
+                                            </div>
+
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">种子（留空 = 每次随机）</label>
+                                                <input v-model="settings.naiOfficialSeed" type="text"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="例如 1234567890">
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    官方语义：不填或填 0 表示由服务端随机；填固定值可复现同一张图。
+                                                </p>
+                                            </div>
+
+                                            <label class="flex items-center justify-between gap-3 p-3 text-left rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                    自动追加质量词（Quality Tags）
+                                                </span>
+                                                <div class="relative inline-flex flex-none items-center">
+                                                    <input type="checkbox" v-model="settings.naiOfficialQualityToggle" class="settings-toggle-input sr-only">
+                                                    <div class="settings-toggle settings-toggle--teal"></div>
+                                                </div>
+                                            </label>
+                                            <label class="flex items-center justify-between gap-3 p-3 text-left rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900 transition-colors">
+                                                    多样性增强（skip_cfg_above_sigma）
+                                                </span>
+                                                <div class="relative inline-flex flex-none items-center">
+                                                    <input type="checkbox" v-model="settings.naiOfficialVarietyBoost" class="settings-toggle-input sr-only">
+                                                    <div class="settings-toggle settings-toggle--teal"></div>
+                                                </div>
+                                            </label>
+                                        </div>
+
+                                        <p class="text-xs text-gray-400 leading-relaxed">
+                                            Opus 免费额度规则（官方）：<span class="font-bold">步数 ≤ {{ naiOfficialFreeSteps }} 且像素 ≤ 1.00MP</span> 时不消耗 Anlas；
+                                            更高分辨率或更多步数会按 Anlas 计费。调低分辨率比调低步数更省额度。
+                                        </p>
                                     </div>
 
                                     <!-- ComfyUI 专用参数 -->

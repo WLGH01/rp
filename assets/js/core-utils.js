@@ -1091,14 +1091,68 @@ window.RPHubUtils = {
                 { value: 'nai-diffusion-5-full', label: 'V5 完整版（-5）' }
             ]),
             // 生图方式：
-            //   novelai          异步任务轮询（POST /api/jobs → 轮询 → content 取图）
+            //   novelai          第三方网关（RP Hub 作者的 nai.sta1n.cn 那套）：POST /api/jobs → 轮询 → content 取图
+            //   novelai-official NovelAI 官方 API：POST /ai/generate-image → ZIP 字节流
             //   stable-diffusion Forge/A1111 的 sdapi 同步返回 base64
             //   comfyui          提交 API 格式工作流 → 进度/历史 → /view 取图
             imageProviders: Object.freeze([
-                { value: 'novelai', label: 'NovelAI（异步任务）' },
+                { value: 'novelai', label: 'NAI（RP Hub 网关）' },
+                { value: 'novelai-official', label: 'NovelAI 官方 API' },
                 { value: 'stable-diffusion', label: 'Stable Diffusion（Forge / A1111）' },
                 { value: 'comfyui', label: 'ComfyUI（API 工作流）' }
             ]),
+            // NovelAI 官方 API 常量（取自官方文档与官方 Python 库实测值）。
+            novelaiOfficialBaseUrl: 'https://image.novelai.net',
+            novelaiOfficialModels: Object.freeze([
+                { value: 'nai-diffusion-5-full', label: 'V5 完整版（Full）' },
+                { value: 'nai-diffusion-5-curated', label: 'V5 精选版（Curated）' },
+                { value: 'nai-diffusion-4-5-full', label: 'V4.5 完整版（Full）' },
+                { value: 'nai-diffusion-4-5-curated', label: 'V4.5 精选版（Curated）' },
+                { value: 'nai-diffusion-4-full', label: 'V4 完整版（Full）' },
+                { value: 'nai-diffusion-4-curated-preview', label: 'V4 精选版（Curated）' },
+                { value: 'nai-diffusion-3', label: 'V3（Anime V3）' },
+                // 官方库枚举里的写法就是 furry-3（不是 3-furry），不要顺手改名。
+                { value: 'nai-diffusion-furry-3', label: 'V3 兽人（Furry）' }
+            ]),
+            // 官方采样器（来自官方库的 ImageSampler 枚举，去掉作者标注「不工作」的项）。
+            novelaiOfficialSamplers: Object.freeze([
+                'k_euler_ancestral', 'k_euler', 'k_dpmpp_2m', 'k_dpmpp_2m_sde',
+                'k_dpmpp_sde', 'k_dpmpp_2s_ancestral', 'k_dpm_2', 'k_dpm_2_ancestral',
+                'k_heun', 'k_lms', 'ddim', 'ddim_v3'
+            ]),
+            novelaiOfficialNoiseSchedules: Object.freeze([
+                'native', 'karras', 'exponential', 'polyexponential'
+            ]),
+            // 负面提示词（UC）预设：官方是 0-4 的档位，不是文本。
+            novelaiOfficialUcPresets: Object.freeze([
+                { value: 0, label: '重度（Heavy）' },
+                { value: 1, label: '轻量（Light）' },
+                { value: 2, label: '人类优先（Human Focus）' },
+                { value: 3, label: '兽人优先（Furry Focus）' },
+                { value: 4, label: '无（None）' }
+            ]),
+            // 官方分辨率档位。
+            // free=true 表示「Opus 订阅下不消耗 Anlas（免费）」——判定规则来自官方库
+            // ImagePreset.calculate_cost：is_opus and steps <= 28 and 像素 <= 1024*1024。
+            // 因此 1MP 及以下免费，超过 1MP 的（如 1024×1536、1472×1472、1088×1920）会扣 Anlas。
+            novelaiOfficialResolutions: Object.freeze([
+                { value: '832x1216', label: '竖图 832×1216（1.01MP）', width: 832, height: 1216, free: true },
+                { value: '1216x832', label: '横图 1216×832（1.01MP）', width: 1216, height: 832, free: true },
+                { value: '1024x1024', label: '方图 1024×1024（1.00MP）', width: 1024, height: 1024, free: true },
+                { value: '640x640', label: '小方图 640×640', width: 640, height: 640, free: true },
+                { value: '512x768', label: '小竖图 512×768', width: 512, height: 768, free: true },
+                { value: '768x512', label: '小横图 768×512', width: 768, height: 512, free: true },
+                { value: '512x512', label: '最小方图 512×512', width: 512, height: 512, free: true },
+                { value: '1024x1536', label: '大竖图 1024×1536（1.57MP · 扣 Anlas）', width: 1024, height: 1536, free: false },
+                { value: '1536x1024', label: '大横图 1536×1024（1.57MP · 扣 Anlas）', width: 1536, height: 1024, free: false },
+                { value: '1472x1472', label: '大方图 1472×1472（2.17MP · 扣 Anlas）', width: 1472, height: 1472, free: false },
+                { value: '1088x1920', label: '壁纸竖图 1088×1920（扣 Anlas）', width: 1088, height: 1920, free: false },
+                { value: '1920x1088', label: '壁纸横图 1920×1088（扣 Anlas）', width: 1920, height: 1088, free: false }
+            ]),
+            // 官方 API 的免费挡位上限：步数 ≤28 且像素 ≤1MP。
+            novelaiOfficialFreeSteps: 28,
+            novelaiOfficialFreePixels: 1024 * 1024,
+            novelaiOfficialSizeLimits: Object.freeze({ min: 64, max: 2048, step: 64 }),
             // ComfyUI 可调参数的角色：与具体节点类名解耦，探测结果可在设置页逐行改。
             comfyRoles: Object.freeze([
                 { value: 'prompt', label: '正向提示词' },
@@ -1331,7 +1385,15 @@ window.RPHubUtils = {
         'comfySampler', 'comfyScheduler', 'comfySeed', 'comfyRandomizeSeed',
         'comfyWidth', 'comfyHeight', 'comfyBatchSize', 'comfyDenoise',
         'comfyCheckpoint', 'comfyVae', 'comfyFilenamePrefix', 'comfyOverrideSize',
-        'comfyTimeout', 'comfyAllowCancel'
+        'comfyTimeout', 'comfyAllowCancel',
+        // NovelAI 官方 API：出图参数随预设走。
+        // 刻意不含 naiOfficialToken —— 鉴权信息统一由 imageGenKey 管理，
+        // 放进 profile 会让切预设时静默换掉密钥。
+        'naiOfficialModel', 'naiOfficialResolution',
+        'naiOfficialCustomSizeEnabled', 'naiOfficialCustomWidth', 'naiOfficialCustomHeight',
+        'naiOfficialSteps', 'naiOfficialScale', 'naiOfficialSampler', 'naiOfficialNoiseSchedule',
+        'naiOfficialUcPreset', 'naiOfficialCfgRescale', 'naiOfficialQualityToggle',
+        'naiOfficialVarietyBoost', 'naiOfficialNegativePrompt', 'naiOfficialSeed'
     ]);
 
     const captureImageProfile = (settings = {}) => {
@@ -1832,6 +1894,252 @@ window.RPHubUtils = {
 
     const findComfyWorkflow = (library, id) => normalizeComfyWorkflowLibrary(library)
         .find(item => item.id === String(id || '')) || null;
+
+    // ===== NovelAI 官方 API（image.novelai.net）=====
+    //
+    // 与「NAI（RP Hub 网关）」的区别（那套是作者自己的套壳，走 /api/jobs 异步任务）：
+    //   - 端点  POST https://image.novelai.net/ai/generate-image
+    //   - 鉴权  Authorization: Bearer <pst 开头的 access token>（不是 query token）
+    //   - 请求体 { input, model, action, parameters }，参数全在 parameters 里
+    //   - 响应  直接回一个 ZIP（内含 PNG），不是任务 id + 轮询
+    // 以上均以官方文档与官方 Python 库（novelai_api）的实现为准。
+
+    // 官方要求宽高必须为 64 的倍数。
+    const normalizeNaiOfficialDimension = (value, fallback) => {
+        const limits = (window.RPHubConfig?.uiOptions?.novaiOfficialSizeLimits)
+            || (window.RPHubConfig?.uiOptions?.novelaiOfficialSizeLimits)
+            || { min: 64, max: 2048, step: 64 };
+        const number = Math.round(Number(value));
+        if (!Number.isFinite(number) || number <= 0) return fallback;
+        return Math.max(limits.min, Math.min(limits.max, Math.round(number / limits.step) * limits.step));
+    };
+
+    // 本次生成是否落在「Opus 免费额度」内（不扣 Anlas）。
+    //
+    // 规则直接来自官方库 ImagePreset.calculate_cost：
+    //   opus_discount = is_opus and steps <= 28 and 像素 <= 1024*1024
+    // 注意两点：
+    //   1. V5 同样适用这条判定（官方 FAQ：V5 在 normal resolution 且 ≤28 步时不消耗 Anlas）。
+    //   2. 免费与否跟「模型版本」无关，只跟步数与像素量有关。
+    const isNaiOfficialFreeTier = (settings = {}) => {
+        const uiOptions = window.RPHubConfig?.uiOptions || {};
+        const maxSteps = Number(uiOptions.novelaiOfficialFreeSteps) || 28;
+        const maxPixels = Number(uiOptions.novelaiOfficialFreePixels) || 1024 * 1024;
+        const steps = Math.round(Number(settings.naiOfficialSteps) || 28);
+        const { width, height } = resolveNaiOfficialSize(settings);
+        return steps <= maxSteps && width * height <= maxPixels;
+    };
+
+    // 官方出图尺寸：预设档位优先，其次自定义宽高，最后兜底竖图。
+    const resolveNaiOfficialSize = (settings = {}) => {
+        const uiOptions = window.RPHubConfig?.uiOptions || {};
+        const presets = uiOptions.novelaiOfficialResolutions || [];
+        const fallback = presets[0] || { width: 832, height: 1216 };
+        if (settings.naiOfficialCustomSizeEnabled) {
+            return {
+                width: normalizeNaiOfficialDimension(settings.naiOfficialCustomWidth, fallback.width),
+                height: normalizeNaiOfficialDimension(settings.naiOfficialCustomHeight, fallback.height)
+            };
+        }
+        const preset = presets.find(item => item.value === settings.naiOfficialResolution);
+        const size = preset || fallback;
+        return { width: size.width, height: size.height };
+    };
+
+    // 「超出免费额度」的说明文案；在免费额度内返回空串。
+    // 用于设置页给出明确提示，而不是等用户被扣了 Anlas 才发现。
+    const describeNaiOfficialFreeStatus = (settings = {}) => {
+        const uiOptions = window.RPHubConfig?.uiOptions || {};
+        const maxSteps = Number(uiOptions.novelaiOfficialFreeSteps) || 28;
+        const maxPixels = Number(uiOptions.novelaiOfficialFreePixels) || 1024 * 1024;
+        const steps = Math.round(Number(settings.naiOfficialSteps) || 28);
+        const { width, height } = resolveNaiOfficialSize(settings);
+        const pixels = width * height;
+        const reasons = [];
+        if (steps > maxSteps) reasons.push(`步数 ${steps} > ${maxSteps}`);
+        if (pixels > maxPixels) reasons.push(`像素 ${(pixels / 1e6).toFixed(2)}MP > 1.00MP`);
+        if (!reasons.length) return '';
+        return `超出 Opus 免费额度（${reasons.join('，')}），本次会消耗 Anlas`;
+    };
+
+    // skip_cfg_above_sigma 的默认值。
+    // 注意顺序：必须先判 4-5，再判 4——"nai-diffusion-4-5-full" 里含有 "nai-diffusion-4"，
+    // 反过来判会把 4.5 错当成 4。
+    const naiOfficialSkipCfgAboveSigma = (model) => {
+        const id = String(model || '');
+        if (id.includes('4-5')) return 58;
+        if (id.startsWith('nai-diffusion-4')) return 19;
+        return null;
+    };
+
+    // 构建官方 API 的请求体。
+    // 返回 { input, model, action, parameters }，可直接 JSON.stringify 后 POST。
+    const buildNaiOfficialPayload = ({ settings = {}, prompt = '', negativePrompt = '' } = {}) => {
+        const uiOptions = window.RPHubConfig?.uiOptions || {};
+        const model = String(settings.naiOfficialModel || uiOptions.novelaiOfficialModels?.[0]?.value || 'nai-diffusion-5-full');
+        const { width, height } = resolveNaiOfficialSize(settings);
+        const steps = Math.max(1, Math.min(50, Math.round(Number(settings.naiOfficialSteps) || 28)));
+        const scale = Number(settings.naiOfficialScale);
+        const seedRaw = Number(settings.naiOfficialSeed);
+        // 种子留空或 0 = 让服务端随机（官方语义：seed 0 由后端随机）。
+        const seed = Number.isFinite(seedRaw) && seedRaw > 0 ? Math.floor(seedRaw) : Math.floor(Math.random() * 4294967295);
+        const sampler = String(settings.naiOfficialSampler || uiOptions.novelaiOfficialSamplers?.[0] || 'k_euler_ancestral');
+        const noiseSchedule = String(settings.naiOfficialNoiseSchedule || 'karras');
+        const cfgRescale = Number(settings.naiOfficialCfgRescale);
+
+        const parameters = {
+            width,
+            height,
+            n_samples: 1,
+            seed,
+            extra_noise_seed: seed,
+            sampler,
+            steps,
+            scale: Number.isFinite(scale) ? scale : 5,
+            negative_prompt: String(negativePrompt || ''),
+            cfg_rescale: Number.isFinite(cfgRescale) ? cfgRescale : 0,
+            // 噪声计划：用户选的调度器必须落到 noise_schedule，否则该选项完全没作用。
+            noise_schedule: noiseSchedule,
+            // V5 用 params_version 4，V4/V4.5 用 3；写错会被服务端当成旧版参数解析。
+            params_version: model.startsWith('nai-diffusion-5') ? 4 : 3,
+            legacy: false,
+            legacy_v3_extend: false,
+            qualityToggle: settings.naiOfficialQualityToggle !== false,
+            ucPreset: Number.isFinite(Number(settings.naiOfficialUcPreset)) ? Number(settings.naiOfficialUcPreset) : 0
+        };
+
+        const skipCfg = naiOfficialSkipCfgAboveSigma(model);
+        if (skipCfg !== null && settings.naiOfficialVarietyBoost !== false) {
+            parameters.skip_cfg_above_sigma = skipCfg;
+        }
+
+        // V4 及以上才有 v4_prompt / v4_negative_prompt 这套结构。
+        if (model.startsWith('nai-diffusion-4') || model.startsWith('nai-diffusion-5')) {
+            parameters.add_original_image = true;
+            parameters.legacy_uc = false;
+            parameters.v4_prompt = {
+                caption: { base_caption: String(prompt || ''), char_captions: [] },
+                use_coords: false,
+                use_order: true
+            };
+            parameters.v4_negative_prompt = {
+                caption: { base_caption: String(negativePrompt || ''), char_captions: [] },
+                use_coords: false,
+                use_order: false
+            };
+        }
+
+        return { input: String(prompt || ''), model, action: 'generate', parameters };
+    };
+
+    // --- 极简 ZIP 读取（浏览器内置解压，不引第三方库）---
+    //
+    // 官方 /ai/generate-image 直接回一个 ZIP 包着 PNG。浏览器侧用
+    // DecompressionStream('deflate-raw') 解 inflate，无需依赖。
+    // 只支持 ZIP 里常见的两种压缩法：0 = 存储，8 = deflate。
+    const readZipEntries = async (buffer) => {
+        const view = new DataView(buffer);
+        const bytes = new Uint8Array(buffer);
+        // 从尾部找 End of Central Directory（EOCD 签名 0x06054b50）。
+        let eocd = -1;
+        for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65558); i -= 1) {
+            if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+        }
+        if (eocd < 0) throw new Error('响应不是有效的 ZIP（找不到 EOCD）');
+        const count = view.getUint16(eocd + 10, true);
+        let offset = view.getUint32(eocd + 16, true);
+
+        const entries = [];
+        for (let index = 0; index < count; index += 1) {
+            if (view.getUint32(offset, true) !== 0x02014b50) break;
+            const method = view.getUint16(offset + 10, true);
+            const compressedSize = view.getUint32(offset + 20, true);
+            const nameLength = view.getUint16(offset + 28, true);
+            const extraLength = view.getUint16(offset + 30, true);
+            const commentLength = view.getUint16(offset + 32, true);
+            const localOffset = view.getUint32(offset + 42, true);
+            const name = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+            offset += 46 + nameLength + extraLength + commentLength;
+
+            // 本地头长度可能与中央目录不同（extra 字段），必须从本地头重新读。
+            const localNameLength = view.getUint16(localOffset + 26, true);
+            const localExtraLength = view.getUint16(localOffset + 28, true);
+            const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+            const raw = bytes.subarray(dataStart, dataStart + compressedSize);
+
+            let data;
+            if (method === 0) {
+                data = raw.slice();
+            } else if (method === 8) {
+                data = await inflateRaw(raw);
+            } else {
+                throw new Error(`ZIP 用了不支持的压缩方式（method=${method}）`);
+            }
+            entries.push({ name, data: new Uint8Array(data) });
+        }
+        return entries;
+    };
+
+    // 用浏览器内置 DecompressionStream 解 raw deflate。
+    const inflateRaw = async (bytes) => {
+        if (typeof DecompressionStream !== 'function') {
+            throw new Error('当前环境不支持 DecompressionStream，无法解压 ZIP');
+        }
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    };
+
+    // 从官方响应里取出第一张 PNG 的字节。
+    // 兼容三种返回：ZIP（常态）、裸 PNG 字节、以及 JSON 错误体。
+    const extractNaiOfficialImage = async (buffer, contentType = '') => {
+        const bytes = new Uint8Array(buffer);
+        const type = String(contentType || '').toLowerCase();
+        // 裸 PNG：直接看魔数，不看 content-type（有的网关会写错）。
+        if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+            return { data: bytes, kind: 'png' };
+        }
+        // ZIP：看 PK 魔数（0x50 0x4b）。
+        if (bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b) {
+            const entries = await readZipEntries(buffer);
+            const image = entries.find(entry => /\.(png|webp|jpg|jpeg)$/i.test(entry.name)) || entries[0];
+            if (!image) throw new Error('ZIP 里没有图片条目');
+            return { data: image.data, kind: 'zip', name: image.name };
+        }
+        // 其余按 JSON 错误体处理，把服务端的话带出来。
+        if (type.includes('json') || bytes[0] === 0x7b) {
+            let message = '';
+            try {
+                const payload = JSON.parse(new TextDecoder().decode(bytes));
+                message = payload?.message || payload?.error || payload?.detail || JSON.stringify(payload).slice(0, 300);
+            } catch {
+                message = new TextDecoder().decode(bytes).slice(0, 300);
+            }
+            throw new Error(message || '官方 API 返回了错误');
+        }
+        throw new Error(`无法识别的响应（content-type=${contentType || '未知'}）`);
+    };
+
+    // 字节流 → 可直接放进 <img> 的 data URL。
+    const bytesToPngDataUrl = (bytes) => {
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return `data:image/png;base64,${btoa(binary)}`;
+    };
+
+    window.RPHubNaiOfficialUtils = Object.freeze({
+        normalizeNaiOfficialDimension,
+        resolveNaiOfficialSize,
+        isNaiOfficialFreeTier,
+        describeNaiOfficialFreeStatus,
+        naiOfficialSkipCfgAboveSigma,
+        buildNaiOfficialPayload,
+        readZipEntries,
+        extractNaiOfficialImage,
+        bytesToPngDataUrl
+    });
 
     window.RPHubComfyUtils = Object.freeze({
         COMFY_ROLE_RULES,

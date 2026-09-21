@@ -613,8 +613,31 @@ const app = createApp({
             imageGenKey: '',
             // 生图接口由用户自填；留空即不发起任何生图请求。
             imageGenBaseUrl: '',
-            // 生图方式：novelai | stable-diffusion
+            // 生图方式：novelai（RP Hub 网关）| novelai-official | stable-diffusion | comfyui
             imageProvider: 'novelai',
+            // --- NovelAI 官方 API（image.novelai.net）专用 ---
+            // 官方 access token（pst 开头），走 Authorization: Bearer。
+            naiOfficialToken: '',
+            naiOfficialModel: 'nai-diffusion-5-full',
+            // 分辨率档位：默认选竖图 832×1216（1MP 以内，Opus 免费）。
+            naiOfficialResolution: '832x1216',
+            // 自定义分辨率（官方要求 64 的倍数）。
+            naiOfficialCustomSizeEnabled: false,
+            naiOfficialCustomWidth: 832,
+            naiOfficialCustomHeight: 1216,
+            // 28 步是 Opus 免费额度的上限（官方规则：≤28 步且 ≤1MP 不扣 Anlas）。
+            naiOfficialSteps: 28,
+            naiOfficialScale: 5,
+            naiOfficialSampler: 'k_euler_ancestral',
+            naiOfficialNoiseSchedule: 'karras',
+            naiOfficialUcPreset: 0,
+            naiOfficialCfgRescale: 0,
+            naiOfficialQualityToggle: true,
+            naiOfficialVarietyBoost: true,
+            // 官方负面提示词（除了 ucPreset 之外的附加内容，留空则只用预设）。
+            naiOfficialNegativePrompt: '',
+            // 种子：留空 = 每次随机（官方语义 seed 0 由后端随机）。
+            naiOfficialSeed: '',
             // 生图配置预设列表：可保存多个不同的生图服务地址，随时切换。
             savedImageEndpoints: [
                 { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '' },
@@ -694,9 +717,36 @@ const app = createApp({
         // 注意：判断必须写「只对 novelai 成立」，而不是「不是 SD」——
         // 后者在新增第三个生图方式时会把它一起显示出来（NAI 版本串到 ComfyUI 的 bug 就是这么来的）。
         const isNaiProvider = computed(() => (settings.imageProvider || 'novelai') === 'novelai');
+        // NovelAI 官方 API：与 RP Hub 网关那套协议完全不同（Bearer + /ai/generate-image + ZIP 响应）。
+        const isNaiOfficialProvider = computed(() => settings.imageProvider === 'novelai-official');
+        const naiOfficialUtils = window.RPHubNaiOfficialUtils;
         const availableImageStyleOptions = computed(() => settings.imageModel === 'nai-diffusion-5-full'
             ? imageStyleOptions.filter(option => !v5UnsupportedImageStyles.has(option.value))
             : imageStyleOptions);
+        // --- NovelAI 官方 API 的下拉选项（全部来自 core-utils 的官方常量，不在这里手写）---
+        const naiOfficialModelOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialModels || []).map(item => ({
+            value: item.value,
+            label: item.label
+        })));
+        const naiOfficialResolutionOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialResolutions || []).map(item => ({
+            value: item.value,
+            label: item.label
+        })));
+        const naiOfficialSamplerOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialSamplers || []).map(name => ({
+            value: name,
+            label: name
+        })));
+        const naiOfficialNoiseScheduleOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialNoiseSchedules || []).map(name => ({
+            value: name,
+            label: name
+        })));
+        const naiOfficialUcPresetOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialUcPresets || []).map(item => ({
+            value: item.value,
+            label: item.label
+        })));
+        const naiOfficialSizeLimits = window.RPHubConfig?.uiOptions?.novelaiOfficialSizeLimits
+            || { min: 64, max: 2048, step: 64 };
+        const naiOfficialFreeSteps = window.RPHubConfig?.uiOptions?.novelaiOfficialFreeSteps || 28;
         const getImageModelName = (value) => (imageModelOptions.find(option => option.value === value)?.label
             || imageModelOptions[0].label).replace(/（[^）]*）$/, '');
         const normalizeFontFamily = (value) => ['modern', 'serif', 'system'].includes(value) ? value : 'modern';
@@ -1949,6 +1999,19 @@ let removedProviderConfigCleared = false;
                 settings.comfyOverrideSize = settings.comfyOverrideSize === true;
                 settings.comfyAllowCancel = settings.comfyAllowCancel !== false;
                 settings.comfyTimeout = Math.max(30, Math.min(7200, Math.round(Number(settings.comfyTimeout) || 600)));
+                // NovelAI 官方 API：老存档没有这些键，靠默认值兜底；这里只做类型与范围收敛。
+                // 步数上限 50 是官方 UI 的上限；28 以上会超出 Opus 免费额度（由提示告知，不强制拦）。
+                settings.naiOfficialSteps = Math.max(1, Math.min(50, Math.round(Number(settings.naiOfficialSteps) || 28)));
+                settings.naiOfficialScale = Math.max(0, Math.min(30, Number(settings.naiOfficialScale) || 5));
+                settings.naiOfficialCfgRescale = Math.max(0, Math.min(1, Number(settings.naiOfficialCfgRescale) || 0));
+                settings.naiOfficialUcPreset = [0, 1, 2, 3, 4].includes(Number(settings.naiOfficialUcPreset)) ? Number(settings.naiOfficialUcPreset) : 0;
+                settings.naiOfficialQualityToggle = settings.naiOfficialQualityToggle !== false;
+                settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost !== false;
+                settings.naiOfficialCustomSizeEnabled = settings.naiOfficialCustomSizeEnabled === true;
+                settings.naiOfficialSeed = String(settings.naiOfficialSeed ?? '');
+                if (!(window.RPHubConfig?.uiOptions?.novelaiOfficialResolutions || []).some(item => item.value === settings.naiOfficialResolution)) {
+                    settings.naiOfficialResolution = '832x1216';
+                }
                 settings.imageGenCount = Math.min(8, Math.max(2, Math.round(Number(settings.imageGenCount) || 2)));
                 settings.fontFamilyVersion = 4;
                 applyFontFamily(settings.fontFamily);
@@ -2337,7 +2400,9 @@ let removedProviderConfigCleared = false;
                 // 否则 ComfyUI/SD 出的图会被打上 NAI 的版本名（settings.imageModel），归档索引就骗人了。
                 const archiveModel = isNaiProvider.value
                     ? settings.imageModel
-                    : (isComfyProvider.value
+                    : (isNaiOfficialProvider.value
+                        ? String(settings.naiOfficialModel || 'novelai-official')
+                        : isComfyProvider.value
                         ? (String(settings.comfyCheckpoint || '').trim() || comfyCheckpointFromWorkflow() || 'comfyui')
                         : (String(settings.sdModel || '').trim() || 'stable-diffusion'));
                 const result = await api.archiveImage({
@@ -3337,6 +3402,127 @@ let removedProviderConfigCleared = false;
             settings.comfyBindings = next;
         };
 
+        // ===== NovelAI 官方 API（image.novelai.net）=====
+        // 与「NAI（RP Hub 网关）」的差异（后者是作者套壳，走 /api/jobs 异步任务 + 轮询）：
+        //   1. 鉴权是 Authorization: Bearer <pst token>，不是 URL 里的 token
+        //   2. 端点 /ai/generate-image，请求体 { input, model, action, parameters }
+        //   3. 响应直接是一个 ZIP（内含 PNG），一次拿完，没有任务 id 可轮询
+        //   4. 参数（含 V4/V5 的 v4_prompt 结构）全部在 parameters 里
+        // 因为没有轮询，进度只能用「读取响应的字节数」近似——见 fetch 的 onProgress。
+
+        const naiOfficialBaseUrl = () => {
+            const configured = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
+            return configured || (window.RPHubConfig?.uiOptions?.novelaiOfficialBaseUrl || 'https://image.novelai.net');
+        };
+
+        // 官方 token 优先用独立字段，回落到通用的生图密钥，方便用户只填一处。
+        const naiOfficialToken = () => String(
+            settings.naiOfficialToken || settings.imageGenKey || ''
+        ).trim();
+
+        // 参数变化的实时提示：当前配置是否还在 Opus 免费额度内。
+        const naiOfficialSize = computed(() => naiOfficialUtils.resolveNaiOfficialSize(settings));
+        const naiOfficialSizeLabel = computed(() => {
+            const { width, height } = naiOfficialSize.value;
+            return `${width} × ${height}（约 ${(width * height / 1e6).toFixed(2)}M 像素）`;
+        });
+        const naiOfficialIsFree = computed(() => naiOfficialUtils.isNaiOfficialFreeTier(settings));
+        const naiOfficialFreeHint = computed(() => naiOfficialUtils.describeNaiOfficialFreeStatus(settings));
+
+        // 负面提示词：官方是 ucPreset 档位 + 附加文本，这里把附加文本拼上角色级通用负面词。
+        const buildNaiOfficialNegative = () => {
+            const extra = String(settings.naiOfficialNegativePrompt || '').trim();
+            return extra;
+        };
+
+        // 正向提示词：风格画师串 → 额外前缀 → 角色标签（与其余链路同一套拼装口径）。
+        const buildNaiOfficialPrompt = (tags) => {
+            const parts = [];
+            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            if (styleArtists) parts.push(styleArtists);
+            const prefix = String(settings.sdPromptPrefix || '').trim();
+            if (prefix) parts.push(prefix);
+            if (tags) parts.push(tags);
+            return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
+        };
+
+        // 调用官方 API 生成一张图。
+        // onProgress 用「已接收字节 / 总字节」估算——官方一次性返回 ZIP，没有服务端进度可查。
+        const generateWithNaiOfficial = async ({ tags, onProgress }) => {
+            const token = naiOfficialToken();
+            if (!token) throw new Error('未填写 NovelAI 官方 API token（pst 开头）');
+            const baseUrl = naiOfficialBaseUrl();
+            const prompt = buildNaiOfficialPrompt(tags);
+            const payload = naiOfficialUtils.buildNaiOfficialPayload({
+                settings,
+                prompt,
+                negativePrompt: buildNaiOfficialNegative()
+            });
+            const { width, height } = naiOfficialSize.value;
+
+            onProgress?.({ status: 'running', generationProgress: { percent: 8 } });
+            const response = await fetch(`${baseUrl}/ai/generate-image`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                // 官方错误体是 { statusCode, message }，把 message 带出来更有用。
+                const text = await response.text();
+                let message = '';
+                try { message = JSON.parse(text)?.message || ''; } catch { /* 非 JSON 就原样用 */ }
+                if (!message) message = text.slice(0, 300) || `HTTP ${response.status}`;
+                if (response.status === 401) message = `鉴权失败（401）：请检查 token 是否正确、是否已过期。${message}`;
+                if (response.status === 402) message = `需要有效订阅（402）：${message}`;
+                if (response.status === 429) message = `请求过于频繁或额度用尽（429）：${message}`;
+                throw new Error(message);
+            }
+
+            // 边读边报进度：官方 ZIP 通常几百 KB～数 MB，进度条能反映下载阶段。
+            const total = Number(response.headers.get('content-length')) || 0;
+            let buffer;
+            if (response.body && typeof response.body.getReader === 'function') {
+                const reader = response.body.getReader();
+                const chunks = [];
+                let received = 0;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    received += value.length;
+                    // 下载阶段占 10%～70%，剩余留给解压与渲染。
+                    const ratio = total ? Math.min(1, received / total) : 0.5;
+                    onProgress?.({ status: 'running', generationProgress: { percent: Math.round(10 + ratio * 60) } });
+                }
+                buffer = new Uint8Array(received);
+                let offset = 0;
+                for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
+            } else {
+                buffer = new Uint8Array(await response.arrayBuffer());
+            }
+
+            onProgress?.({ status: 'running', generationProgress: { percent: 78 } });
+            const contentType = response.headers.get('content-type') || '';
+            const image = await naiOfficialUtils.extractNaiOfficialImage(
+                buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+                contentType
+            );
+            onProgress?.({ status: 'running', generationProgress: { percent: 92 } });
+
+            // 直接转成 data URL：官方这是单张图，交给现有渲染/归档链路（与 SD 的 base64 同型）。
+            return {
+                imageUrl: naiOfficialUtils.bytesToPngDataUrl(image.data),
+                width,
+                height,
+                model: payload.model,
+                seed: payload.parameters.seed
+            };
+        };
+
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
             const request = new URL(requestUrl, window.location.href);
             const token = request.searchParams.get('token') || settings.imageGenKey.trim();
@@ -3349,6 +3535,23 @@ let removedProviderConfigCleared = false;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
             };
             task.promise = (async () => {
+                // NovelAI 官方 API：Bearer 提交，一次拿到 ZIP，没有任务队列。
+                if (isNaiOfficialProvider.value) {
+                    const job = await generateWithNaiOfficial({
+                        tags: request.searchParams.get('tag') || '',
+                        onProgress: publish
+                    });
+                    const finished = {
+                        status: 'done',
+                        imageUrl: job.imageUrl,
+                        directImage: true,
+                        width: job.width,
+                        height: job.height
+                    };
+                    publish(finished);
+                    cacheCompletedImageJob(finished, task, request);
+                    return finished;
+                }
                 // ComfyUI：提交 API 工作流 → WS/轮询进度 → /history 取输出文件名。
                 if (isComfyProvider.value) {
                     // 在卡片上挂一个「取消」按钮，绑到本次任务的 cancel 回调。
@@ -4873,6 +5076,18 @@ let removedProviderConfigCleared = false;
             if (isComfyProvider.value) {
                 await checkConnectionStatus(imageGenStatus, imageGenLatency, 'ComfyUI', signal => (
                     fetch(`${baseUrl}/system_stats`, { signal })
+                ), () => true);
+                return;
+            }
+            // NovelAI 官方 API：根路径没有可用探针，用 /user/subscription（需要 Bearer）判断
+            // 连通与鉴权；401/403 也算「连得上」，只是 token 不对。
+            if (isNaiOfficialProvider.value) {
+                const token = naiOfficialToken();
+                await checkConnectionStatus(imageGenStatus, imageGenLatency, 'NovelAI 官方 API', signal => (
+                    fetch(`${naiOfficialBaseUrl()}/user/subscription`, {
+                        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+                        signal
+                    })
                 ), () => true);
                 return;
             }
@@ -8134,6 +8349,8 @@ let removedProviderConfigCleared = false;
             //   ComfyUI   参数走 POST body 的工作流 JSON，URL 同样只带 tag 与展示用尺寸
             const imageRequestUrl = isComfyProvider.value
                 ? `${baseUrl}/view?tag=$1&provider=comfyui&size=${settings.imageSize}&w=${sdSize.width}&h=${sdSize.height}`
+                : isNaiOfficialProvider.value
+                ? `${naiOfficialBaseUrl()}/ai/generate-image?tag=$1&provider=novelai-official&size=${settings.imageSize}&w=${naiOfficialSize.value.width}&h=${naiOfficialSize.value.height}`
                 : isSdProvider.value
                 ? `${baseUrl}/sdapi/v1/txt2img?tag=$1&provider=stable-diffusion&size=${settings.imageSize}&w=${sdSize.width}&h=${sdSize.height}`
                 : `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative={{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}&nocache=0&noise_schedule=karras`;
@@ -9680,7 +9897,12 @@ let removedProviderConfigCleared = false;
             isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
             // 生图方式与 ComfyUI 专用
-            isComfyProvider, isNaiProvider, comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,
+            isComfyProvider, isNaiProvider, isNaiOfficialProvider,
+            naiOfficialSize, naiOfficialSizeLabel, naiOfficialIsFree, naiOfficialFreeHint,
+            naiOfficialModelOptions, naiOfficialResolutionOptions, naiOfficialSamplerOptions,
+            naiOfficialNoiseScheduleOptions, naiOfficialUcPresetOptions,
+            naiOfficialSizeLimits, naiOfficialFreeSteps,
+            comfyWorkflowState, comfyCapabilities, refreshComfyCapabilities, comfyRoles,
             comfyModelOptions, comfyVaeOptions, comfySamplerOptions, comfySchedulerOptions,
             comfyWorkflowFileInput, importComfyWorkflowFile, handleComfyWorkflowFile,
             comfyBindingInputValue, setComfyBinding,

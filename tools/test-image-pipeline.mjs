@@ -707,13 +707,188 @@ section('11d) 回归：NAI 专属项不得出现在 SD / ComfyUI 下');
 // 「生图版本」是 NAI 的 V4.5/V5，只有 NovelAI 认识。
 // 曾经的写法是 v-if="!isSdProvider" —— 新增第三个生图方式后它就把 NAI 版本显示到了 ComfyUI 上。
 assertTrue('存在 isNaiProvider 判定（而不是用「不是 SD」反推）', appSource.includes('const isNaiProvider'));
-assertTrue('生图版本用 isNaiProvider 门控', /Image Model \(NovelAI only\)[\s\S]{0,200}isNaiProvider/.test(comfyIndexSource));
+// 「生图版本」必须由 isNaiProvider 门控（不能用 !isSdProvider，否则新增方式时会串出去）。
+// 断言直接查那个 div 的 v-if，而不是匹配附近的注释文字。
+assertTrue('生图版本用 isNaiProvider 门控',
+    /<!-- Image Model[^>]*-->\s*<div v-if="isNaiProvider"/.test(comfyIndexSource));
 assertTrue('生图版本不再用 !isSdProvider 门控', !comfyIndexSource.includes('v-if="!isSdProvider"'));
 // 归档索引里的 model 也不能一律写 NAI 版本名
 assertTrue('归档 model 按生图方式区分', appSource.includes('archiveModel'));
 assertTrue('ComfyUI 归档时读工作流里的底模', appSource.includes('comfyCheckpointFromWorkflow'));
 assertTrue('index.html 暴露工作流库下拉', comfyIndexSource.includes('comfyLibrarySelection'));
 assertTrue('index.html 暴露多文件导入', /accept="\.json,application\/json"\s+multiple/.test(comfyIndexSource));
+
+// --- 12. NovelAI 官方 API：尺寸 / 免费额度 / 载荷 ---
+// 被测对象是 core-utils.js 的 window.RPHubNaiOfficialUtils（纯函数）。
+// 关键事实（对着官方文档与官方 Python 库核实过）：
+//   - 端点 /ai/generate-image，Bearer 鉴权，响应是 ZIP
+//   - 宽高必须是 64 的倍数
+//   - Opus 免费额度：步数 ≤ 28 且像素 ≤ 1024*1024（ImagePreset.calculate_cost）
+//   - V5 用 params_version 4，V4/V4.5 用 3
+const naiOff = sandbox.window.RPHubNaiOfficialUtils;
+assertTrue('core-utils 导出 RPHubNaiOfficialUtils', Boolean(naiOff));
+
+section('12) NovelAI 官方 API：provider 与常量');
+assertTrue('novelai-official 进入生图方式列表',
+    config.uiOptions.imageProviders.some(p => p.value === 'novelai-official'));
+assertTrue('原先的 novelai 改名为 RP Hub 网关',
+    config.uiOptions.imageProviders.find(p => p.value === 'novelai').label.includes('RP Hub'));
+assertTrue('两个 NAI 方式并存（网关 + 官方）',
+    config.uiOptions.imageProviders.filter(p => p.value.startsWith('novelai')).length === 2);
+
+section('12b) 官方 API：尺寸必须按 64 对齐并夹住范围');
+// 对齐是「四舍五入到最近的 64 倍数」：1001 距 1024 为 23、距 960 为 41，故取 1024。
+assertEqual('非 64 倍数四舍五入到最近（1001 → 1024）', naiOff.normalizeNaiOfficialDimension(1001, 832), 1024);
+assertEqual('1499 → 1472（距 1472 更近）', naiOff.normalizeNaiOfficialDimension(1499, 832), 1472);
+assertEqual('已是 64 倍数则原样', naiOff.normalizeNaiOfficialDimension(1024, 832), 1024);
+assertEqual('过小值夹到 64', naiOff.normalizeNaiOfficialDimension(10, 832), 64);
+assertEqual('过大值夹到 2048', naiOff.normalizeNaiOfficialDimension(99999, 832), 2048);
+assertEqual('非法值退回兜底', naiOff.normalizeNaiOfficialDimension('abc', 832), 832);
+assertEqual('0 退回兜底', naiOff.normalizeNaiOfficialDimension(0, 832), 832);
+
+section('12c) 官方 API：Opus 免费额度判定（步数 ≤28 且 ≤1MP）');
+// 免费线是 1024*1024 = 1048576 像素。默认竖图 832×1216 = 1011712，**在**线内。
+// 这一点容易凭直觉搞错（1.01MP 看着像超了 1MP，但 1MP 在代码里是 1048576 而非 10^6）。
+assertEqual('832×1216（1011712px < 1048576px）在免费线内', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '832x1216', naiOfficialSteps: 28
+}), true);
+assertEqual('1024×1024（正好 1MP）在免费线内', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '1024x1024', naiOfficialSteps: 28
+}), true);
+assertEqual('640×640 免费', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '640x640', naiOfficialSteps: 28
+}), true);
+assertEqual('28 步正好免费', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '1024x1024', naiOfficialSteps: 28
+}), true);
+assertEqual('29 步超线', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '1024x1024', naiOfficialSteps: 29
+}), false);
+// 1024×1536 = 1572864 > 1048576，确实超线
+assertEqual('1024×1536（1.57MP）超线', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '1024x1536', naiOfficialSteps: 28
+}), false);
+// 免费线换算成像素的边界：1216×832 与 832×1216 同值
+assertEqual('横图 1216×832 同样免费', naiOff.isNaiOfficialFreeTier({
+    naiOfficialResolution: '1216x832', naiOfficialSteps: 28
+}), true);
+// 自定义尺寸同样参与判定
+assertEqual('自定义 512×512 + 20 步 → 免费', naiOff.isNaiOfficialFreeTier({
+    naiOfficialCustomSizeEnabled: true, naiOfficialCustomWidth: 512, naiOfficialCustomHeight: 512, naiOfficialSteps: 20
+}), true);
+assertEqual('自定义 1472×1472 → 超线', naiOff.isNaiOfficialFreeTier({
+    naiOfficialCustomSizeEnabled: true, naiOfficialCustomWidth: 1472, naiOfficialCustomHeight: 1472, naiOfficialSteps: 28
+}), false);
+// 恰好压在免费线上：1024×1024 免费、且只需再多一个 64 格就超线
+assertEqual('1088×1024 = 1114112 超线', naiOff.isNaiOfficialFreeTier({
+    naiOfficialCustomSizeEnabled: true, naiOfficialCustomWidth: 1088, naiOfficialCustomHeight: 1024, naiOfficialSteps: 28
+}), false);
+
+section('12d) 官方 API：超线原因要说清楚（否则用户不知道被扣了什么）');
+const hintSteps = naiOff.describeNaiOfficialFreeStatus({ naiOfficialResolution: '1024x1024', naiOfficialSteps: 40 });
+assertTrue('步数超线时点明步数', /步数 40 > 28/.test(hintSteps));
+const hintPixels = naiOff.describeNaiOfficialFreeStatus({ naiOfficialResolution: '1024x1536', naiOfficialSteps: 28 });
+assertTrue('像素超线时点明像素', /1\.57MP > 1\.00MP/.test(hintPixels));
+assertEqual('在免费线内时不给提示', naiOff.describeNaiOfficialFreeStatus({
+    naiOfficialResolution: '1024x1024', naiOfficialSteps: 28
+}), '');
+// 步数与像素同时超线时两条原因都要给
+const hintBoth = naiOff.describeNaiOfficialFreeStatus({ naiOfficialResolution: '1024x1536', naiOfficialSteps: 40 });
+assertTrue('两项都超线时都说明', /步数 40 > 28/.test(hintBoth) && /1\.57MP/.test(hintBoth));
+
+section('12e) 官方 API：skip_cfg_above_sigma 必须区分 4.5 与 4');
+// "nai-diffusion-4-5-full" 里含有 "nai-diffusion-4"，判断顺序写反会把 4.5 当成 4。
+assertEqual('V4.5 → 58', naiOff.naiOfficialSkipCfgAboveSigma('nai-diffusion-4-5-full'), 58);
+assertEqual('V4 → 19', naiOff.naiOfficialSkipCfgAboveSigma('nai-diffusion-4-full'), 19);
+assertEqual('V3 → null（不启用）', naiOff.naiOfficialSkipCfgAboveSigma('nai-diffusion-3'), null);
+assertEqual('V5 → null', naiOff.naiOfficialSkipCfgAboveSigma('nai-diffusion-5-full'), null);
+
+section('12f) 官方 API：载荷结构与 params_version');
+const p45 = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-4-5-full', naiOfficialResolution: '1024x1024', naiOfficialSteps: 28, naiOfficialScale: 6, naiOfficialSeed: '12345' },
+    prompt: 'a cat', negativePrompt: 'bad'
+});
+assertEqual('model 字段正确', p45.model, 'nai-diffusion-4-5-full');
+assertEqual('action 是 generate', p45.action, 'generate');
+assertEqual('input 是提示词', p45.input, 'a cat');
+assertEqual('V4.5 用 params_version 3', p45.parameters.params_version, 3);
+assertEqual('width/height 进 parameters', [p45.parameters.width, p45.parameters.height], [1024, 1024]);
+assertEqual('steps 进 parameters', p45.parameters.steps, 28);
+assertEqual('scale 进 parameters', p45.parameters.scale, 6);
+assertEqual('seed 是数字', typeof p45.parameters.seed, 'number');
+assertEqual('固定种子被采用', p45.parameters.seed, 12345);
+assertEqual('extra_noise_seed 与 seed 一致（官方两者同值）', p45.parameters.extra_noise_seed, p45.parameters.seed);
+assertEqual('n_samples 为 1', p45.parameters.n_samples, 1);
+assertEqual('negative_prompt 在 parameters 里（不在顶层）', p45.parameters.negative_prompt, 'bad');
+// 噪声计划必须落到 noise_schedule：漏掉它会导致「噪声计划」下拉完全没作用（曾漏过一次）。
+assertEqual('noise_schedule 被写入（默认 karras）', p45.parameters.noise_schedule, 'karras');
+const pSchedule = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialNoiseSchedule: 'exponential' },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('用户选的 noise_schedule 生效', pSchedule.parameters.noise_schedule, 'exponential');
+// 采样器同理
+const pSampler = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialSampler: 'k_dpmpp_2m' },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('用户选的 sampler 生效', pSampler.parameters.sampler, 'k_dpmpp_2m');
+assertEqual('顶层没有 parameters 之外的多余键', Object.keys(p45).sort(), ['action', 'input', 'model', 'parameters']);
+// V4/V5 才带 v4_prompt 结构
+assertEqual('V4.5 带 v4_prompt', p45.parameters.v4_prompt.caption.base_caption, 'a cat');
+assertEqual('V4.5 带 v4_negative_prompt', p45.parameters.v4_negative_prompt.caption.base_caption, 'bad');
+assertEqual('V4.5 的 skip_cfg_above_sigma=58', p45.parameters.skip_cfg_above_sigma, 58);
+
+const p5 = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialResolution: '1024x1024', naiOfficialSteps: 28 },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('V5 用 params_version 4', p5.parameters.params_version, 4);
+assertEqual('V5 不带 skip_cfg_above_sigma', p5.parameters.skip_cfg_above_sigma, undefined);
+
+const p3 = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-3', naiOfficialResolution: '832x1216', naiOfficialSteps: 28 },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('V3 用 params_version 3', p3.parameters.params_version, 3);
+assertEqual('V3 不带 v4_prompt（老模型没这套结构）', p3.parameters.v4_prompt, undefined);
+
+// 种子留空 → 随机（官方语义 seed 0 由后端随机）
+const pRandom = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialSeed: '' },
+    prompt: 'x', negativePrompt: ''
+});
+assertTrue('留空种子会生成一个正整数', Number.isInteger(pRandom.parameters.seed) && pRandom.parameters.seed > 0);
+
+// 步数被夹在 1..50
+const pClamp = naiOff.buildNaiOfficialPayload({
+    settings: { naiOfficialModel: 'nai-diffusion-5-full', naiOfficialSteps: 999 },
+    prompt: 'x', negativePrompt: ''
+});
+assertEqual('步数上限夹到 50', pClamp.parameters.steps, 50);
+
+section('12g) 官方 API：接线与界面检查');
+assertTrue('app.js 使用 RPHubNaiOfficialUtils', appSource.includes('window.RPHubNaiOfficialUtils'));
+assertTrue('生成链路走 generateWithNaiOfficial', appSource.includes('generateWithNaiOfficial'));
+assertTrue('端点用 /ai/generate-image', appSource.includes('/ai/generate-image'));
+assertTrue('鉴权用 Bearer（不是 URL token）', /'Authorization':\s*`Bearer \$\{token\}`/.test(appSource));
+assertTrue('探活用 /user/subscription', appSource.includes('/user/subscription'));
+assertTrue('官方 token 可回落到通用密钥', appSource.includes('settings.naiOfficialToken || settings.imageGenKey'));
+// 密钥不该随预设走
+assertTrue('官方 token 不随生图预设保存（避免切预设换密钥）',
+    !imageUtils.IMAGE_PROFILE_FIELDS.includes('naiOfficialToken'));
+assertTrue('官方出图参数随预设保存',
+    ['naiOfficialModel', 'naiOfficialResolution', 'naiOfficialSteps', 'naiOfficialScale']
+        .every(f => imageUtils.IMAGE_PROFILE_FIELDS.includes(f)));
+assertTrue('index.html 暴露官方面板', comfyIndexSource.includes('settings.naiOfficialModel'));
+assertTrue('index.html 暴露官方分辨率档位', comfyIndexSource.includes('naiOfficialResolutionOptions'));
+assertTrue('index.html 暴露免费额度标记', comfyIndexSource.includes('naiOfficialIsFree'));
+assertTrue('index.html 暴露官方自定义分辨率', comfyIndexSource.includes('settings.naiOfficialCustomSizeEnabled'));
+assertTrue('index.html 暴露 UC 预设', comfyIndexSource.includes('naiOfficialUcPresetOptions'));
+assertTrue('免费判定走纯函数（不在模板里重算）',
+    appSource.includes('naiOfficialUtils.isNaiOfficialFreeTier'));
+// 归档 model 要区分官方 API
+assertTrue('归档 model 区分官方 API', /isNaiOfficialProvider\.value[\s\S]{0,120}naiOfficialModel/.test(appSource));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);
 process.exit(failures === 0 ? 0 : 1);
