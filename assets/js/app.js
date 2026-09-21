@@ -1,4 +1,4 @@
-const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } = Vue;
+const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, markRaw } = Vue;
 const { useStorageManagement, useTokenUsage } = window.RPHubComposables;
 const { createMessageRenderer } = window.RPHubMessageRenderer;
 const { AppNavigation } = window.RPHubLayoutComponents;
@@ -9,6 +9,7 @@ const {
     ActiveToolEditorModal,
     AddCharacterModal,
     AutoImageGenModal,
+    BatchImportCharacterModal,
     CharacterExportModal,
     CharacterEditorModal,
     CharacterCard,
@@ -180,6 +181,7 @@ const app = createApp({
         AddCharacterModal,
         AppNavigation,
         AutoImageGenModal,
+        BatchImportCharacterModal,
         CharacterExportModal,
         CharacterEditorModal,
         CharacterCard,
@@ -9259,7 +9261,7 @@ let removedProviderConfigCleared = false;
             editingWorldInfo.data.keys = parseWorldInfoKeysText(worldInfoKeysText.value, editingWorldInfo.data.useRegex);
         };
 
-        const importCharacterData = async (rawData, avatarUrl, { askImageGeneration = true, activate = true } = {}) => {
+        const importCharacterData = async (rawData, avatarUrl, { askImageGeneration = true, activate = true, save = true } = {}) => {
             const imported = cardUtils.parseImportedCharacterCard(rawData);
             const char = {
                 name: imported.name,
@@ -9288,12 +9290,14 @@ let removedProviderConfigCleared = false;
             };
 
             characters.value.push(char);
-            try {
-                await saveCharactersNow();
-            } catch (error) {
-                const index = characters.value.findIndex(item => item.uuid === char.uuid);
-                if (index >= 0) characters.value.splice(index, 1);
-                throw error;
+            if (save) {
+                try {
+                    await saveCharactersNow();
+                } catch (error) {
+                    const index = characters.value.findIndex(item => item.uuid === char.uuid);
+                    if (index >= 0) characters.value.splice(index, 1);
+                    throw error;
+                }
             }
 
             if (!activate) return char;
@@ -9460,6 +9464,194 @@ let removedProviderConfigCleared = false;
             } else {
                 showToast('不支持的文件格式', 'error');
             }
+        };
+
+        // --- 批量导入角色卡（角色卡管理 → 添加角色卡 → 批量导入）---
+        const showBatchImportMenu = ref(false);
+        const batchImportItems = ref([]);
+        const batchImportRunning = ref(false);
+        const batchImportSkipDuplicates = ref(true);
+        let batchImportItemSeq = 0;
+
+        const isCharacterCardJsonFile = (file) => file.type === 'application/json' || /\.json$/i.test(file.name || '');
+        const isCharacterCardPngFile = (file) => file.type === 'image/png' || /\.png$/i.test(file.name || '');
+
+        const readCardFileAsText = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (event) => resolve(event.target.result);
+            reader.onerror = () => reject(new Error('文件读取失败'));
+            reader.readAsText(file);
+        });
+
+        const readCardFileAsArrayBuffer = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (event) => resolve(event.target.result);
+            reader.onerror = () => reject(new Error('文件读取失败'));
+            reader.readAsArrayBuffer(file);
+        });
+
+        // 与 importCharacter 的单文件分支保持一致：PNG 取内置卡数据，并把头像压到适合保存的尺寸。
+        const parseCharacterCardFile = async (file) => {
+            if (isCharacterCardJsonFile(file)) {
+                const text = await readCardFileAsText(file);
+                try {
+                    return { rawData: JSON.parse(text), avatarUrl: null };
+                } catch (error) {
+                    throw new Error('JSON 格式错误');
+                }
+            }
+
+            if (isCharacterCardPngFile(file)) {
+                const buffer = await readCardFileAsArrayBuffer(file);
+                let rawData;
+                try {
+                    ({ data: rawData } = cardUtils.parsePngCharacterData(buffer));
+                } catch (error) {
+                    const wrapped = new Error('PNG 里没有角色卡数据');
+                    wrapped.chunks = error.chunks;
+                    throw wrapped;
+                }
+                const blob = new Blob([buffer], { type: 'image/png' });
+                return { rawData, avatarUrl: await shrinkAvatarDataUrl(await cardUtils.blobToDataUrl(blob)) };
+            }
+
+            throw new Error('不支持的格式（仅 .json / .png）');
+        };
+
+        const characterCardFingerprint = (char) => [
+            String(char?.name || '').trim().toLowerCase(),
+            String(char?.first_mes || '').trim().slice(0, 160)
+        ].join('\u0000');
+
+        const addBatchImportFiles = (fileList) => {
+            const files = Array.from(fileList || []);
+            if (!files.length) return;
+
+            const known = new Set(batchImportItems.value.map(item => `${item.name}|${item.size}|${item.lastModified}`));
+            const added = [];
+            let ignored = 0;
+
+            for (const file of files) {
+                const key = `${file.name}|${file.size}|${file.lastModified}`;
+                if (known.has(key)) {
+                    ignored += 1;
+                    continue;
+                }
+                known.add(key);
+                const supported = isCharacterCardJsonFile(file) || isCharacterCardPngFile(file);
+                added.push({
+                    id: ++batchImportItemSeq,
+                    name: file.name,
+                    // File 是平台对象，被 Vue 代理后 FileReader 会拒绝读取，所以标成 raw。
+                    file: markRaw(file),
+                    status: supported ? 'pending' : 'fail',
+                    message: supported ? '' : '不支持的格式（仅 .json / .png）'
+                });
+            }
+
+            if (added.length) batchImportItems.value = batchImportItems.value.concat(added);
+            if (ignored) showToast(`已忽略 ${ignored} 个重复选择的文件`, 'info');
+            if (!added.length && !ignored) showToast('没有可导入的文件', 'warning');
+        };
+
+        const openBatchCharacterImport = (event) => {
+            const files = Array.from(event?.target?.files || []);
+            if (event?.target) event.target.value = '';
+            showAddCharacterMenu.value = false;
+            if (files.length) addBatchImportFiles(files);
+            showBatchImportMenu.value = true;
+        };
+
+        const clearBatchImportFiles = () => {
+            if (batchImportRunning.value) return;
+            batchImportItems.value = [];
+        };
+
+        const closeBatchImportMenu = () => {
+            if (batchImportRunning.value) {
+                showToast('导入进行中，请稍候', 'warning');
+                return;
+            }
+            showBatchImportMenu.value = false;
+        };
+
+        const startBatchCharacterImport = async () => {
+            if (batchImportRunning.value) return;
+            const queue = batchImportItems.value.filter(item => item.status === 'pending');
+            if (!queue.length) {
+                showToast('没有待导入的文件', 'info');
+                return;
+            }
+
+            batchImportRunning.value = true;
+            const known = batchImportSkipDuplicates.value
+                ? new Set(characters.value.map(characterCardFingerprint))
+                : null;
+            const importedUuids = [];
+            let ok = 0;
+            let skip = 0;
+            let fail = 0;
+
+            try {
+                for (const item of queue) {
+                    try {
+                        const { rawData, avatarUrl } = await parseCharacterCardFile(item.file);
+                        const fingerprint = characterCardFingerprint(cardUtils.parseImportedCharacterCard(rawData));
+                        if (known && known.has(fingerprint)) {
+                            item.status = 'skip';
+                            item.message = '疑似重复';
+                            skip += 1;
+                        } else {
+                            // 批量时逐张激活/逐张追问生图会打断流程，整批结束再统一落盘。
+                            const char = await importCharacterData(rawData, avatarUrl, {
+                                askImageGeneration: false,
+                                activate: false,
+                                save: false
+                            });
+                            if (known) known.add(fingerprint);
+                            if (char?.uuid) importedUuids.push(char.uuid);
+                            item.status = 'ok';
+                            item.message = char?.name ? `名称：${char.name}` : '';
+                            ok += 1;
+                        }
+                    } catch (error) {
+                        item.status = 'fail';
+                        item.message = error?.message || '导入失败';
+                        fail += 1;
+                        console.error('批量导入角色卡失败:', item.name, error);
+                    }
+                    await nextTick();
+                    // 让出一帧，长批次导入时列表状态与进度能持续刷新。
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+
+                if (importedUuids.length) {
+                    try {
+                        await saveCharactersNow();
+                    } catch (error) {
+                        // 整批落盘失败（多为存储超限）：把这批已入列的卡全部撤回，不留「看着成功其实没存上」的假象。
+                        const rollback = new Set(importedUuids);
+                        characters.value = characters.value.filter(char => !rollback.has(char.uuid));
+                        batchImportItems.value.forEach(item => {
+                            if (item.status === 'ok') {
+                                item.status = 'fail';
+                                item.message = `保存失败：${error?.message || '存储写入失败'}`;
+                            }
+                        });
+                        fail += ok;
+                        ok = 0;
+                        console.error('批量导入角色卡保存失败:', error);
+                    }
+                }
+            } finally {
+                batchImportRunning.value = false;
+            }
+
+            if (ok > 0 && currentView.value === 'characters') characterSearchQuery.value = '';
+            showToast(
+                `批量导入完成：成功 ${ok}，跳过 ${skip}，失败 ${fail}`,
+                ok === 0 && fail > 0 ? 'error' : 'success'
+            );
         };
 
         const buildCharacterExportData = (char) => cardUtils.buildCharacterCardData(char, {
@@ -10135,6 +10327,8 @@ let removedProviderConfigCleared = false;
             currentUiTemplates, activeUiTemplates, uiTemplateUpdateStatus, createUiTemplate, editUiTemplate, saveUiTemplate, deleteUiTemplate, importUiTemplates, updateUiTemplatesFromChat, renderEditingUiTemplatePreview, handleUiTemplateClick,
             isBatchDeleteMode, isNavigationOpen, selectedCharacterIndices, toggleBatchDeleteMode, toggleCharacterSelection, batchDeleteCharacters,
             handleAvatarUpload, importCharacter,
+            showBatchImportMenu, batchImportItems, batchImportRunning, batchImportSkipDuplicates,
+            addBatchImportFiles, openBatchCharacterImport, clearBatchImportFiles, closeBatchImportMenu, startBatchCharacterImport,
             createPreset, editPreset, savePreset, deletePreset,
             renderMarkdown, messageUsesWideLayout, parseCot, closeCharacterEditor: () => showCharacterEditor.value = false,
             openExportModal: (type) => {

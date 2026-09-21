@@ -913,7 +913,7 @@
 
     const AddCharacterModal = {
         props: { show: Boolean },
-        emits: ['close', 'create', 'generate', 'import-character'],
+        emits: ['close', 'create', 'generate', 'import-character', 'import-character-batch'],
         template: `
             <modal-shell v-if="show" close-on-backdrop @close="$emit('close')"
                 overlay-class="z-[60] bg-black/50 backdrop-blur-sm p-4 animate-fade-in"
@@ -963,6 +963,20 @@
                             <label class="choice-card group">
                                 <div class="choice-card__icon">
                                     <svg class="w-6 h-6 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m12 3-8.5 4.72a1 1 0 000 1.75L12 14.2l8.5-4.73a1 1 0 000-1.75L12 3Z"></path>
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m3.5 13.2 8.5 4.73 8.5-4.73"></path>
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m3.5 17.6 8.5 4.73 8.5-4.73"></path>
+                                    </svg>
+                                </div>
+                                <div class="text-left flex-1">
+                                    <div class="font-bold">批量导入角色卡</div>
+                                    <div class="text-xs text-gray-500">一次导入多个 .png / .json，逐个汇报结果</div>
+                                </div>
+                                <input type="file" accept=".png,.json" multiple @change="$emit('import-character-batch', $event)" class="hidden">
+                            </label>
+                            <label class="choice-card group">
+                                <div class="choice-card__icon">
+                                    <svg class="w-6 h-6 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
                                     </svg>
                                 </div>
@@ -974,6 +988,162 @@
                             </label>
                         </div>
                         <button @click="$emit('close')" class="mt-6 w-full py-3 text-red-500 font-medium hover:text-red-600 transition-colors">取消</button>
+                    </div>
+            </modal-shell>`
+    };
+
+    // 批量导入角色卡：组件只负责收集文件与展示状态，解析/入库都在 app.js
+    // （那里能复用单张导入的 importCharacterData 与 characters 状态）。
+    const BatchImportCharacterModal = {
+        props: {
+            show: Boolean,
+            items: { type: Array, default: () => [] },
+            running: Boolean,
+            skipDuplicates: { type: Boolean, default: true }
+        },
+        emits: ['close', 'files', 'start', 'clear', 'skip-duplicates'],
+        data: () => ({
+            dragActive: false,
+            statusLabels: { pending: '待导入', ok: '已导入', skip: '已跳过', fail: '失败' },
+            statusClasses: {
+                pending: 'bg-gray-100 text-gray-500',
+                ok: 'bg-green-50 text-green-600',
+                skip: 'bg-yellow-100 text-yellow-700',
+                fail: 'bg-red-50 text-red-600'
+            }
+        }),
+        computed: {
+            stats() {
+                const count = (status) => this.items.filter(item => item.status === status).length;
+                const ok = count('ok');
+                const skip = count('skip');
+                const fail = count('fail');
+                return {
+                    total: this.items.length,
+                    ok,
+                    skip,
+                    fail,
+                    processed: ok + skip + fail,
+                    pending: this.items.length - ok - skip - fail
+                };
+            },
+            progressPercent() {
+                return this.stats.total ? Math.round(this.stats.processed / this.stats.total * 100) : 0;
+            },
+            startDisabled() {
+                return this.running || this.stats.pending === 0;
+            },
+            startLabel() {
+                if (this.running) return `导入中 ${this.stats.processed} / ${this.stats.total}`;
+                if (this.stats.total > 0 && this.stats.pending === 0) return '已全部处理';
+                return '开始导入';
+            }
+        },
+        methods: {
+            statusLabel(item) {
+                return this.statusLabels[item.status] || '待导入';
+            },
+            statusClass(item) {
+                return this.statusClasses[item.status] || this.statusClasses.pending;
+            },
+            emitFiles(fileList) {
+                const files = Array.from(fileList || []);
+                if (files.length) this.$emit('files', files);
+            },
+            onSelect(event) {
+                this.emitFiles(event.target.files);
+                event.target.value = '';
+            },
+            // pointer 划过拖拽区内的子元素时也会触发 dragleave，靠 relatedTarget 过滤掉，避免高亮闪断。
+            isInsideDropZone(event) {
+                return !!(event.relatedTarget && event.currentTarget.contains(event.relatedTarget));
+            },
+            onDragOver(event) {
+                if (this.isInsideDropZone(event)) return;
+                this.dragActive = true;
+            },
+            onDragLeave(event) {
+                if (this.isInsideDropZone(event)) return;
+                this.dragActive = false;
+            },
+            onDrop(event) {
+                this.dragActive = false;
+                this.emitFiles(event.dataTransfer?.files);
+            },
+            requestClose() {
+                if (this.running) return;
+                this.$emit('close');
+            }
+        },
+        template: `
+            <modal-shell v-if="show" overlay-class="z-[95] bg-black/50 backdrop-blur-sm p-4 animate-fade-in"
+                panel-class="bg-white rounded-2xl border border-gray-200 w-full max-w-2xl flex flex-col shadow-2xl max-h-[86vh] overflow-hidden">
+                    <div class="p-5 border-b border-gray-100 flex items-start justify-between gap-4 flex-shrink-0">
+                        <div class="min-w-0">
+                            <h3 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                                <svg class="w-5 h-5 text-primary-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m12 3-8.5 4.72a1 1 0 000 1.75L12 14.2l8.5-4.73a1 1 0 000-1.75L12 3Z"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m3.5 13.2 8.5 4.73 8.5-4.73"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m3.5 17.6 8.5 4.73 8.5-4.73"></path>
+                                </svg>
+                                批量导入角色卡
+                            </h3>
+                            <p class="text-xs text-gray-500 mt-1">可一次选择或拖入多个 .json / .png 角色卡，逐个解析并汇报每张卡的结果，坏卡不会中断整批导入。</p>
+                        </div>
+                        <button @click="requestClose" :disabled="running"
+                            class="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-1 rounded-full transition-all flex-shrink-0 disabled:opacity-40">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+
+                    <div class="p-5 space-y-4 overflow-y-auto custom-scrollbar">
+                        <label class="flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed p-6 text-center cursor-pointer transition-colors"
+                            :class="dragActive ? 'border-primary-400 bg-primary-50' : 'border-gray-300 hover:border-primary-300 hover:bg-gray-50'"
+                            @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
+                            <svg class="w-7 h-7 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                            </svg>
+                            <span class="text-sm font-bold text-gray-700">拖入文件，或点击选择</span>
+                            <span class="text-xs text-gray-400">支持多选；同一批里重复选择同一文件会自动忽略</span>
+                            <input type="file" class="hidden" multiple accept=".png,.json" @change="onSelect">
+                        </label>
+
+                        <div v-if="items.length">
+                            <div class="flex items-center justify-between gap-2 mb-2">
+                                <span class="text-xs text-gray-500">共 {{ stats.total }} 个 · 成功 {{ stats.ok }} · 跳过 {{ stats.skip }} · 失败 {{ stats.fail }}</span>
+                                <button @click="$emit('clear')" :disabled="running"
+                                    class="px-3 py-1 text-xs font-bold text-gray-500 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">清空列表</button>
+                            </div>
+                            <div v-if="running" class="h-1.5 w-full rounded-full bg-gray-200 overflow-hidden">
+                                <div class="h-full bg-primary-600 transition-all" :style="{ width: progressPercent + '%' }"></div>
+                            </div>
+                            <div class="mt-2 max-h-60 overflow-y-auto custom-scrollbar space-y-1.5 pr-1">
+                                <div v-for="item in items" :key="item.id"
+                                    class="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2">
+                                    <span class="flex-shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold" :class="statusClass(item)">{{ statusLabel(item) }}</span>
+                                    <span class="min-w-0 flex-1 truncate text-sm text-gray-700" :title="item.name">{{ item.name }}</span>
+                                    <span v-if="item.message" class="flex-shrink-0 max-w-[45%] truncate text-xs text-gray-400" :title="item.message">{{ item.message }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <label class="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-600">
+                            <input type="checkbox" class="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500/30"
+                                :checked="skipDuplicates" :disabled="running" @change="$emit('skip-duplicates', $event.target.checked)">
+                            跳过重复角色卡（名称与开场白都和已有卡片一致）
+                        </label>
+                    </div>
+
+                    <div class="p-4 border-t border-gray-100 flex justify-end gap-3 bg-gray-50/80 flex-shrink-0">
+                        <button @click="requestClose" :disabled="running" class="modal-secondary-button">关闭</button>
+                        <button @click="$emit('start')" :disabled="startDisabled"
+                            class="px-6 py-2.5 bg-primary-600 hover:bg-primary-700 text-white rounded-xl transition-all shadow-md hover:shadow-lg font-bold text-sm active:scale-95 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <svg v-if="running" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                            </svg>
+                            {{ startLabel }}
+                        </button>
                     </div>
             </modal-shell>`
     };
@@ -2823,6 +2993,7 @@
         ActiveToolEditorModal,
         AddCharacterModal,
         AutoImageGenModal,
+        BatchImportCharacterModal,
         CharacterExportModal,
         CharacterEditorModal,
         CharacterCard,

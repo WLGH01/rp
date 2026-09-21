@@ -1234,4 +1234,28 @@ assertEqual('没有指纹的老条目仍然放行（升级不重跑）',
     imageUtils.shouldReuseCachedImageJob({ status: 'done', imageUrl: 'x' }, fpVertical), true);
 assertEqual('非 JSON 指纹不会炸，也不会误判', imageUtils.shouldReuseCachedImageJob({ imageFingerprint: 'v1' }, 'v1'), true);
 
+// --- 16. 角色卡管理：批量导入接线 ---
+// 主应用（index.html + app.js + ui-components.js）里「添加角色卡」菜单下的批量入口。
+section('16) 角色卡管理 → 添加角色卡：批量导入接线');
+const mainIndex = readFileSync(join(root, 'index.html'), 'utf8');
+const appJs = readFileSync(join(root, 'assets/js/app.js'), 'utf8');
+const uiJs = readFileSync(join(root, 'assets/js/ui-components.js'), 'utf8');
+
+assertTrue('菜单里新增「批量导入角色卡」', uiJs.includes('批量导入角色卡'));
+assertTrue('批量入口是多选文件（multiple + 专用事件）', /multiple[^>]*import-character-batch/.test(uiJs));
+assertTrue('AddCharacterModal 声明批量事件', uiJs.includes("'import-character-batch'"));
+assertTrue('批量弹窗组件已导出到 RPHubComponents', uiJs.includes('BatchImportCharacterModal,'));
+assertTrue('批量弹窗与事件在 index.html 接线',
+    mainIndex.includes('<batch-import-character-modal') && mainIndex.includes('@import-character-batch="openBatchCharacterImport($event)"'));
+assertTrue('app.js 引入批量弹窗组件', appJs.includes('BatchImportCharacterModal,'));
+assertTrue('弹窗拖拽高亮过滤内部元素', uiJs.includes('isInsideDropZone(event)'));
+assertTrue('批量导入复用单张解析（parseCharacterCardFile）', appJs.includes('const parseCharacterCardFile = async (file) =>'));
+assertTrue('File 以 markRaw 存放（否则 FileReader 拒绝代理对象）', appJs.includes('file: markRaw(file)'));
+assertTrue('重复判定用「名称 + 开场白」指纹', appJs.includes('const characterCardFingerprint = (char) =>'));
+assertTrue('单张导入新增 save 开关供批量复用',
+    /const importCharacterData = async \(rawData, avatarUrl, \{ askImageGeneration = true, activate = true, save = true \} = \{\}\)/.test(appJs));
+assertTrue('批量导入不逐张落盘（save: false）', appJs.includes('save: false'));
+assertTrue('整批只落盘一次并在失败时回滚', appJs.includes('const rollback = new Set(importedUuids);'));
+assertTrue('顺序处理且逐张让出主线程', appJs.includes('for (const item of queue)') && appJs.includes('await new Promise(resolve => setTimeout(resolve, 0));'));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

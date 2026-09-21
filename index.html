@@ -3446,7 +3446,13 @@
         <add-character-modal :show="showAddCharacterMenu" @close="showAddCharacterMenu = false"
             @create="createNewCharacter(); showAddCharacterMenu = false"
             @generate="showAddCharacterMenu = false; currentView = 'generator'"
-            @import-character="importCharacter($event); showAddCharacterMenu = false"></add-character-modal>
+            @import-character="importCharacter($event); showAddCharacterMenu = false"
+            @import-character-batch="openBatchCharacterImport($event)"></add-character-modal>
+
+        <batch-import-character-modal :show="showBatchImportMenu" :items="batchImportItems"
+            :running="batchImportRunning" :skip-duplicates="batchImportSkipDuplicates"
+            @close="closeBatchImportMenu" @files="addBatchImportFiles" @start="startBatchCharacterImport"
+            @clear="clearBatchImportFiles" @skip-duplicates="batchImportSkipDuplicates = $event"></batch-import-character-modal>
 
         <character-editor-modal :show="showCharacterEditor" :character="editingCharacter.data"
             :editing="editingCharacter.id !== undefined" :tab="editorTab" @close="closeCharacterEditor"
