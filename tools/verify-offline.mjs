@@ -47,7 +47,9 @@ const REMOTE_RULES = [
     ['script src', /<script[^>]+src\s*=\s*["'](https?:\/\/[^"']+)/gi],
     ['link href', /<link[^>]+href\s*=\s*["'](https?:\/\/[^"']+)/gi],
     ['media src', /<(?:img|iframe|source|video|audio)[^>]+src\s*=\s*["'](https?:\/\/[^"']+)/gi],
-    ['css url()', /url\(\s*["']?(https?:\/\/[^"')]+)/gi],
+    // 前面的 (?<![\w$-]) 用来排除 JS 里以 Url( 结尾的标识符，例如
+    // resolveArchivedImageFallbackUrl('http://…')，否则会被当成 CSS url() 误报。
+    ['css url()', /(?<![\w$-])url\(\s*["']?(https?:\/\/[^"')]+)/gi],
     ['css @import', /@import\s+(?:url\()?\s*["']?(https?:\/\/[^"')]+)/gi]
 ];
 
