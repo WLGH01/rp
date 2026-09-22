@@ -109,7 +109,7 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
                 ? `当前已开启自动生图，请按系统中的自动生图规则生成并插入${Math.min(8, Math.max(2, Number(imageGenCount) || 2))}张图片。`
                 : '',
             autoVoiceEnabled
-                ? '当前已开启自动语音：每一句人物台词都要写成 [[voice:角色名|情绪]]『台词』[[/voice]]（标记在外、引号在内）；只写引号而不写标记是不允许的，系统认不出说话人就无法用对应音色朗读。'
+                ? '当前已开启自动语音：每一句人物台词都要写成 [[voice:角色名|情绪]]『台词』[[/voice]]（标记在外、引号在内）；只写引号而不写标记是不允许的，系统认不出说话人就无法用对应音色朗读。情绪、语气词与停顿的具体写法以系统给出的自动语音规则为准。'
                 : '',
             uiTemplateEnabled
                 ? '正文结束后，按系统提供的当前变量JSON检查并输出本轮需要更新的变量。'
@@ -228,10 +228,13 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
 
     // 自动语音：告诉 AI 把「人物说的话」包进语音标记。
     //
-    // 为什么要按 provider 换措辞：三家的能力差得很远（都对着官方文档/官方源码核实过）——
-    //   MiniMax     唯一支持请求级 emotion 与文本内停顿 `<#x#>`（本站统一标记为 [[pause:x]]）
-    //   GPT-SoVITS  官方无任何情绪/停顿标记，情绪只能靠参考音频，停顿只能靠标点
-    //   NovelAI     官方无任何情绪/停顿标记，只能靠标点
+    // 为什么要按 provider 换措辞：四家的能力差得很远（都对着官方文档/官方源码核实过）——
+    //   MiniMax         支持请求级 emotion（7 个英文枚举）与文本内停顿 `<#x#>`
+    //   MiMo-V2.5-TTS   情绪是**自然语言**（支持「压抑的愤怒」这类复合情绪），
+    //                   还有音频标签（正文里的括号，如「（叹气）（停顿0.5秒）」）与唱歌标签，
+    //                   并且可以用「导演演绎」（角色/场景/指导）整段刻画声线
+    //   GPT-SoVITS      官方无任何情绪/停顿标记，情绪只能靠参考音频，停顿只能靠标点
+    //   NovelAI         官方无任何情绪/停顿标记，只能靠标点
     // 所以「用哪家就按哪家的能力写提示词」，避免让 AI 输出该服务根本不认的东西。
     //
     // 为什么要专门交代「引号放哪」：第一版只说了「包在标记里」，结果 AI 照卡片原有的
@@ -239,47 +242,151 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
     // 只写引号是没有意义的——引号谁来写、写哪种、是否成对全靠卡片习惯，系统无法可靠识别
     // 说话人；必须由标记来界定「这句话是谁说的」。因此这里把完整写法、具体示例、
     // 以及「只写引号不允许」都写死，并声明本条优先于卡片/预设里的对白格式要求。
-    const buildAutoVoicePrompt = ({ provider = 'minimax', voiceBindings = [] } = {}) => {
+    const buildAutoVoicePrompt = ({
+        provider = 'minimax', voiceBindings = [], mimoDirections = []
+    } = {}) => {
         const bindings = (Array.isArray(voiceBindings) ? voiceBindings : [])
             .map(item => ({ name: String(item?.name || '').trim(), voice: String(item?.voice || '').trim() }))
             .filter(item => item.name);
         const isMinimax = provider === 'minimax';
+        const isMimo = provider === 'mimo';
         // 示例优先用用户真实绑定过的角色名，AI 可以直接照抄格式。
         const sampleA = bindings[0]?.name || '角色甲';
         const sampleB = bindings[1]?.name || '角色乙';
+        // 已经有导演演绎的角色：MiMo 会按那份「角色/场景/指导」演，AI 只负责写准情绪与语气词。
+        const directed = (Array.isArray(mimoDirections) ? mimoDirections : [])
+            .map(item => String(item?.name || '').trim())
+            .filter(Boolean);
+
+        // 硬性要求用数组 + 自动编号：分支多了以后手写编号极易漏号/跳号，
+        // 而「第 N 条」被 AI 引用的概率不低。
+        const rules = [];
+        rules.push('**只写引号（『』「」「」"" 或 （））而不写 [[voice:...]] 标记是不允许的。**\n'
+            + '   那样系统认不出这句话是谁说的，也就无法用对应音色朗读，等于没开语音。引号只是排版，界定说话人的是标记。');
+        rules.push('台词原有的引号必须**保留在标记内部**，不要换成别的写法、也不要丢掉；标记紧贴整句台词，把引号一起包进去。');
+        rules.push('角色名必须就是说话人，与角色卡或正文里的写法完全一致。旁白、动作、心理与环境描写**不要**包标记。');
+        rules.push('一个语音块只放一个人说的话；同一段里多人对话就写多个块，不要把多人的话塞进同一个块，也不要让一个块跨空行。');
+
+        // 情绪：MiMo 是自然语言，MiniMax 是 7 个枚举，另两家没有。
+        if (isMimo) {
+            rules.push('情绪用**自然语言中文**描述，可以复合、可以细腻：「压抑的愤怒」「带着哽咽的笑意」「温柔但疲惫」「心虚又嘴硬」。没把握就整体省略「|情绪」。');
+        } else if (isMinimax) {
+            rules.push('情绪可选，只能填 happy / sad / angry / fearful / disgusted / surprised / neutral 之一；没把握就整体省略「|情绪」这一段。**复合情绪不是合法取值**，写了也不会生效。');
+            // MiniMax 的 emotion 是请求级参数：一个块只能一个情绪。这是使用者最常踩的粒度问题，
+            // 必须给出「拆块」这条可操作解法，而不是只说「不支持复合情绪」。
+            rules.push('**一个语音块只能有一个情绪。** 同一角色在同一段里情绪要变化（先冷笑、再突然发火），就拆成**多个语音块**，每块写自己的情绪——系统逐块合成，情绪真的会变：\n'
+                + `   [[voice:${sampleA}|neutral]]『哦？』[[/voice]][[voice:${sampleA}|angry]]『你再说一遍试试。』[[/voice]]\n`
+                + '   错误写法（情绪会丢）：[[voice:' + sampleA + '|又冷又怒]]『哦？你再说一遍试试。』[[/voice]]');
+        } else {
+            rules.push('当前语音服务不支持情绪控制，请**不要**写「|情绪」这一段。');
+        }
+
+        if (isMimo) {
+            rules.push('想让这个角色这一句唱出来，把情绪写成「唱歌」（例如 [[voice:' + sampleA + '|唱歌]]），歌词要写完整。');
+        }
+
+        // 停顿
+        if (isMimo) {
+            rules.push('需要在台词中间明显停顿处插入 [[pause:秒数]]，例如 [[pause:0.5]]、[[pause:2]]，秒数范围 0.1–10；不要在同一个位置连写两个停顿。');
+        } else if (isMinimax) {
+            rules.push('需要在台词中间明显停顿处插入 [[pause:秒数]]，秒数取 0.01–99.99，例如 [[pause:0.5]]；不要连续写两个停顿。');
+        } else {
+            rules.push('当前语音服务不支持停顿标记，请改用标点表达停顿（短停顿用「，」，长停顿用「……」或「。」）。');
+        }
+
+        // 语气词 / 发声动作：目前只有 MiMo 能真正演出来（把 `[[sfx:叹气]]` 变成音频标签）。
+        // MiniMax 的同类标签（(laughs)/(sighs)…）是 speech-2.8 专有，本站默认跑 speech-02，
+        // 因此**对 MiniMax 一个字都不提**——不提，AI 就不会去写一个会被逐字念出来的标签。
+        if (isMimo) {
+            rules.push('需要叹气、哽咽、哭笑不得、吸气、低语、咳嗽这类**能发出声音**的表演时，就在台词中间插入 [[sfx:标签]]：'
+                + '[[sfx:叹气]] [[sfx:长叹一口气]] [[sfx:轻笑]] [[sfx:冷笑]] [[sfx:哽咽]] [[sfx:吸气]] [[sfx:低语]] [[sfx:轻声]] [[sfx:语速加快]]。'
+                + '标签里只写声音，**不要写身体动作**（转身、坐下、挥手、皱眉之类都无效）；一句话最多一个语气词标签，不要堆砌。');
+        }
+
+        rules.push('即使正文使用 HTML 或美化面板排版，对白也照常使用该标记包裹。');
+        rules.push('本规则**优先于角色卡、预设及正文中关于对白格式的其它写法**；若它们冲突，以本条为准。');
+        rules.push('不要用代码块包裹这些标记，也不要向用户解释它们的存在。');
+        if (bindings.length) {
+            rules.push(`以下角色已绑定专属音色，请使用这些名字：${bindings.map(item => item.name).join('、')}。未绑定的角色直接写其真实姓名即可，系统会用默认音色朗读。`);
+        }
+        if (isMimo && directed.length) {
+            rules.push(`这些角色已经有专属的「导演演绎」声线设定：${directed.join('、')}。你只需写准情绪与语气词，不要试图用文字改变他们的音色。`);
+        }
+
         const lines = [
             '<auto_voice>',
-            '用户已开启自动语音。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读。',
+            isMimo
+                ? '用户已开启自动语音（小米 MiMo-V2.5-TTS）。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪、语气词与停顿都会被 MiMo 真正"演"出来。'
+                : '用户已开启自动语音。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪与停顿都会被真正合成出来。',
             '',
             '【写法】每句台词都必须写成下面这种完整形式——**标记在外、引号在内**：',
             '[[voice:角色名|情绪]]『台词原文』[[/voice]]',
             '省略情绪时写成：[[voice:角色名]]『台词原文』[[/voice]]',
             '',
             '【示例】',
-            `[[voice:${sampleA}|happy]]『哟，人都齐了吧。』[[/voice]]`,
+            isMimo
+                ? `[[voice:${sampleA}|压抑的愤怒]]『哟，人都齐了吧。』[[/voice]]`
+                : `[[voice:${sampleA}|happy]]『哟，人都齐了吧。』[[/voice]]`,
             `[[voice:${sampleB}]]『挣点钱。』[[/voice]]`,
+            isMimo
+                ? `[[voice:${sampleA}|温柔但疲惫]][[sfx:长叹一口气]]『……算了，先这样吧。』[[/voice]]`
+                : `[[voice:${sampleA}|sad]]『……算了，先这样吧。』[[/voice]]`,
+            isMimo
+                ? `[[voice:${sampleB}|哽咽着强装镇定]]『我没事。[[pause:0.8]]真的没事。』[[/voice]]`
+                : `[[voice:${sampleB}|neutral]]『哦？』[[/voice]][[voice:${sampleB}|angry]]『你再说一遍试试。』[[/voice]]`,
             '',
             '【硬性要求】',
-            '1. **只写引号（『』「」「」"" 或 （））而不写 [[voice:...]] 标记是不允许的。**',
-            '   那样系统认不出这句话是谁说的，也就无法用对应音色朗读，等于没开语音。引号只是排版，界定说话人的是标记。',
-            '2. 台词原有的引号必须**保留在标记内部**，不要换成别的写法、也不要丢掉；标记紧贴整句台词，把引号一起包进去。',
-            '3. 角色名必须就是说话人，与角色卡或正文里的写法完全一致。旁白、动作、心理与环境描写**不要**包标记。',
-            '4. 一个语音块只放一个人说的话；同一段里多人对话就写多个块，不要把多人的话塞进同一个块，也不要让一个块跨空行。',
-            isMinimax
-                ? '5. 情绪可选，只能填 happy / sad / angry / fearful / disgusted / surprised / neutral 之一；没把握就整体省略「|情绪」这一段。'
-                : '5. 当前语音服务不支持情绪控制，请**不要**写「|情绪」这一段。',
-            isMinimax
-                ? '6. 需要在台词中间明显停顿处插入 [[pause:秒数]]，秒数取 0.01–99.99，例如 [[pause:0.5]]；不要连续写两个停顿。'
-                : '6. 当前语音服务不支持停顿标记，请改用标点表达停顿（短停顿用「，」，长停顿用「……」或「。」）。',
-            '7. 即使正文使用 HTML 或美化面板排版，对白也照常使用该标记包裹。',
-            '8. 本规则**优先于角色卡、预设及正文中关于对白格式的其它写法**；若它们冲突，以本条为准。',
-            '9. 不要用代码块包裹这些标记，也不要向用户解释它们的存在。',
-            bindings.length
-                ? `10. 以下角色已绑定专属音色，请使用这些名字：${bindings.map(item => item.name).join('、')}。未绑定的角色直接写其真实姓名即可，系统会用默认音色朗读。`
-                : ''
+            ...rules.map((text, index) => `${index + 1}. ${text}`)
         ];
         return lines.filter(line => line !== '').join('\n').trim() + '\n</auto_voice>';
     };
+
+    // ===== MiMo 音色描述（音色设计）=====
+    // 官方对「音色描述」的硬性要求：它是嗓子的身份卡，只描写这副声音本身长什么样，
+    // 不写场景、不写动作、不写这次要说什么；一到两句白描，越凝练越容易跨场景复用。
+    // 必写项：身份锚点（年龄段+性别）、声音质感（气息/共鸣/吐字/底色）、语速节奏、情绪底色；
+    // 推荐项：风格身份标签（播音员风格/拍卖师风格）、辨识度小癖好（字尾带颤音/笑起来是胸腔闷笑）。
+    const buildMimoVoiceDesignPrompt = ({ characterName = '', characterInfo = '', userName = '', extra = '' } = {}) => [
+        '你是配音导演。请为下面这个角色写一段【音色描述】，用于 MiMo-V2.5-TTS 的音色设计（voicedesign）：模型会仅凭这段文字凭空塑造这副嗓子。',
+        '',
+        '角色名：' + (String(characterName || '').trim() || '（未命名）'),
+        characterInfo ? '角色设定：\n' + String(characterInfo).trim() : '',
+        userName ? `该角色平时对话的人是：${String(userName).trim()}。` : '',
+        String(extra || '').trim(),
+        '',
+        '【音色描述写作规范】',
+        '1. 这是嗓子的身份卡：只写这副声音本身，**不要写场景、不要写动作、不要写这次要说什么**。',
+        '2. 必须写到：身份锚点（年龄段 + 性别）、声音质感（气息走向、共鸣位置、吐字方式、音色底色）、语速节奏、情绪底色（嗓子默认状态）。',
+        '3. 强烈建议补上：风格/身份标签（如「播音员风格」「法庭陈词风格」）、一个让人一耳朵记住的小癖好（如「字尾带极轻的颤音」「笑起来是胸腔闷笑」）。',
+        '4. 用可感的动词或比喻，**不要堆形容词**；一到两句话，白描式，不分段、不列条、不加标题。',
+        '5. 不要用真实演员名或已有作品/IP 角色名（版权且泛化差）；默认普通话，除非设定明确要求方言。',
+        '',
+        '只输出这段音色描述本身，不要解释、不要引号、不要任何前缀。'
+    ].filter(Boolean).join('\n');
+
+    // ===== MiMo 导演演绎 =====
+    // 官方「导演模式」：像给演员写剧本一样，从【角色】【场景】【指导】三个维度刻画人物与声线，
+    // 模型据此生成更富层次、更具演绎感的语音。这三段就是 MiMo 的 user 风格指令。
+    const buildMimoDirectionPrompt = ({ characterName = '', characterInfo = '', userName = '', userPersona = '', extra = '' } = {}) => [
+        '你是配音导演。请为下面这个角色写一份【导演演绎】脚本，用于 MiMo-V2.5-TTS 的「导演模式」：这段文字会作为风格指令，决定他/她开口时的声线与演绎方式。',
+        '',
+        '角色名：' + (String(characterName || '').trim() || '（未命名）'),
+        characterInfo ? '角色设定：\n' + String(characterInfo).trim() : '',
+        userName ? `对戏角色（用户）：${String(userName).trim()}${userPersona ? '——' + String(userPersona).trim() : ''}` : '',
+        String(extra || '').trim(),
+        '',
+        '【必须严格按下面三段输出，每段都要写满】',
+        '角色：写清人物身份、性格底色、外形气质与说话习惯（成长背景、职业、待人接物的腔调）。',
+        '场景：交代这个角色通常在什么处境下开口、和谁说话、情绪处在什么位置（可以写得具体：时间、地点、关系、压力）。',
+        '指导：像导演给演员下达演绎要领那样写——语速与顿挫、气声与实声、重音与停顿的位置、共鸣位置、音色质感、情绪起伏。'
+        + '可以分条写（用「- 」开头），要写得细腻、可执行。',
+        '',
+        '【硬性要求】',
+        '1. 全部使用中文，直接以「角色：」「场景：」「指导：」三个词开头，不要加标题、编号、Markdown 代码块或解释。',
+        '2. 「指导」段必须可执行：写清怎么发声（气息、共鸣、咬字）、怎么停、哪里重、情绪怎么走，避免「要演得传神」这类空话。',
+        '3. 不要写具体台词内容，也不要写这一轮说了什么——这是**声线底稿**，要能跨场景复用。',
+        '4. 全程以第二人称对演员下令都可以（如「语速极慢，句与句之间留出令人不安的空白」），但不要出现「AI」「模型」「生成」等词。'
+    ].filter(Boolean).join('\n');
 
     const buildAutoImageGenPrompt = (imageGenCount) => `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
 围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。所有Tag必须使用英文并以英文逗号分隔，禁止中文Tag；提示词必须详尽、细致且可直接绘制，不得使用笼统省略的Tag或脱离场景拼凑通用画面。
@@ -345,6 +452,8 @@ image###英文Tag###
         buildActiveToolSystemPrompt,
         buildAutoImageGenPrompt,
         buildAutoVoicePrompt,
+        buildMimoVoiceDesignPrompt,
+        buildMimoDirectionPrompt,
         buildCharacterPrompt,
         buildClassicSecondarySummaryPrompt,
         buildClassicSummaryFinalInstruction,

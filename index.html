@@ -2645,7 +2645,7 @@
                                                     button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
                                                     menu-class="text-sm">
                                                 </custom-select>
-                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">三种服务的请求格式分别对齐酒馆的 MiniMax / NovelAI / GPT-SoVITS-V2 扩展。</p>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">MiniMax / NovelAI / GPT-SoVITS-V2 的请求格式分别对齐酒馆官方扩展；小米 MiMo-V2.5-TTS 走 OpenAI 兼容的对话接口，支持预置音色、音色设计与音色克隆。</p>
                                             </div>
 
                                             <!-- 播放设置 -->
@@ -2677,6 +2677,10 @@
                                                     button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
                                                     menu-class="text-sm">
                                                 </custom-select>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    Speech-2.8 是最新一代（音质/自然度更好），情绪（7 种枚举）与停顿标记全系都支持。
+                                                    本站在 MiniMax 上没有启用「语气词标签」——那是 Speech-2.8 专有能力，为避免默认模型（02 系列）下被逐字念出，一律不下发。
+                                                </p>
                                             </div>
                                             <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
                                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">语言</label>
@@ -2821,6 +2825,182 @@
                                                     menu-class="text-sm">
                                                 </custom-select>
                                             </div>
+
+                                            <!-- 小米 MiMo-V2.5-TTS -->
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">API 地址</label>
+                                                <input v-model="settings.ttsMimoBaseUrl" type="text"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="https://api.xiaomimimo.com/v1">
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    小米 MiMo 开放平台默认 <code class="px-1 rounded bg-gray-50">https://api.xiaomimimo.com/v1</code>（不写 <code class="px-1 rounded bg-gray-50">/v1</code> 会自动补上）。
+                                                    浏览器直连若被 CORS 拦，可填自建反代地址（见 <code class="px-1 rounded bg-gray-50">docker/default.conf</code> 的 <code class="px-1 rounded bg-gray-50">/mimo/</code> 示例）。
+                                                </p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">API Key</label>
+                                                <input v-model="settings.ttsMimoKey" type="password" autocomplete="off"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="MiMo API Key">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">输出格式</label>
+                                                <custom-select v-model="settings.ttsMimoFormat" :options="ttsMimoFormatOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">非流式调用用 WAV / MP3 即可；PCM16 仅在流式拼接时才有意义。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">默认音色</label>
+                                                <custom-select v-model="settings.ttsMimoVoice" :options="ttsVoiceOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    下拉里同时列出三类音色：官方预置（8 个）、<span class="font-semibold text-rose-700">设计音色</span>（文字描述生成）、
+                                                    <span class="font-semibold text-rose-700">克隆音色</span>（音频样本复刻）。系统按音色类型自动选用对应模型，
+                                                    未绑定专属音色的角色与旁白一律走这里选中的音色。
+                                                </p>
+                                            </div>
+
+                                            <!-- MiMo 音色设计 -->
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音色设计（用文字凭空造一副嗓子）</label>
+                                                <p class="mb-3 text-xs text-gray-400 leading-relaxed">
+                                                    对应模型 <code class="px-1 rounded bg-gray-50">mimo-v2.5-tts-voicedesign</code>：音色完全由一段「音色描述」决定。
+                                                    写法要求是「嗓子的身份卡」——年龄段与性别、气息与共鸣、语速节奏、情绪底色，一到两句白描，
+                                                    <span class="font-semibold text-rose-700">不写场景、不写动作、不写这次要说什么</span>。可以直接让 AI 代写。
+                                                </p>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <input v-model="ttsState.mimoDesignName" type="text" list="tts-mimo-characters" placeholder="音色名（通常填角色名）"
+                                                        class="w-56 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <input v-model="ttsState.mimoDesignHint" type="text" placeholder="补充要求（可选）：想要沙哑、稚嫩、播音腔……"
+                                                        class="flex-1 min-w-[14rem] bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <button type="button" @click="generateMimoVoiceDesign" :disabled="ttsState.mimoGenerating === 'design'"
+                                                        class="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg active:scale-95 transition-all shadow-sm disabled:opacity-40 whitespace-nowrap">
+                                                        {{ ttsState.mimoGenerating === 'design' ? '生成中...' : 'AI 生成描述' }}
+                                                    </button>
+                                                    <button type="button" @click="addMimoVoiceDesign"
+                                                        class="px-3 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm whitespace-nowrap">
+                                                        保存音色
+                                                    </button>
+                                                </div>
+                                                <textarea v-model="ttsState.mimoDesignDescription" rows="3"
+                                                    class="mt-2 w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="音色描述：中年男性，节奏极快，情绪高亢，拍卖师风格。吐字连珠，带抑扬顿挫与紧迫感。"></textarea>
+                                                <div v-if="Array.isArray(settings.ttsMimoVoiceDesigns) && settings.ttsMimoVoiceDesigns.length" class="mt-3 space-y-1.5">
+                                                    <div v-for="(design, designIndex) in settings.ttsMimoVoiceDesigns" :key="'mimo-design-' + designIndex"
+                                                        class="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2">
+                                                        <div class="flex items-center justify-between gap-2">
+                                                            <span class="min-w-0 truncate text-sm font-medium text-gray-700">{{ design.name }}</span>
+                                                            <div class="flex flex-none items-center gap-3">
+                                                                <button type="button" @click="ttsState.mimoDesignName = design.name; ttsState.mimoDesignDescription = design.description"
+                                                                    class="text-xs font-bold text-rose-600 hover:text-rose-700">编辑</button>
+                                                                <button type="button" @click="removeMimoVoiceDesign(design.name)"
+                                                                    class="text-xs font-bold text-red-600 hover:text-red-700">删除</button>
+                                                            </div>
+                                                        </div>
+                                                        <p class="mt-1 text-xs text-gray-500 leading-relaxed">{{ design.description }}</p>
+                                                    </div>
+                                                </div>
+                                                <p v-else class="mt-3 text-xs text-gray-400">还没有设计音色。</p>
+                                            </div>
+
+                                            <!-- MiMo 音色克隆 -->
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音色克隆（上传音频样本复刻音色）</label>
+                                                <p class="mb-3 text-xs text-gray-400 leading-relaxed">
+                                                    对应模型 <code class="px-1 rounded bg-gray-50">mimo-v2.5-tts-voiceclone</code>：只支持
+                                                    <code class="px-1 rounded bg-gray-50">mp3</code> / <code class="px-1 rounded bg-gray-50">wav</code>，
+                                                    Base64 后不超过 10 MB。样本会存进本机数据并随跨设备同步一起走，体积较大时请留意快照大小。
+                                                </p>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <input v-model="ttsState.mimoCloneName" type="text" placeholder="音色名（例如：旁白样本）"
+                                                        class="w-56 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <label class="px-3 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm cursor-pointer whitespace-nowrap">
+                                                        {{ ttsState.mimoCloneBusy ? '读取中...' : (ttsState.mimoCloneFileName || '选择音频（mp3 / wav）') }}
+                                                        <input type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" class="hidden" @change="pickMimoCloneFile">
+                                                    </label>
+                                                    <button type="button" @click="addMimoVoiceClone"
+                                                        class="px-3 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm whitespace-nowrap">
+                                                        保存克隆音色
+                                                    </button>
+                                                </div>
+                                                <div v-if="Array.isArray(settings.ttsMimoVoiceClones) && settings.ttsMimoVoiceClones.length" class="mt-3 space-y-1.5">
+                                                    <div v-for="(clone, cloneIndex) in settings.ttsMimoVoiceClones" :key="'mimo-clone-' + cloneIndex"
+                                                        class="flex items-center justify-between gap-2 rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2">
+                                                        <span class="min-w-0 truncate text-sm font-medium text-gray-700">{{ clone.name }}</span>
+                                                        <span class="min-w-0 flex-1 truncate text-xs text-gray-500">{{ clone.mime }}</span>
+                                                        <button type="button" @click="removeMimoVoiceClone(clone.name)"
+                                                            class="flex-none text-xs font-bold text-red-600 hover:text-red-700">删除</button>
+                                                    </div>
+                                                </div>
+                                                <p v-else class="mt-3 text-xs text-gray-400">还没有克隆音色。</p>
+                                            </div>
+
+                                            <!-- MiMo 导演演绎 -->
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">导演演绎（角色 / 场景 / 指导）</label>
+                                                <p class="mb-3 text-xs text-gray-400 leading-relaxed">
+                                                    MiMo 的「导演模式」：把下面这段文字作为风格指令随台词一起发给模型，像给演员写剧本一样决定他/她怎么开口。
+                                                    <span class="font-semibold text-rose-700">角色</span>写身份与说话习惯，
+                                                    <span class="font-semibold text-rose-700">场景</span>写此刻处境与情绪位置，
+                                                    <span class="font-semibold text-rose-700">指导</span>写语速、气息、停顿、重音、音色质感与情绪起伏。按角色名匹配，可以让 AI 代写。
+                                                </p>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <input v-model="ttsState.mimoDirectionName" type="text" list="tts-mimo-characters" placeholder="角色名（与卡内写法一致）"
+                                                        class="w-56 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <input v-model="ttsState.mimoDirectionHint" type="text" placeholder="补充要求（可选）：更冷、更喘、尾音带气声……"
+                                                        class="flex-1 min-w-[14rem] bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <button type="button" @click="generateMimoDirection" :disabled="ttsState.mimoGenerating === 'direction'"
+                                                        class="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg active:scale-95 transition-all shadow-sm disabled:opacity-40 whitespace-nowrap">
+                                                        {{ ttsState.mimoGenerating === 'direction' ? '生成中...' : 'AI 生成导演演绎' }}
+                                                    </button>
+                                                    <button type="button" @click="addMimoDirection"
+                                                        class="px-3 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm whitespace-nowrap">
+                                                        保存导演演绎
+                                                    </button>
+                                                </div>
+                                                <textarea v-model="ttsState.mimoDirectionDraft" rows="4"
+                                                    class="mt-2 w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="角色：……&#10;场景：……&#10;指导：语速极慢，句与句之间留出令人不安的空白……"></textarea>
+                                                <div v-if="Array.isArray(settings.ttsMimoDirections) && settings.ttsMimoDirections.length" class="mt-3 space-y-1.5">
+                                                    <div v-for="(direction, directionIndex) in settings.ttsMimoDirections" :key="'mimo-direction-' + directionIndex"
+                                                        class="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2">
+                                                        <div class="flex items-center justify-between gap-2">
+                                                            <span class="min-w-0 truncate text-sm font-medium text-gray-700">{{ direction.name }}</span>
+                                                            <div class="flex flex-none items-center gap-3">
+                                                                <button type="button" @click="ttsState.mimoDirectionName = direction.name; ttsState.mimoDirectionDraft = direction.direction"
+                                                                    class="text-xs font-bold text-rose-600 hover:text-rose-700">编辑</button>
+                                                                <button type="button" @click="removeMimoDirection(direction.name)"
+                                                                    class="text-xs font-bold text-red-600 hover:text-red-700">删除</button>
+                                                            </div>
+                                                        </div>
+                                                        <p class="mt-1 whitespace-pre-wrap text-xs text-gray-500 leading-relaxed">{{ direction.direction }}</p>
+                                                    </div>
+                                                </div>
+                                                <p v-else class="mt-3 text-xs text-gray-400">还没有角色专属的导演演绎。</p>
+                                                <label class="mt-4 block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">通用导演演绎（没有专属设定的角色与旁白使用）</label>
+                                                <textarea v-model="settings.ttsMimoDefaultDirection" rows="3"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="留空即可。若填写，会作为所有未单独设置角色的声线底稿。"></textarea>
+                                            </div>
+
+                                            <!-- MiMo 表演标记用法 -->
+                                            <div v-if="settings.ttsProvider === 'mimo'" class="generation-setting-card md:col-span-2 bg-gradient-to-r from-rose-50/50 via-pink-50/40 to-fuchsia-50/40 border-rose-100">
+                                                <label class="block text-xs font-bold text-rose-800 uppercase tracking-wider mb-2">MiMo 表演标记（AI 写这些，系统负责翻译）</label>
+                                                <ul class="text-xs text-gray-600 leading-relaxed space-y-1">
+                                                    <li><code class="px-1 rounded bg-white/70">[[voice:角色名|情绪]]『台词』[[/voice]]</code>：情绪是<span class="font-semibold">自然语言中文</span>，可以复合——「压抑的愤怒」「带着哽咽的笑意」「温柔但疲惫」。</li>
+                                                    <li><code class="px-1 rounded bg-white/70">[[pause:0.5]]</code>：台词中间的停顿，秒数 0.1–10，会翻成 MiMo 的音频标签「（停顿0.5秒）」。</li>
+                                                    <li><code class="px-1 rounded bg-white/70">[[sfx:叹气]]</code>：发声动作/语气词，翻成「（叹气）」。只写能发出声音的内容，不要写转身、坐下这类身体动作。</li>
+                                                    <li>情绪写成「唱歌」就会启用唱歌模式（<code class="px-1 rounded bg-white/70">[[voice:冰糖|唱歌]]</code>），歌词要完整。</li>
+                                                    <li>显示层：语气词会以「（叹气）」的形式留在正文里当作表演提示；停顿与其它标记不会显示出来。</li>
+                                                </ul>
+                                            </div>
+                                            <datalist id="tts-mimo-characters">
+                                                <option v-for="characterName in ttsMimoCharacterOptions" :key="'tts-mimo-char-' + characterName" :value="characterName"></option>
+                                            </datalist>
 
                                             <!-- 多角色音色绑定 -->
                                             <div class="generation-setting-card md:col-span-2">

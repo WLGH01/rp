@@ -2390,7 +2390,7 @@ let removedProviderConfigCleared = false;
         };
 
         // ===== TTS 语音 =====
-        // 三种服务（MiniMax / NovelAI / GPT-SoVITS-V2）的请求细节全部在 tts-services.js，
+        // 四种服务（MiniMax / NovelAI / GPT-SoVITS-V2 / 小米 MiMo-V2.5-TTS）的请求细节全部在 tts-services.js，
         // 这里只负责：设置项下拉、每条消息的朗读按钮、播放控制与设置页接线。
         const tts = window.RPHubTts;
         const ttsPlayer = tts.createPlayer();
@@ -2408,7 +2408,21 @@ let removedProviderConfigCleared = false;
             newNovelVoice: '',
             // 多角色音色绑定：正在填写的「角色名 / 音色」。
             newVoiceBindingName: '',
-            newVoiceBindingVoice: ''
+            newVoiceBindingVoice: '',
+            // --- MiMo：音色设计 / 音色克隆 / 导演演绎 的输入缓存 ---
+            mimoDesignName: '',
+            mimoDesignHint: '',
+            mimoDesignDescription: '',
+            mimoCloneName: '',
+            mimoCloneFileName: '',
+            mimoCloneData: '',
+            mimoCloneMime: '',
+            mimoCloneBusy: false,
+            mimoDirectionName: '',
+            mimoDirectionHint: '',
+            mimoDirectionDraft: '',
+            // 正在让 AI 生成哪一块（'' | 'design' | 'direction'），用于按钮转圈。
+            mimoGenerating: ''
         });
 
         const ttsProviderOptions = computed(() => tts.PROVIDERS.map(item => ({ value: item.value, label: item.label })));
@@ -2424,6 +2438,11 @@ let removedProviderConfigCleared = false;
         // 音色下拉随 TTS 方式切换（内置 + 用户自定义 / GPT-SoVITS 的 /speakers 结果）。
         const ttsVoiceOptions = computed(() => tts.listVoices(settings));
         const ttsGsvSpeakerOptions = computed(() => (Array.isArray(settings.ttsGsvSpeakers) ? settings.ttsGsvSpeakers : []).map(String));
+        // MiMo 专用：输出格式 + 可选的「角色名」候选（来自角色库，用于音色设计与导演演绎）。
+        const ttsMimoFormatOptions = computed(() => tts.MIMO_FORMATS.map(item => ({ value: item.value, label: item.label })));
+        const ttsMimoCharacterOptions = computed(() => (Array.isArray(characters.value) ? characters.value : [])
+            .map(item => String(item?.name || '').trim())
+            .filter(Boolean));
 
         // 取出「该被念出来」的那部分正文。
         //
@@ -2440,10 +2459,19 @@ let removedProviderConfigCleared = false;
         };
 
         // 把一条消息的正文转成可朗读文本（去掉 markdown / 生图 tag / 语音标记 / 动作括白）。
-        const buildTtsText = (message) => tts.sanitizeText(getSpeakableMessageText(message), {
-            stripActions: settings.ttsStripActions !== false,
-            readDialogueOnly: settings.ttsReadDialogueOnly === true
-        });
+        const buildTtsText = (message) => {
+            const raw = getSpeakableMessageText(message);
+            const options = {
+                stripActions: settings.ttsStripActions !== false,
+                readDialogueOnly: settings.ttsReadDialogueOnly === true
+            };
+            // MiMo 的停顿与语气词就是合成文本里的表演提示（[[pause:x]] / [[sfx:叹气]] /
+            // 以及 AI 直接写的括号标签），整条朗读也必须保留，否则听起来毫无起伏。
+            if (String(settings.ttsProvider) === 'mimo') {
+                return tts.sanitizeWithPauses(raw, { ...options, keepAudioTags: true });
+            }
+            return tts.sanitizeText(raw, options);
+        };
 
         // 按「语音块」把一条消息拆成待朗读片段：每段带自己的音色与情绪。
         const buildTtsParts = (message) => tts.buildSpeechParts(getSpeakableMessageText(message), settings, {
@@ -2493,6 +2521,23 @@ let removedProviderConfigCleared = false;
             if (provider === 'gpt-sovits' && !String(settings.ttsGsvRefAudio || '').trim()) {
                 showToast('请先在 TTS 设置里选择 GPT-SoVITS 参考音频（音色）', 'warning');
                 return false;
+            }
+            if (provider === 'mimo') {
+                if (!String(settings.ttsMimoKey || '').trim()) {
+                    showToast('请先在 TTS 设置里填写 MiMo API Key', 'warning');
+                    return false;
+                }
+                // 音色设计/音色克隆都必须各自有成型的素材，否则请求必然被服务端拒绝，
+                // 这里提前给出可操作的提示，而不是让用户看到底层报错。
+                const voice = tts.resolveMimoVoice(settings, settings.ttsMimoVoice);
+                if (voice.kind === 'design' && !String(voice.entry?.description || '').trim()) {
+                    showToast(`音色「${voice.key}」还没有音色描述，请先在 TTS 设置里生成或填写`, 'warning');
+                    return false;
+                }
+                if (voice.kind === 'clone' && !tts.buildMimoVoiceSampleUrl(voice.entry)) {
+                    showToast(`音色「${voice.key}」还没有音频样本，请先在 TTS 设置里上传`, 'warning');
+                    return false;
+                }
             }
             return true;
         };
@@ -2599,9 +2644,11 @@ let removedProviderConfigCleared = false;
                 return;
             }
             // 保留停顿标记清洗：清洗规则看不到标记，标记也不会被吃掉。
+            // keepAudioTags 只对 MiMo 打开——只有它把「（叹气）」当表演提示，别家会照字念出来。
             const clean = tts.sanitizeWithPauses(rawText, {
                 stripActions: settings.ttsStripActions !== false,
-                readDialogueOnly: false
+                readDialogueOnly: false,
+                keepAudioTags: String(settings.ttsProvider) === 'mimo'
             });
             setActiveVoiceLine(element);
             speakTtsText(clean, key, {
@@ -2724,6 +2771,257 @@ let removedProviderConfigCleared = false;
             settings.ttsNovelCustomVoices = list.filter(item => item !== value);
             if (settings.ttsNovelVoice === value) settings.ttsNovelVoice = tts.NOVEL_BUILTIN_VOICES[0];
             showToast('已删除音色', 'success');
+        };
+
+        // ===== MiMo-V2.5-TTS：音色设计 / 音色克隆 / 导演演绎 =====
+        //
+        // 三件事都是「素材 + 名字」的组合：
+        //   音色设计（voicedesign）→ 一段文字描述，模型据此凭空造一副嗓子
+        //   音色克隆（voiceclone） → 一段 mp3/wav 样本（DataURL），模型照它复刻
+        //   导演演绎（导演模式）   → 角色/场景/指导三段式风格指令，决定这个角色怎么开口
+        // 音色描述与导演演绎都可以直接让主模型代写（提示词在 built-in-content.js），
+        // 生成结果先落到 ttsState 草稿，用户确认后再写入 settings（避免半成品进世界书与资产重建）。
+        const describeCharacterForTts = (name) => {
+            const target = String(name || '').trim();
+            const card = (Array.isArray(characters.value) ? characters.value : [])
+                .find(item => String(item?.name || '').trim() === target);
+            if (!card) return `（角色库里没有叫「${target}」的角色卡，请只按这个名字与上面的补充要求推测一副合适的嗓子）`;
+            return [
+                card.description || card.char_persona || '',
+                card.personality ? `性格：${card.personality}` : '',
+                card.scenario ? `场景：${card.scenario}` : ''
+            ].filter(Boolean).join('\n').slice(0, 4000);
+        };
+
+        const requestTtsAssistantText = async ({ system, prompt, temperature = 0.9 }) => {
+            if (!String(settings.apiUrl || '').trim() || !String(settings.apiKey || '').trim()) {
+                throw new Error('请先在「API 连接与服务」里配置主模型（地址 + Key）');
+            }
+            const result = await requestChatCompletion({
+                url: buildApiEndpoint(settings.apiUrl, 'chat/completions'),
+                apiKey: settings.apiKey,
+                model: settings.model,
+                temperature,
+                messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: prompt }
+                ]
+            });
+            return String(result?.content || '').trim();
+        };
+
+        // 删掉某条音色时，同时清掉引用它的一切（绑定表与默认音色），
+        // 否则会留下指向不存在音色的绑定，朗读时静默回落默认音色，很难排查。
+        const forgetMimoVoiceEverywhere = (value) => {
+            const target = String(value || '').trim();
+            settings.ttsVoiceBindings = (Array.isArray(settings.ttsVoiceBindings) ? settings.ttsVoiceBindings : [])
+                .filter(item => String(item?.voice || '').trim() !== target);
+            if (String(settings.ttsMimoVoice || '').trim() === target) {
+                settings.ttsMimoVoice = tts.mimoVoiceValue('preset', tts.MIMO_BUILTIN_VOICES[0].name);
+            }
+        };
+
+        // --- 音色设计 ---
+        const addMimoVoiceDesign = () => {
+            const name = String(ttsState.mimoDesignName || '').trim();
+            const description = String(ttsState.mimoDesignDescription || '').trim();
+            if (!name) {
+                showToast('请先填写音色名（通常就是角色名）', 'warning');
+                return;
+            }
+            if (!description) {
+                showToast('音色设计必须有一段音色描述，可以点「AI 生成描述」', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsMimoVoiceDesigns) ? settings.ttsMimoVoiceDesigns : [];
+            const others = list.filter(item => String(item?.name || '').trim() !== name);
+            settings.ttsMimoVoiceDesigns = [...others, { name, description }];
+            settings.ttsMimoVoice = tts.mimoVoiceValue('design', name);
+            ttsState.mimoDesignName = '';
+            ttsState.mimoDesignDescription = '';
+            ttsState.mimoDesignHint = '';
+            showToast(`已保存设计音色「${name}」并设为默认音色`, 'success');
+        };
+
+        const removeMimoVoiceDesign = (name) => {
+            const target = String(name || '').trim();
+            const list = Array.isArray(settings.ttsMimoVoiceDesigns) ? settings.ttsMimoVoiceDesigns : [];
+            if (!list.some(item => String(item?.name || '').trim() === target)) {
+                showToast('这条音色不在设计库里', 'warning');
+                return;
+            }
+            settings.ttsMimoVoiceDesigns = list.filter(item => String(item?.name || '').trim() !== target);
+            forgetMimoVoiceEverywhere(tts.mimoVoiceValue('design', target));
+            showToast('已删除设计音色', 'success');
+        };
+
+        const generateMimoVoiceDesign = async () => {
+            const name = String(ttsState.mimoDesignName || '').trim();
+            if (!name) {
+                showToast('请先填写要设计的角色名或音色名', 'warning');
+                return;
+            }
+            ttsState.mimoGenerating = 'design';
+            try {
+                const prompt = BUILTIN_PROMPTS.buildMimoVoiceDesignPrompt({
+                    characterName: name,
+                    characterInfo: describeCharacterForTts(name),
+                    userName: String(user?.name || '').trim(),
+                    extra: String(ttsState.mimoDesignHint || '').trim()
+                });
+                const text = await requestTtsAssistantText({
+                    system: '你是资深配音导演，只输出可直接使用的音色描述正文，不要任何解释或引号。',
+                    prompt
+                });
+                if (!text) throw new Error('模型没有返回内容');
+                ttsState.mimoDesignDescription = text.replace(/^["'“”‘’\s]+|["'“”‘’\s]+$/g, '');
+                showToast('音色描述已生成，确认后点「保存音色」', 'success');
+            } catch (error) {
+                showToast(`AI 生成失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.mimoGenerating = '';
+            }
+        };
+
+        // --- 音色克隆 ---
+        const readFileAsBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const result = String(reader.result || '');
+                const comma = result.indexOf(',');
+                resolve(comma >= 0 ? result.slice(comma + 1) : result);
+            };
+            reader.onerror = () => reject(new Error('读取音频文件失败'));
+            reader.readAsDataURL(file);
+        });
+
+        const pickMimoCloneFile = async (event) => {
+            const input = event?.target;
+            const file = input?.files?.[0];
+            // 立刻清空 input：否则同一个文件第二次选择不会触发 change。
+            if (input) input.value = '';
+            if (!file) return;
+            if (!/\.(mp3|wav)$/i.test(file.name)) {
+                showToast('音色克隆只支持 mp3 / wav 音频样本', 'warning');
+                return;
+            }
+            if (file.size > tts.MIMO_VOICE_CLONE_MAX_BYTES) {
+                showToast(`音频样本不能超过 ${Math.round(tts.MIMO_VOICE_CLONE_MAX_BYTES / 1024 / 1024)} MB（官方限制）`, 'warning');
+                return;
+            }
+            ttsState.mimoCloneBusy = true;
+            try {
+                ttsState.mimoCloneData = await readFileAsBase64(file);
+                ttsState.mimoCloneMime = /\.mp3$/i.test(file.name) ? 'audio/mpeg' : 'audio/wav';
+                ttsState.mimoCloneFileName = file.name;
+                if (!String(ttsState.mimoCloneName || '').trim()) {
+                    ttsState.mimoCloneName = file.name.replace(/\.(mp3|wav)$/i, '');
+                }
+                showToast('音频样本已就绪，点「保存克隆音色」', 'success');
+            } catch (error) {
+                showToast(`读取音频失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.mimoCloneBusy = false;
+            }
+        };
+
+        const addMimoVoiceClone = () => {
+            const name = String(ttsState.mimoCloneName || '').trim();
+            if (!name) {
+                showToast('请先给这个克隆音色起个名字', 'warning');
+                return;
+            }
+            if (!ttsState.mimoCloneData) {
+                showToast('请先选择一段 mp3 / wav 音频样本', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsMimoVoiceClones) ? settings.ttsMimoVoiceClones : [];
+            const others = list.filter(item => String(item?.name || '').trim() !== name);
+            settings.ttsMimoVoiceClones = [...others, {
+                name,
+                mime: ttsState.mimoCloneMime || 'audio/wav',
+                data: ttsState.mimoCloneData
+            }];
+            settings.ttsMimoVoice = tts.mimoVoiceValue('clone', name);
+            ttsState.mimoCloneName = '';
+            ttsState.mimoCloneData = '';
+            ttsState.mimoCloneMime = '';
+            ttsState.mimoCloneFileName = '';
+            showToast(`已保存克隆音色「${name}」并设为默认音色`, 'success');
+        };
+
+        const removeMimoVoiceClone = (name) => {
+            const target = String(name || '').trim();
+            const list = Array.isArray(settings.ttsMimoVoiceClones) ? settings.ttsMimoVoiceClones : [];
+            if (!list.some(item => String(item?.name || '').trim() === target)) {
+                showToast('这条音色不在克隆库里', 'warning');
+                return;
+            }
+            settings.ttsMimoVoiceClones = list.filter(item => String(item?.name || '').trim() !== target);
+            forgetMimoVoiceEverywhere(tts.mimoVoiceValue('clone', target));
+            showToast('已删除克隆音色', 'success');
+        };
+
+        // --- 导演演绎 ---
+        const addMimoDirection = () => {
+            const name = String(ttsState.mimoDirectionName || '').trim();
+            const direction = String(ttsState.mimoDirectionDraft || '').trim();
+            if (!name) {
+                showToast('请先填写角色名（与卡片里的写法一致）', 'warning');
+                return;
+            }
+            if (!direction) {
+                showToast('导演演绎内容不能为空，可以点「AI 生成导演演绎」', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsMimoDirections) ? settings.ttsMimoDirections : [];
+            const others = list.filter(item => String(item?.name || '').trim() !== name);
+            settings.ttsMimoDirections = [...others, { name, direction }];
+            ttsState.mimoDirectionName = '';
+            ttsState.mimoDirectionDraft = '';
+            ttsState.mimoDirectionHint = '';
+            showToast(`已为「${name}」保存导演演绎`, 'success');
+        };
+
+        const removeMimoDirection = (name) => {
+            const target = String(name || '').trim();
+            const list = Array.isArray(settings.ttsMimoDirections) ? settings.ttsMimoDirections : [];
+            if (!list.some(item => String(item?.name || '').trim() === target)) {
+                showToast('没有这条导演演绎', 'warning');
+                return;
+            }
+            settings.ttsMimoDirections = list.filter(item => String(item?.name || '').trim() !== target);
+            showToast('已删除导演演绎', 'success');
+        };
+
+        const generateMimoDirection = async () => {
+            const name = String(ttsState.mimoDirectionName || '').trim();
+            if (!name) {
+                showToast('请先填写要写导演演绎的角色名', 'warning');
+                return;
+            }
+            ttsState.mimoGenerating = 'direction';
+            try {
+                const prompt = BUILTIN_PROMPTS.buildMimoDirectionPrompt({
+                    characterName: name,
+                    characterInfo: describeCharacterForTts(name),
+                    userName: String(user?.name || '').trim(),
+                    userPersona: String(user?.description || user?.preferences || '').trim(),
+                    extra: String(ttsState.mimoDirectionHint || '').trim()
+                });
+                const text = await requestTtsAssistantText({
+                    system: '你是资深配音导演，只输出「角色：/场景：/指导：」三段式脚本正文，不要任何解释。',
+                    prompt,
+                    temperature: 1
+                });
+                if (!text) throw new Error('模型没有返回内容');
+                ttsState.mimoDirectionDraft = text;
+                showToast('导演演绎已生成，确认后点「保存导演演绎」', 'success');
+            } catch (error) {
+                showToast(`AI 生成失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.mimoGenerating = '';
+            }
         };
 
         // 角色名 → 音色 的绑定表。没绑定的角色（含旁白）走设置里的默认音色。
@@ -5603,6 +5901,14 @@ let removedProviderConfigCleared = false;
                 const aIsVoiceCleanup = nameOf(a) === '语音标记清理';
                 const bIsVoiceCleanup = nameOf(b) === '语音标记清理';
                 if (aIsVoiceCleanup !== bIsVoiceCleanup) return aIsVoiceCleanup ? 1 : -1;
+                // 语音链内部的相对顺序也必须是「朗读 → 语气词」：
+                // 语气词若先跑，台词块里的 [[sfx:..]] 会被提前替换，而朗读正则又是按整块重写的，
+                // 结果就是表演提示进了属性却被当作台词正文渲染（或干脆丢失）。
+                // 其余正则保持稳定排序，不受影响。
+                const voiceRank = (name) => (name === voiceRegexName ? 0 : name === voiceSfxRegexName ? 1 : null);
+                const aVoiceRank = voiceRank(nameOf(a));
+                const bVoiceRank = voiceRank(nameOf(b));
+                if (aVoiceRank !== null && bVoiceRank !== null && aVoiceRank !== bVoiceRank) return aVoiceRank - bVoiceRank;
                 return 0;
             });
 
@@ -5639,7 +5945,9 @@ let removedProviderConfigCleared = false;
                     // 语音两条正则必须作用在**整段文本**上，不能只作用于「未被 HTML 保护」的部分：
                     // 美化卡会把正文包在 HTML 面板里，若走保护分支，面板内的台词就永远包不上语音框
                     // （需求「兼容带美化的卡」）。清理正则也同理——它要能清到属性之外的所有残留标记。
-                    const isVoiceScript = scriptName === voiceRegexName || scriptName === voiceCleanupRegexName;
+                    const isVoiceScript = scriptName === voiceRegexName
+                        || scriptName === voiceSfxRegexName
+                        || scriptName === voiceCleanupRegexName;
 
                     // 解析 /pattern/flags 格式
                     if (regexPattern.startsWith('/') && regexPattern.lastIndexOf('/') > 0) {
@@ -9197,13 +9505,20 @@ let removedProviderConfigCleared = false;
         // ===== 自动语音：世界书条目 + 两条显示用正则 =====
         //
         // 与自动生图同构，但**不依赖生图地址**（没填生图地址时也要能用），所以单独一个函数。
-        // 三条资产：
-        //   世界书「自动语音」   → 按当前 TTS 服务的能力，教 AI 怎么输出语音标记
-        //   正则「语音朗读正则」 → 把 [[voice:角色|情绪]]台词[[/voice]] 渲染成可点击的语音框
-        //   正则「语音标记清理」 → 清掉停顿/情绪/未闭合标记，保证它们永远不会显示出来
-        // 两条正则都是 markdownOnly（只影响显示），因此发给模型的上下文里保留原始标记，
+        // 四条资产：
+        //   世界书「自动语音」     → 按当前 TTS 服务的能力，教 AI 怎么输出语音标记
+        //   正则「语音朗读正则」   → 把 [[voice:角色|情绪]]台词[[/voice]] 渲染成可点击的语音框
+        //   正则「语音语气词正则」 → 把 [[sfx:叹气]] 渲染成剧本提示「（叹气）」（MiMo 的表演标签）
+        //   正则「语音标记清理」   → 清掉停顿/情绪/语气词/未闭合标记，保证它们永远不会显示出来
+        // 三条正则都是 markdownOnly（只影响显示），因此发给模型的上下文里保留原始标记，
         // AI 能在历史里看到自己上一轮的写法，格式不会漂移。
+        //
+        // **顺序是硬契约**：语音朗读正则 → 语音语气词正则 → 语音标记清理。
+        // 清理必须最后（否则 [[/voice]] 先被清掉，成对匹配失效，标记会原样显示）；
+        // 语气词必须排在朗读正则之后（否则台词块里的 [[sfx:..]] 还没被渲染成「（叹气）」
+        // 就被清理掉，点开语音框时那句台词的表演提示就消失了）。
         const voiceRegexName = '语音朗读正则';
+        const voiceSfxRegexName = '语音语气词正则';
         const voiceCleanupRegexName = '语音标记清理';
         const autoVoiceWIName = '自动语音';
 
@@ -9214,8 +9529,10 @@ let removedProviderConfigCleared = false;
                 name: voiceRegexName,
                 // 台词正文里不允许出现引号与尖括号：replacement 只能拼字符串，
                 // 出现引号会把 data-tts-* 属性截断（从而让后续标记泄漏到界面上）。
-                // 角色名与情绪同样限制在安全字符集内。
-                regex: '/\\[\\[voice:\\s*([^\\]|"\'<>\\r\\n]{1,40}?)\\s*(?:\\|\\s*([a-zA-Z\\u4e00-\\u9fff]{0,20}?)\\s*)?\\]\\]\\s*([^"<>]*?)\\s*\\[\\[\\/voice\\]\\]/gi',
+                // 角色名同样限制在安全字符集内。
+                // 情绪放宽到「只要不含 ] | 引号 尖括号与换行」：MiMo 的情绪是自然语言，
+                // 「温柔，但疲惫」「带着哽咽的笑意」这类写法必须能整段进属性。
+                regex: '/\\[\\[voice:\\s*([^\\]|"\'<>\\r\\n]{1,40}?)\\s*(?:\\|\\s*([^\\]|"\'<>\\r\\n]{1,24}?)\\s*)?\\]\\]\\s*([^"<>]*?)\\s*\\[\\[\\/voice\\]\\]/gi',
                 // 渲染成「台词前的一个小喇叭按钮」+ 原样台词，而不是把整句台词做成高亮块：
                 // 整句高亮会跟正文抢视线（尤其美化卡里），小按钮不打扰阅读，点起来也够大。
                 replacement: '<button type="button" class="tts-voice-btn" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="朗读这句台词" aria-label="朗读这句台词"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 4.4v15.2a1 1 0 0 1-1.7.7L7.1 16H4.5A1.5 1.5 0 0 1 3 14.5v-5A1.5 1.5 0 0 1 4.5 8h2.6l4.2-4.3a1 1 0 0 1 1.7.7Z"/><path d="M16.1 8.3a1 1 0 0 1 1.4.1 5.5 5.5 0 0 1 0 7.2 1 1 0 0 1-1.5-1.3 3.5 3.5 0 0 0 0-4.6 1 1 0 0 1 .1-1.4Z"/></svg></button>$3',
@@ -9226,7 +9543,21 @@ let removedProviderConfigCleared = false;
                 enabled: false // 默认关闭，随开关打开
             };
 
-            // 顺序很重要：本条必须排在「语音朗读正则」**之后**执行。
+            // 语气词/发声动作（[[sfx:叹气]]）渲染成剧本提示「（叹气）」——它本来就是给眼睛看的
+            // 表演标注（MiMo 那边会把它念成声音而不是字），所以显示层保留可见文字，
+            // 而不是像其他标记那样抹掉。关闭自动语音时它跟随关闭，标记由清理正则兜底抹掉。
+            const voiceSfxRegexContent = {
+                name: voiceSfxRegexName,
+                regex: '/\\[\\[sfx:\\s*([^\\]"\'<>|\\r\\n]{1,24}?)\\s*\\]\\]/gi',
+                replacement: '（$1）',
+                placement: [2],
+                markdownOnly: true,
+                promptOnly: false,
+                scope: 'global',
+                enabled: false
+            };
+
+            // 顺序很重要：本条必须排在「语音朗读正则」与「语音语气词正则」**之后**执行。
             // 否则 `[[/voice]]` 会先被清掉，成对匹配失效，标记就会原样显示出来
             // （与 sanitizeText 里「生图 tag 必须排在标题井号之前」是同一类顺序陷阱）。
             //
@@ -9238,7 +9569,7 @@ let removedProviderConfigCleared = false;
             // 这样即使自动语音后来被关掉，历史消息里的标记也不会漏到界面上。
             const voiceCleanupRegexContent = {
                 name: voiceCleanupRegexName,
-                regex: '/(data-tts-text="[^"]*")|\\[\\[(?:pause:\\s*\\d+(?:\\.\\d+)?|emo:\\s*[a-zA-Z\\u4e00-\\u9fff]+|\\/?voice\\b[^\\]]*)\\]\\]|<#\\s*\\d+(?:\\.\\d+)?\\s*#>/gi',
+                regex: '/(data-tts-text="[^"]*")|\\[\\[(?:pause:\\s*\\d+(?:\\.\\d+)?|emo:\\s*[a-zA-Z\\u4e00-\\u9fff]+|sfx:\\s*[^\\]]*|\\/?voice\\b[^\\]]*)\\]\\]|<#\\s*\\d+(?:\\.\\d+)?\\s*#>/gi',
                 replacement: '$1',
                 placement: [1, 2],
                 markdownOnly: true,
@@ -9261,14 +9592,17 @@ let removedProviderConfigCleared = false;
             };
 
             upsertSystemRegex(voiceRegexContent);
-            upsertSystemRegex(voiceCleanupRegexContent, voiceRegexName, { forceEnabled: true });
+            upsertSystemRegex(voiceSfxRegexContent, voiceRegexName);
+            upsertSystemRegex(voiceCleanupRegexContent, voiceSfxRegexName, { forceEnabled: true });
 
             const voiceWI = {
                 comment: autoVoiceWIName,
                 keys: [],
                 content: BUILTIN_PROMPTS.buildAutoVoicePrompt({
                     provider: settings.ttsProvider,
-                    voiceBindings: settings.ttsVoiceBindings
+                    voiceBindings: settings.ttsVoiceBindings,
+                    // MiMo 的提示词要说明「哪些角色已经有导演演绎」，免得 AI 用文字去改音色。
+                    mimoDirections: settings.ttsMimoDirections
                 }),
                 constant: true,
                 enabled: false,
@@ -9287,7 +9621,7 @@ let removedProviderConfigCleared = false;
             }
             worldInfo.value.unshift(voiceWI);
 
-            // 世界书条目是**唯一真相**：重建资产时把「语音朗读正则」的开关对齐到它。
+            // 世界书条目是**唯一真相**：重建资产时把两条「渲染类」正则的开关对齐到它。
             // 否则会出现「世界书开着、正则关着」（或反过来）的不一致状态——
             // 用户在正则面板手动改过、或老存档里两处状态不同时都会撞上。
             //
@@ -9296,6 +9630,8 @@ let removedProviderConfigCleared = false;
             // 一旦关掉，开关关闭后历史消息里的 [[voice:..]] 就会原样漏到界面上。
             const renderRegex = regexScripts.value.find(r => r.name === voiceRegexName);
             if (renderRegex) renderRegex.enabled = !!voiceWI.enabled;
+            const sfxRegex = regexScripts.value.find(r => r.name === voiceSfxRegexName);
+            if (sfxRegex) sfxRegex.enabled = !!voiceWI.enabled;
         };
 
         // 开关同步：世界书条目是唯一真相，「语音朗读正则」永远跟着它。
@@ -9307,10 +9643,12 @@ let removedProviderConfigCleared = false;
         });
 
         // 换 TTS 服务或改音色绑定后，提示词与正则都要重建
-        // （提示词要按服务能力改写情绪/停顿的写法），开关状态由 enforceVoiceRules 自动对齐。
+        // （提示词要按服务能力改写情绪/停顿/语气词的写法），开关状态由 enforceVoiceRules 自动对齐。
+        // MiMo 的导演演绎也要进依赖：提示词里会列出「哪些角色已有专属声线设定」。
         watch(() => [
             settings.ttsProvider,
-            JSON.stringify(settings.ttsVoiceBindings || [])
+            JSON.stringify(settings.ttsVoiceBindings || []),
+            JSON.stringify(settings.ttsMimoDirections || [])
         ].join('\u0000'), () => {
             enforceVoiceRules();
         });
@@ -11058,11 +11396,16 @@ let removedProviderConfigCleared = false;
             isAutoVoiceEnabled, toggleAutoVoice, setAutoVoiceEnabled,
             apiStatus, apiLatency, imageGenStatus, imageGenLatency, checkAllStatuses, // Status Exports
             toggleAutoImageGen, setWorldInfoEnabled, handleGeneratedImageReroll,
-            // TTS 语音：设置页分区折叠 + 三种服务的参数与朗读控制
+            // TTS 语音：设置页分区折叠 + 四种服务的参数与朗读控制
             settingsSectionOpen, toggleSettingsSection,
             ttsState, ttsProviderOptions, ttsVoiceOptions, ttsGsvSpeakerOptions,
             ttsMinimaxModelOptions, ttsMinimaxHostOptions, ttsMinimaxLangOptions,
             ttsMinimaxFormatOptions, ttsGsvLangOptions, ttsGsvSplitOptions, ttsGsvMediaTypeOptions,
+            // MiMo：格式下拉、角色名候选、音色设计 / 音色克隆 / 导演演绎
+            ttsMimoFormatOptions, ttsMimoCharacterOptions,
+            addMimoVoiceDesign, removeMimoVoiceDesign, generateMimoVoiceDesign,
+            pickMimoCloneFile, addMimoVoiceClone, removeMimoVoiceClone,
+            addMimoDirection, removeMimoDirection, generateMimoDirection,
             narrateMessage, isMessageNarrating, speakTtsText, stopTts, previewTts,
             handleMessageContentClick, narrateVoiceLine,
             ttsVoiceBindingOptions, addTtsVoiceBinding, removeTtsVoiceBinding,
