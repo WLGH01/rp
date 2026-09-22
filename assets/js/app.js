@@ -664,7 +664,7 @@ const app = createApp({
             imageStylePresets: [],
             imageModel: 'nai-diffusion-4-5-full',
             imageSize: '竖图',
-            // --- NAI（RP Hub 网关）专用：写进生图 URL 的出图参数 ---
+            // --- Nai2API (RP HUB 网关) 专用：写进生图 URL 的出图参数 ---
             // 默认值 = 网关自己的默认（nai.sta1n.cn /api/settings：
             // 竖图 832×1216 / steps 28 / scale 6 / cfg_rescale 0 / k_dpmpp_2m_sde / karras）。
             // 以前这些是硬编码在正则 URL 里的（steps 还被写成 40、负面词是带残字的旧串），
@@ -801,7 +801,7 @@ const app = createApp({
             value: item.value,
             label: item.label
         })));
-        // NAI（RP Hub 网关）参数的下拉项：采样器用官方 id（网关原样转给 NovelAI）。
+        // Nai2API (RP HUB 网关) 参数的下拉项：采样器用官方 id（网关原样转给 NovelAI）。
         const naiGatewaySamplerOptions = computed(() => (window.RPHubConfig?.uiOptions?.naiGatewaySamplers || []).map(item => ({
             value: item.value,
             label: item.label
@@ -2103,7 +2103,7 @@ let removedProviderConfigCleared = false;
                 settings.naiOfficialVarietyBoost = settings.naiOfficialVarietyBoost === true;
                 settings.naiOfficialRetryMax = Math.max(0, Math.min(5, Math.round(Number(settings.naiOfficialRetryMax ?? 2))));
                 settings.naiOfficialRetryDelays = String(settings.naiOfficialRetryDelays ?? '').trim() || '3,5';
-                // NAI（RP Hub 网关）参数：老存档没有这些键，用网关自己的默认兜底。
+                // Nai2API (RP HUB 网关) 参数：老存档没有这些键，用网关自己的默认兜底。
                 const gatewayDefaults = window.RPHubConfig?.uiOptions?.naiGatewayDefaults || {};
                 settings.naiGatewaySteps = Math.max(1, Math.min(50, Math.round(Number(settings.naiGatewaySteps) || gatewayDefaults.steps || 28)));
                 settings.naiGatewayScale = Math.max(1, Math.min(20, Number(settings.naiGatewayScale) || gatewayDefaults.scale || 6));
@@ -2766,9 +2766,8 @@ let removedProviderConfigCleared = false;
         }, { deep: true });
 
         const savedImageEndpointOptions = computed(() => {
-            const providerTag = (provider) => (
-                provider === 'comfyui' ? 'ComfyUI' : provider === 'stable-diffusion' ? 'SD' : 'NAI'
-            );
+            // 方式标签由 core-utils 的纯函数给出（便于单测覆盖「官方 API 不能被错标成 Nai2API」）。
+            const providerTag = imageUtils.imageEndpointProviderTag;
             const list = (settings.savedImageEndpoints || []).map(item => ({
                 value: item.id,
                 label: `${item.name} (${providerTag(item.provider)})`
@@ -3615,7 +3614,7 @@ let removedProviderConfigCleared = false;
         };
 
         // ===== NovelAI 官方 API（image.novelai.net）=====
-        // 与「NAI（RP Hub 网关）」的差异（后者是作者套壳，走 /api/jobs 异步任务 + 轮询）：
+        // 与「Nai2API (RP HUB 网关)」的差异（后者是作者套壳，走 /api/jobs 异步任务 + 轮询）：
         //   1. 鉴权是 Authorization: Bearer <pst token>，不是 URL 里的 token
         //   2. 端点 /ai/generate-image，请求体 { input, model, action, parameters }
         //   3. 响应直接是一个 ZIP（内含 PNG），一次拿完，没有任务 id 可轮询
@@ -3668,7 +3667,7 @@ let removedProviderConfigCleared = false;
             concurrency: NAI_OFFICIAL_CONCURRENCY
         });
 
-        // ===== NAI（RP Hub 网关）的出图参数 =====
+        // ===== Nai2API (RP HUB 网关) 的出图参数 =====
         // 这些值必须写进生图 URL（网关按 query 取用），而且必须能在界面上改：
         // 以前 steps=40 与那条旧负面词是硬编码在正则 URL 里的，官方面板改什么都影响不到网关，
         // 于是「两边配置看起来一样、出图却不一样」。
@@ -4208,7 +4207,7 @@ let removedProviderConfigCleared = false;
             }
         });
 
-        // NAI（RP Hub 网关）的出图参数：改完立刻同步进生图 URL（否则界面改了等于没改）。
+        // Nai2API (RP HUB 网关) 的出图参数：改完立刻同步进生图 URL（否则界面改了等于没改）。
         watch(() => [
             settings.naiGatewaySteps,
             settings.naiGatewayScale,

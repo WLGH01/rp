@@ -1198,14 +1198,14 @@ window.RPHubUtils = {
             //   stable-diffusion Forge/A1111 的 sdapi 同步返回 base64
             //   comfyui          提交 API 格式工作流 → 进度/历史 → /view 取图
             imageProviders: Object.freeze([
-                { value: 'novelai', label: 'NAI（RP Hub 网关）' },
+                { value: 'novelai', label: 'Nai2API (RP HUB 网关)' },
                 { value: 'novelai-official', label: 'NovelAI 官方 API' },
                 { value: 'stable-diffusion', label: 'Stable Diffusion（Forge / A1111）' },
                 { value: 'comfyui', label: 'ComfyUI（API 工作流）' }
             ]),
             // NovelAI 官方 API 常量（取自官方文档与官方 Python 库实测值）。
             novelaiOfficialBaseUrl: 'https://image.novelai.net',
-            // NAI（RP Hub 网关）的出图参数默认值 = 网关自己的默认（nai.sta1n.cn 的 /api/settings）。
+            // Nai2API (RP HUB 网关) 的出图参数默认值 = 网关自己的默认（nai.sta1n.cn 的 /api/settings）。
             // 以前本站硬编码成 steps=40 + 一条带残字的旧负面词，与网关界面/官方接口都对不上。
             naiGatewayDefaults: Object.freeze({
                 steps: 28,
@@ -1502,7 +1502,7 @@ window.RPHubUtils = {
     // 也不含 imageGenCount（期望张数属于这一次生成的操作习惯，不该被切预设改掉）。
     const IMAGE_PROFILE_FIELDS = Object.freeze([
         'imageStyle', 'customImageArtists', 'imageModel', 'imageSize',
-        // NAI（RP Hub 网关）专用：这些是直接写进生图 URL 的出图参数。
+        // Nai2API (RP HUB 网关) 专用：这些是直接写进生图 URL 的出图参数。
         // 以前它们被硬编码在正则 URL 里（steps=40、那条旧负面词），界面上既看不到也改不了，
         // 于是「官方面板调的参数」与「网关实际收到的参数」对不上，两边永远对不齐。
         'naiGatewaySteps', 'naiGatewayScale', 'naiGatewayCfg', 'naiGatewaySampler',
@@ -1691,6 +1691,17 @@ window.RPHubUtils = {
         return marked;
     };
 
+    // 生图预设名后面括注的方式标签（如「本机 ComfyUI (ComfyUI)」）。
+    // 与「生图方式」下拉里的叫法保持一致：网关那套现在叫 Nai2API。
+    // 官方 API 必须单独列一支：它和网关都以 'novelai' 开头（'novelai-official'），
+    // 若只按「不是 comfyui / 不是 SD」兜底，官方预设会被错标成 Nai2API。
+    const imageEndpointProviderTag = (provider) => {
+        if (provider === 'comfyui') return 'ComfyUI';
+        if (provider === 'stable-diffusion') return 'SD';
+        if (provider === 'novelai-official') return 'NovelAI';
+        return 'Nai2API';
+    };
+
     // 老存档的预设只有地址、没有出图参数：用当前这套补一份基线，
     // 让「每个预设各有一套参数」从升级当次就开始生效。
     const seedEndpointProfiles = (endpoints, settings) => {
@@ -1766,7 +1777,7 @@ window.RPHubUtils = {
         return text || String(window.RPHubConfig?.uiOptions?.naiDefaultNegative || '');
     };
 
-    // ===== NAI（RP Hub 网关）出图参数写回生图 URL =====
+    // ===== Nai2API (RP HUB 网关) 出图参数写回生图 URL =====
     //
     // 正则 replacement 里嵌的就是生图 URL（`data-image-request`）。网关按 query 取参数，
     // 所以改了步数/采样器/负面词必须把 URL 重写一遍——老存档里那条硬编码的 steps=40
@@ -2203,7 +2214,7 @@ window.RPHubUtils = {
 
     // ===== NovelAI 官方 API（image.novelai.net）=====
     //
-    // 与「NAI（RP Hub 网关）」的区别（那套是作者自己的套壳，走 /api/jobs 异步任务）：
+    // 与「Nai2API (RP HUB 网关)」的区别（那套是作者自己的套壳，走 /api/jobs 异步任务）：
     //   - 端点  POST https://image.novelai.net/ai/generate-image
     //   - 鉴权  Authorization: Bearer <pst 开头的 access token>（不是 query token）
     //   - 请求体 { input, model, action, parameters }，参数全在 parameters 里
@@ -2863,6 +2874,7 @@ window.RPHubUtils = {
         seedEndpointProfiles,
         isBuiltinImageEndpoint,
         markBuiltinImageEndpoints,
+        imageEndpointProviderTag,
         promoteImageJobToServer,
         resolveArchivedImageFallbackUrl,
         isLocalBase64ImageJob,

@@ -1772,7 +1772,7 @@
                                                 menu-class="text-sm">
                                             </custom-select>
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                NAI（RP Hub 网关）走作者套壳的异步任务轮询；NovelAI 官方 API 直连 image.novelai.net（Bearer 鉴权，返回 ZIP）；Stable Diffusion 走 Forge/A1111 的 sdapi；ComfyUI 提交「API 格式」工作流。
+                                                Nai2API (RP HUB 网关) 走作者套壳的异步任务轮询；NovelAI 官方 API 直连 image.novelai.net（Bearer 鉴权，返回 ZIP）；Stable Diffusion 走 Forge/A1111 的 sdapi；ComfyUI 提交「API 格式」工作流。
                                             </p>
                                         </div>
 
@@ -1814,7 +1814,7 @@
                                             </custom-select>
                                         </div>
 
-                                        <!-- NAI（RP Hub 网关）出图参数：这些值是直接写进生图 URL 的，
+                                        <!-- Nai2API (RP HUB 网关) 出图参数：这些值是直接写进生图 URL 的，
                                              以前硬编码在正则里（steps=40 + 一条旧负面词），界面上看不到也改不了。 -->
                                         <div v-if="isNaiProvider" class="generation-setting-card">
                                             <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">迭代步数</label>
@@ -2106,7 +2106,7 @@
                                             </span>
                                         </div>
 
-                                        <!-- 官方密钥与地址：与「NAI（RP Hub 网关）」的密钥彻底分离，
+                                        <!-- 官方密钥与地址：与「Nai2API (RP HUB 网关)」的密钥彻底分离，
                                              两套方式各自保存，互不覆盖。 -->
                                         <div class="generation-setting-card">
                                             <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">官方 Access Token（独立保存）</label>
@@ -2115,7 +2115,7 @@
                                                 placeholder="pst 开头的 token（novelai.net → 账户设置 → Persistent Token）">
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
                                                 这里填的是 <span class="font-bold">NovelAI 官方</span>的 token，与上面「自动生图密钥」互不影响：留空时才会回落到通用密钥。
-                                                切到 NAI（RP Hub 网关）时用的是另一个密钥，两者不会互相覆盖。
+                                                切到 Nai2API (RP HUB 网关) 时用的是另一个密钥，两者不会互相覆盖。
                                             </p>
                                         </div>
 

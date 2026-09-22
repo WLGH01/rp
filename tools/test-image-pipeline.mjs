@@ -753,10 +753,19 @@ assertTrue('core-utils 导出 RPHubNaiOfficialUtils', Boolean(naiOff));
 section('12) NovelAI 官方 API：provider 与常量');
 assertTrue('novelai-official 进入生图方式列表',
     config.uiOptions.imageProviders.some(p => p.value === 'novelai-official'));
-assertTrue('原先的 novelai 改名为 RP Hub 网关',
-    config.uiOptions.imageProviders.find(p => p.value === 'novelai').label.includes('RP Hub'));
+assertTrue('原先的 novelai 改名为 Nai2API (RP HUB 网关)',
+    config.uiOptions.imageProviders.find(p => p.value === 'novelai').label === 'Nai2API (RP HUB 网关)');
 assertTrue('两个 NAI 方式并存（网关 + 官方）',
     config.uiOptions.imageProviders.filter(p => p.value.startsWith('novelai')).length === 2);
+
+section('12a-2) 生图预设的方式标签：网关叫 Nai2API，官方不能被错标');
+assertEqual('网关预设标签是 Nai2API', imageUtils.imageEndpointProviderTag('novelai'), 'Nai2API');
+// 关键回归：novelai-official 也以 'novelai' 开头，若按「不是 comfyui/SD」兜底会被错标成 Nai2API
+assertEqual('官方 API 预设标签不是 Nai2API', imageUtils.imageEndpointProviderTag('novelai-official'), 'NovelAI');
+assertEqual('SD 预设标签仍是 SD', imageUtils.imageEndpointProviderTag('stable-diffusion'), 'SD');
+assertEqual('ComfyUI 预设标签仍是 ComfyUI', imageUtils.imageEndpointProviderTag('comfyui'), 'ComfyUI');
+assertEqual('未知方式兜底为 Nai2API', imageUtils.imageEndpointProviderTag(''), 'Nai2API');
+assertEqual('旧标签 (NAI) 不再出现在预设标签函数里', /'NAI'/.test(String(imageUtils.imageEndpointProviderTag)), false);
 
 section('12b) 官方 API：尺寸必须按 64 对齐并夹住范围');
 // 对齐是「四舍五入到最近的 64 倍数」：1001 距 1024 为 23、距 960 为 41，故取 1024。
@@ -918,7 +927,7 @@ assertEqual('质量标签开了发 standard', naiOff.buildNaiOfficialPayload({
 }).parameters.qualityPresetId, 'none');
 
 // 网关参数：默认值必须与网关自己的默认一致（否则「两边看起来一样、出图不一样」重演）。
-section('12h) NAI（RP Hub 网关）参数默认值与配置项');
+section('12h) Nai2API (RP HUB 网关) 参数默认值与配置项');
 const gatewayDefaults = sandbox.window.RPHubConfig.uiOptions.naiGatewayDefaults;
 assertEqual('网关默认步数 28', gatewayDefaults.steps, 28);
 assertEqual('网关默认 scale 6', gatewayDefaults.scale, 6);
