@@ -23,5 +23,6 @@ Thumbs.db
 tools/_out/
 tools/tmp/
 
-# 本机部署笔记：属于个人运维记录（含自己的路径与服务信息），不入公共仓库
+# 本机部署笔记与代码地图：属于个人运维/本地参考文档（含自己的路径与服务信息），不入公共仓库
 docs/REFACTOR-NOTES.md
+docs/PROJECT-STRUCTURE.md

@@ -901,6 +901,18 @@
             opacity: 1 !important;
         }
 
+        /* 正在朗读的消息：TTS 按钮常亮，且在移动端（无 hover）也可见 */
+        .message-action-button.is-narrating {
+            color: #e11d48;
+            background: rgba(255, 241, 242, 0.92);
+            transform: translateY(-1px);
+        }
+
+        .message-action-button.is-narrating:hover {
+            color: #be123c;
+            background: rgba(255, 228, 230, 0.95);
+        }
+
         .settings-page-header {
             display: flex;
             align-items: center;
@@ -1399,6 +1411,16 @@
 
         .settings-toggle-input:checked + .settings-toggle--indigo {
             background: #6366f1;
+        }
+
+        /* --teal 在生图设置里被大量使用，但此前一直没有对应规则，
+           于是那些开关全部回退成默认的蓝色，与卡片的青色主题不一致。 */
+        .settings-toggle-input:checked + .settings-toggle--teal {
+            background: #0d9488;
+        }
+
+        .settings-toggle-input:checked + .settings-toggle--rose {
+            background: #e11d48;
         }
 
         .settings-toggle-input:checked + .settings-toggle--solid {

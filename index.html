@@ -120,6 +120,9 @@
                 d="M3 3V13.2C3 14.8802 3 15.7202 3.32698 16.362C3.6146 16.9265 4.07354 17.3854 4.63803 17.673C5.27976 18 6.11984 18 7.8 18H15M15 18C15 19.6569 16.3431 21 18 21C19.6569 21 21 19.6569 21 18C21 16.3431 19.6569 15 18 15C16.3431 15 15 16.3431 15 18ZM3 8L15 8M15 8C15 9.65686 16.3431 11 18 11C19.6569 11 21 9.65685 21 8C21 6.34315 19.6569 5 18 5C16.3431 5 15 6.34315 15 8Z">
             </path>
         </symbol>
+        <symbol id="icon-tts" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M6 10v4a1 1 0 001 1h2l3.5 3.5V5.5L9 9H7a1 1 0 00-1 1z"></path>
+        </symbol>
     </svg>
     <div class="entry-transition" aria-hidden="true">
         <div class="entry-transition-brand">
@@ -653,6 +656,20 @@
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                     d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z">
                                                 </path>
+                                            </svg>
+                                        </button>
+                                        <button v-if="settings.ttsEnabled" @click="narrateMessage(msg, index)"
+                                            class="message-action-button"
+                                            :class="{ 'is-narrating': isMessageNarrating(index) }"
+                                            :title="isMessageNarrating(index) ? '停止朗读' : (ttsState.busy ? '正在合成语音…' : '朗读这条消息')"
+                                            aria-label="朗读这条消息">
+                                            <svg v-if="isMessageNarrating(index) && ttsState.playing" class="w-3.5 h-3.5 md:w-4 md:h-4" fill="currentColor"
+                                                viewBox="0 0 24 24" aria-hidden="true">
+                                                <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
+                                            </svg>
+                                            <svg v-else class="w-3.5 h-3.5 md:w-4 md:h-4" :class="{ 'animate-pulse': isMessageNarrating(index) }"
+                                                fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                                <use href="#icon-tts"></use>
                                             </svg>
                                         </button>
                                         <button @click="copyMessage(msg.content); playMessageActionFeedback($event)"
@@ -1241,13 +1258,14 @@
                                 </svg>
                             </div>
 
-                            <div class="mt-4 ml-6 text-white font-semibold flex items-center relative z-10">
+                            <button type="button" @click="toggleSettingsSection('user')" :aria-expanded="settingsSectionOpen.user" aria-controls="settings-section-user" class="mt-4 ml-6 text-white font-semibold flex items-center relative z-10 cursor-pointer select-none" title="展开 / 折叠">
                                 <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                         d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
                                 </svg>
                                 用户设置
-                            </div>
+                                <svg :class="{ 'rotate-180': settingsSectionOpen.user }" class="settings-collapse-chevron w-5 h-5 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </button>
 
                             <!-- Profile Management Controls -->
                             <div class="mt-3 mr-4 flex flex-wrap items-center gap-1.5 md:gap-2 relative"
@@ -1346,6 +1364,10 @@
                             </div>
                         </div>
 
+                        <!-- 用户设置分组用 v-show 而不是 settings-collapse 动画：
+                             头像用 -mt-10 上浮到头部区域，而折叠动画要求 __inner 必须
+                             overflow:hidden，会把上浮出来的那半圈头像裁掉（圆框看起来就是缺角的）。 -->
+                        <div id="settings-section-user" v-show="settingsSectionOpen.user" :aria-hidden="!settingsSectionOpen.user" :inert="!settingsSectionOpen.user">
                         <div class="px-6 pb-6 relative">
                             <!-- Avatar Section (Overlapping Header) -->
                             <div class="flex flex-col md:flex-row gap-8 items-start -mt-10">
@@ -1457,6 +1479,7 @@
                                 </div>
                             </div>
                         </div>
+                        </div>
                     </div>
 
                     <!-- API Settings - Optimized UI -->
@@ -1470,16 +1493,19 @@
                                     <path d="M0 50 Q 50 100 100 50" stroke="white" stroke-width="2" fill="none" />
                                 </svg>
                             </div>
-                            <div class="text-white font-semibold flex items-center text-lg relative z-10">
+                            <button type="button" @click="toggleSettingsSection('api')" :aria-expanded="settingsSectionOpen.api" aria-controls="settings-section-api" class="text-white font-semibold flex items-center text-lg relative z-10 cursor-pointer select-none" title="展开 / 折叠">
                                 <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                         d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                                 </svg>
                                 API 连接与服务
-                            </div>
+                                <svg :class="{ 'rotate-180': settingsSectionOpen.api }" class="settings-collapse-chevron w-5 h-5 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </button>
                         </div>
 
-                        <div class="p-6 space-y-6">
+                        <div id="settings-section-api" class="settings-collapse" :class="{ 'is-open': settingsSectionOpen.api }" :aria-hidden="!settingsSectionOpen.api" :inert="!settingsSectionOpen.api">
+                            <div class="settings-collapse__inner">
+                        <div class="p-6 space-y-6 settings-collapse__content">
                             <!-- Integrated Service Status Monitoring -->
                             <div class="mb-6 pb-6 border-b border-gray-100">
                                 <h4
@@ -1714,19 +1740,29 @@
 
 
 
-                                <!-- Image Generation Settings -->
-                                <div class="pt-6 border-t border-gray-100 mt-6">
-                                    <div class="mb-4 flex items-center justify-between gap-3">
-                                        <h4 class="flex items-center text-xs font-bold text-gray-500 uppercase tracking-wider">
-                                            <svg class="w-4 h-4 mr-2 text-gray-500" fill="none" stroke="currentColor"
-                                                viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                    d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4">
-                                                </path>
-                                            </svg>
-                                            生图设置
-                                        </h4>
-                                    </div>
+                            </div>
+                        </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 生图设置 -->
+                    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+                        <div class="h-16 bg-gradient-to-r from-teal-500 to-emerald-600 relative overflow-hidden flex items-center px-6">
+                            <div class="absolute inset-0 opacity-10">
+                                <svg class="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M0 50 Q 50 100 100 50" stroke="white" stroke-width="2" fill="none" /></svg>
+                            </div>
+                            <button type="button" @click="toggleSettingsSection('image')" :aria-expanded="settingsSectionOpen.image" aria-controls="settings-section-image" class="text-white font-semibold flex items-center text-lg relative z-10 cursor-pointer select-none" title="展开 / 折叠">
+                                <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                                </svg>
+                                生图设置
+                                <svg :class="{ 'rotate-180': settingsSectionOpen.image }" class="settings-collapse-chevron w-5 h-5 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </button>
+                        </div>
+                        <div id="settings-section-image" class="settings-collapse" :class="{ 'is-open': settingsSectionOpen.image }" :aria-hidden="!settingsSectionOpen.image" :inert="!settingsSectionOpen.image">
+                            <div class="settings-collapse__inner">
+                        <div class="p-6 space-y-6 settings-collapse__content">
                                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <!-- Saved Image Endpoints (多地址管理) -->
                                         <div class="generation-setting-card md:col-span-2 bg-gradient-to-r from-teal-50/40 via-cyan-50/30 to-sky-50/40 border-teal-100">
@@ -2520,8 +2556,306 @@
                                             </div>
                                         </div>
                                     </div>
-                                </div>
+                        </div>
+                            </div>
+                        </div>
+                    </div>
 
+                    <!-- TTS 语音设置 -->
+                    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+                        <div class="h-16 bg-gradient-to-r from-rose-500 to-pink-600 relative overflow-hidden flex items-center px-6">
+                            <div class="absolute inset-0 opacity-10">
+                                <svg class="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M0 50 Q 50 100 100 50" stroke="white" stroke-width="2" fill="none" /></svg>
+                            </div>
+                            <button type="button" @click="toggleSettingsSection('tts')" :aria-expanded="settingsSectionOpen.tts" aria-controls="settings-section-tts" class="text-white font-semibold flex items-center text-lg relative z-10 cursor-pointer select-none" title="展开 / 折叠">
+                                <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-tts"></use></svg>
+                                TTS 语音设置
+                                <svg :class="{ 'rotate-180': settingsSectionOpen.tts }" class="settings-collapse-chevron w-5 h-5 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </button>
+                        </div>
+
+                        <div id="settings-section-tts" class="settings-collapse" :class="{ 'is-open': settingsSectionOpen.tts }" :aria-hidden="!settingsSectionOpen.tts" :inert="!settingsSectionOpen.tts">
+                            <div class="settings-collapse__inner">
+                                <div class="p-6 space-y-6 settings-collapse__content">
+
+                                    <!-- 总开关 -->
+                                    <div class="generation-setting-card md:col-span-2 bg-gradient-to-r from-rose-50/50 via-pink-50/40 to-fuchsia-50/40 border-rose-100">
+                                        <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                            <span class="flex flex-col">
+                                                <span class="text-sm font-bold text-rose-800">启用 TTS 语音</span>
+                                                <span class="text-xs text-gray-500 mt-1 leading-relaxed">开启后，每条 AI 消息旁会出现朗读按钮，点一下就把那句话转成语音播放。</span>
+                                            </span>
+                                            <div class="relative inline-flex flex-none items-center">
+                                                <input type="checkbox" v-model="settings.ttsEnabled" class="settings-toggle-input sr-only">
+                                                <div class="settings-toggle settings-toggle--rose"></div>
+                                            </div>
+                                        </label>
+                                    </div>
+
+                                    <!-- 语音服务 -->
+                                    <div class="pt-2">
+                                        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+                                            <h4 class="flex items-center text-xs font-bold text-gray-500 uppercase tracking-wider">
+                                                <svg class="w-4 h-4 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
+                                                语音服务
+                                            </h4>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" @click="testTtsConnection" :disabled="ttsState.testing"
+                                                    class="px-3 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm disabled:opacity-40">
+                                                    {{ ttsState.testing ? '检测中...' : '检测连接' }}
+                                                </button>
+                                                <span v-if="ttsState.status" class="text-xs font-medium"
+                                                    :class="ttsState.statusOk ? 'text-green-600' : 'text-red-500'">{{ ttsState.status }}</span>
+                                            </div>
+                                        </div>
+
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <!-- TTS 方式 -->
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">TTS 方式</label>
+                                                <custom-select v-model="settings.ttsProvider" :options="ttsProviderOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">三种服务的请求格式分别对齐酒馆的 MiniMax / NovelAI / GPT-SoVITS-V2 扩展。</p>
+                                            </div>
+
+                                            <!-- 播放设置 -->
+                                            <div class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">播放音量（{{ Number(settings.ttsVolume).toFixed(2) }}）</label>
+                                                <input v-model.number="settings.ttsVolume" type="range" min="0" max="1" step="0.05" class="w-full accent-rose-500">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 mt-3">播放速度（{{ Number(settings.ttsRate).toFixed(2) }}x）</label>
+                                                <input v-model.number="settings.ttsRate" type="range" min="0.5" max="2" step="0.05" class="w-full accent-rose-500">
+                                            </div>
+
+                                            <!-- MiniMax -->
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">API Host</label>
+                                                <custom-select v-model="settings.ttsMinimaxHost" :options="ttsMinimaxHostOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">Key 与 Host 必须属于同一站点，否则会报鉴权失败（status_code 1004）。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">API Key</label>
+                                                <input v-model="settings.ttsMinimaxKey" type="password" autocomplete="off"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="MiniMax API Key">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">模型</label>
+                                                <custom-select v-model="settings.ttsMinimaxModel" :options="ttsMinimaxModelOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">语言</label>
+                                                <custom-select v-model="settings.ttsMinimaxLang" :options="ttsMinimaxLangOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音色（voice_id）</label>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <div class="flex-1 min-w-[12rem]">
+                                                        <custom-select v-model="settings.ttsMinimaxVoiceId" :options="ttsVoiceOptions"
+                                                            button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                            menu-class="text-sm">
+                                                        </custom-select>
+                                                    </div>
+                                                    <input v-model="ttsState.newMinimaxVoiceName" type="text" placeholder="备注名"
+                                                        class="w-28 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <input v-model="ttsState.newMinimaxVoiceId" type="text" placeholder="voice_id"
+                                                        class="w-48 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm font-mono focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <button type="button" @click="addMinimaxVoice"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm">添加</button>
+                                                    <button type="button" @click="removeMinimaxVoice(settings.ttsMinimaxVoiceId)"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-red-600 bg-white hover:bg-red-50 border border-red-200 rounded-lg active:scale-95 transition-all shadow-sm">删除</button>
+                                                </div>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    与酒馆一样，只内置 1 个示例音色：MiniMax 官方不提供音色列表接口，音色有几百个且会变，
+                                                    写死在代码里必然过期。要用的音色请到 MiniMax 控制台复制 voice_id 后在这里添加，只能删除自己加的。
+                                                </p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">语速（{{ Number(settings.ttsMinimaxSpeed).toFixed(1) }}）</label>
+                                                <input v-model.number="settings.ttsMinimaxSpeed" type="range" min="0.5" max="2" step="0.1" class="w-full accent-rose-500">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音量（{{ Number(settings.ttsMinimaxVol).toFixed(1) }}）</label>
+                                                <input v-model.number="settings.ttsMinimaxVol" type="range" min="0" max="10" step="0.1" class="w-full accent-rose-500">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音调（{{ settings.ttsMinimaxPitch }}）</label>
+                                                <input v-model.number="settings.ttsMinimaxPitch" type="range" min="-12" max="12" step="1" class="w-full accent-rose-500">
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">-12 ~ 12，0 为原声。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音频格式</label>
+                                                <custom-select v-model="settings.ttsMinimaxFormat" :options="ttsMinimaxFormatOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+
+                                            <!-- NovelAI -->
+                                            <div v-if="settings.ttsProvider === 'novel'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">API 地址</label>
+                                                <input v-model="settings.ttsNovelBaseUrl" type="text"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="https://api.novelai.net">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'novel'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Access Token</label>
+                                                <input v-model="settings.ttsNovelToken" type="password" autocomplete="off"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="pst-...">
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'novel'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">音色</label>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <div class="flex-1 min-w-[12rem]">
+                                                        <custom-select v-model="settings.ttsNovelVoice" :options="ttsVoiceOptions"
+                                                            button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                            menu-class="text-sm">
+                                                        </custom-select>
+                                                    </div>
+                                                    <input v-model="ttsState.newNovelVoice" type="text" placeholder="自定义音色名"
+                                                        class="w-44 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <button type="button" @click="addNovelVoice"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm">添加</button>
+                                                    <button type="button" @click="removeNovelVoice(settings.ttsNovelVoice)"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-red-600 bg-white hover:bg-red-50 border border-red-200 rounded-lg active:scale-95 transition-all shadow-sm">删除</button>
+                                                </div>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    NovelAI 的音色本质是一个 seed：随便写一个新名字就等于一个全新的随机音色，多试几个即可。
+                                                    与酒馆一致，13 个内置音色不可删除，只能删除自己加的。
+                                                </p>
+                                            </div>
+
+                                            <!-- GPT-SoVITS-V2 -->
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">服务地址</label>
+                                                <input v-model="settings.ttsGsvEndpoint" type="text"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm font-mono focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="http://localhost:9880">
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">GPT-SoVITS 的 api.py 默认 9880；跨机访问需让服务端监听 0.0.0.0 并放行 CORS。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">参考音频（音色）</label>
+                                                <div class="flex items-center gap-2">
+                                                    <input v-model="settings.ttsGsvRefAudio" type="text" list="tts-gsv-speakers"
+                                                        class="flex-1 min-w-0 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                        placeholder="参考音频/xxx.wav 或直接填文件名">
+                                                    <datalist id="tts-gsv-speakers">
+                                                        <option v-for="speaker in ttsGsvSpeakerOptions" :key="speaker" :value="speaker"></option>
+                                                    </datalist>
+                                                    <button type="button" @click="refreshGsvSpeakers" :disabled="ttsState.testing"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm disabled:opacity-40 whitespace-nowrap">拉取音色</button>
+                                                </div>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">留纯文件名时按 <code class="px-1 rounded bg-gray-50">./参考音频/名字.wav</code> 处理；含 <code class="px-1 rounded bg-gray-50">/</code> 时按原样作为路径下发。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">参考音频文本（prompt_text）</label>
+                                                <textarea v-model="settings.ttsGsvPromptText" rows="2"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="参考音频里说的那段话，需与音频内容一致"></textarea>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">新版 api.py 在无参考文本时会自动用 ASR 识别（返回 400 提示可留空重试）。</p>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">文本语言</label>
+                                                <custom-select v-model="settings.ttsGsvTextLang" :options="ttsGsvLangOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">参考文本语言</label>
+                                                <custom-select v-model="settings.ttsGsvPromptLang" :options="ttsGsvLangOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">切分方式</label>
+                                                <custom-select v-model="settings.ttsGsvTextSplitMethod" :options="ttsGsvSplitOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+                                            <div v-if="settings.ttsProvider === 'gpt-sovits'" class="generation-setting-card">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">媒体格式</label>
+                                                <custom-select v-model="settings.ttsGsvMediaType" :options="ttsGsvMediaTypeOptions"
+                                                    button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                    menu-class="text-sm">
+                                                </custom-select>
+                                            </div>
+
+                                            <!-- 朗读行为 -->
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">朗读行为</label>
+                                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                        <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">点朗读时自动播放</span>
+                                                        <div class="relative inline-flex flex-none items-center">
+                                                            <input type="checkbox" v-model="settings.ttsAutoPlay" class="settings-toggle-input sr-only">
+                                                            <div class="settings-toggle settings-toggle--rose"></div>
+                                                        </div>
+                                                    </label>
+                                                    <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                        <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">长句自动分段</span>
+                                                        <div class="relative inline-flex flex-none items-center">
+                                                            <input type="checkbox" v-model="settings.ttsSplitByParagraph" class="settings-toggle-input sr-only">
+                                                            <div class="settings-toggle settings-toggle--rose"></div>
+                                                        </div>
+                                                    </label>
+                                                    <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                        <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">过滤动作与括号</span>
+                                                        <div class="relative inline-flex flex-none items-center">
+                                                            <input type="checkbox" v-model="settings.ttsStripActions" class="settings-toggle-input sr-only">
+                                                            <div class="settings-toggle settings-toggle--rose"></div>
+                                                        </div>
+                                                    </label>
+                                                    <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                        <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">只念引号里的台词</span>
+                                                        <div class="relative inline-flex flex-none items-center">
+                                                            <input type="checkbox" v-model="settings.ttsReadDialogueOnly" class="settings-toggle-input sr-only">
+                                                            <div class="settings-toggle settings-toggle--rose"></div>
+                                                        </div>
+                                                    </label>
+                                                </div>
+                                                <div class="mt-4">
+                                                    <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">单次请求最大字符数</label>
+                                                    <input v-model.number="settings.ttsMaxChars" type="number" min="60" max="5000" step="10"
+                                                        class="w-full md:w-48 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm">
+                                                    <p class="mt-2 text-xs text-gray-400 leading-relaxed">超长正文会按句末标点切段，逐段合成后连续播放（NovelAI 官方单次上限约 1000 字）。</p>
+                                                </div>
+                                            </div>
+
+                                            <!-- 试听 -->
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">试听文本</label>
+                                                <div class="flex flex-wrap items-start gap-2">
+                                                    <textarea v-model="ttsState.previewText" rows="2"
+                                                        class="flex-1 min-w-[14rem] bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-rose-100 focus:border-rose-400 focus:outline-none transition-all shadow-sm"></textarea>
+                                                    <button type="button" @click="previewTts" :disabled="ttsState.busy"
+                                                        class="px-4 py-2 text-sm font-bold text-white bg-rose-600 rounded-xl shadow-sm hover:bg-rose-700 active:scale-95 transition-all disabled:opacity-40 whitespace-nowrap">
+                                                        {{ ttsState.busy ? '合成中...' : '试听' }}
+                                                    </button>
+                                                    <button type="button" @click="stopTts" :disabled="!ttsState.playing"
+                                                        class="px-4 py-2 text-sm font-bold text-gray-600 bg-white border border-gray-200 rounded-xl shadow-sm hover:bg-gray-50 active:scale-95 transition-all disabled:opacity-40 whitespace-nowrap">
+                                                        停止
+                                                    </button>
+                                                </div>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">Key / token 随设置一起保存在本机，并会进入跨设备同步快照。</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2537,13 +2871,16 @@
                                     <path d="M0 50 Q 50 100 100 50" stroke="white" stroke-width="2" fill="none" />
                                 </svg>
                             </div>
-                            <div class="text-white font-semibold flex items-center text-lg relative z-10">
+                            <button type="button" @click="toggleSettingsSection('advanced')" :aria-expanded="settingsSectionOpen.advanced" aria-controls="settings-section-advanced" class="text-white font-semibold flex items-center text-lg relative z-10 cursor-pointer select-none" title="展开 / 折叠">
                                 <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-settings"></use></svg>
                                 高级设置
-                            </div>
+                                <svg :class="{ 'rotate-180': settingsSectionOpen.advanced }" class="settings-collapse-chevron w-5 h-5 ml-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </button>
                         </div>
 
-                        <div class="p-6 space-y-6">
+                        <div id="settings-section-advanced" class="settings-collapse" :class="{ 'is-open': settingsSectionOpen.advanced }" :aria-hidden="!settingsSectionOpen.advanced" :inert="!settingsSectionOpen.advanced">
+                            <div class="settings-collapse__inner">
+                        <div class="p-6 space-y-6 settings-collapse__content">
                             <!-- Settings Toggles Grid -->
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <label
@@ -2753,6 +3090,8 @@
                                         冲突按「最后写入者胜」处理：若服务器数据更新，本机推送会被拒绝，可先拉取或选择覆盖。拉取会覆盖本机全部数据并自动刷新页面。
                                     </div>
                                 </div>
+                            </div>
+                        </div>
                             </div>
                         </div>
                     </div>
@@ -3550,6 +3889,7 @@
         document.write('<script src="assets/js/api-utils.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/data-services.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/runtime-services.js?v=' + new Date().getTime() + '"><\/script>');
+        document.write('<script src="assets/js/tts-services.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/sync-client.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/ui-components.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/app.js?v=' + new Date().getTime() + '"><\/script>');

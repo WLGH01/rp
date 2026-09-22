@@ -738,7 +738,12 @@ const app = createApp({
             qualityModel: DEFAULT_API_CONFIG.qualityModel,
             balancedModel: DEFAULT_API_CONFIG.balancedModel,
             fastModel: DEFAULT_API_CONFIG.fastModel,
-            visionModel: ''
+            visionModel: '',
+
+            // ===== TTS 语音 =====
+            // 全部字段的默认值集中在 tts-services.js 的 DEFAULTS 里（与三种服务各自的
+            // 请求参数同名对应），这里展开进来，避免两边各写一份默认值而漂移。
+            ...(window.RPHubTts?.DEFAULTS || {})
         });
         const v5UnsupportedImageStyles = new Set(['r18', 'lolita25d', 'anime']);
         // 「生图版本」（NAI 的 V4.5/V5）只有 NovelAI 认识，SD 与 ComfyUI 各有自己的模型选择。
@@ -1539,6 +1544,23 @@ let removedProviderConfigCleared = false;
         const settingsHelpTopic = ref('');
         const showActiveToolSettings = ref(false);
         const showUiTemplateSettings = ref(false);
+
+        // ===== 设置页分区折叠状态 =====
+        // 5 个分组：用户 / API 连接与服务 / 生图 / TTS 语音 / 高级。
+        // 默认只展开前两个——设置项太多，全展开时找一项要滚很久；
+        // 用户重新加载页面后不应被折叠状态「藏」住配置，所以不持久化。
+        const settingsSectionOpen = reactive({
+            user: true,
+            api: true,
+            image: false,
+            tts: false,
+            advanced: false
+        });
+        const toggleSettingsSection = (key) => {
+            if (!(key in settingsSectionOpen)) return;
+            settingsSectionOpen[key] = !settingsSectionOpen[key];
+        };
+
         const worldInfoSettings = reactive({
             scanDepth: 2,
             maxDepth: 0,
@@ -2325,6 +2347,202 @@ let removedProviderConfigCleared = false;
 
             if (entry) entry.enabled = enabled;
         };
+
+        // ===== TTS 语音 =====
+        // 三种服务（MiniMax / NovelAI / GPT-SoVITS-V2）的请求细节全部在 tts-services.js，
+        // 这里只负责：设置项下拉、每条消息的朗读按钮、播放控制与设置页接线。
+        const tts = window.RPHubTts;
+        const ttsPlayer = tts.createPlayer();
+
+        const ttsState = reactive({
+            busy: false,          // 正在合成
+            testing: false,       // 正在检测连接
+            playing: false,       // 正在播放
+            activeKey: '',        // 正在朗读的消息标识（用于按钮高亮/转圈）
+            status: '',
+            statusOk: false,
+            previewText: '你好，这是一段语音试听。',
+            newMinimaxVoiceName: '',
+            newMinimaxVoiceId: '',
+            newNovelVoice: ''
+        });
+
+        const ttsProviderOptions = computed(() => tts.PROVIDERS.map(item => ({ value: item.value, label: item.label })));
+        const ttsMinimaxModelOptions = computed(() => tts.MINIMAX_MODELS.map(item => ({ value: item.value, label: item.label })));
+        const ttsMinimaxHostOptions = computed(() => tts.MINIMAX_HOSTS.map(item => ({ value: item.value, label: item.label })));
+        const ttsMinimaxLangOptions = computed(() => tts.MINIMAX_LANGUAGES.map(item => ({ value: item.value, label: item.label })));
+        const ttsMinimaxFormatOptions = computed(() => ['mp3', 'wav', 'flac'].map(value => ({ value, label: value.toUpperCase() })));
+        const ttsGsvLangOptions = computed(() => tts.GSV_LANGS.map(item => ({ value: item.value, label: item.label })));
+        const ttsGsvSplitOptions = computed(() => tts.GSV_TEXT_SPLIT_METHODS.map(item => ({ value: item.value, label: item.label })));
+        const ttsGsvMediaTypeOptions = computed(() => ['auto', 'wav', 'mp3', 'ogg', 'silk', 'flac'].map(value => ({
+            value, label: value === 'auto' ? '自动（跟随服务端）' : value.toUpperCase()
+        })));
+        // 音色下拉随 TTS 方式切换（内置 + 用户自定义 / GPT-SoVITS 的 /speakers 结果）。
+        const ttsVoiceOptions = computed(() => tts.listVoices(settings));
+        const ttsGsvSpeakerOptions = computed(() => (Array.isArray(settings.ttsGsvSpeakers) ? settings.ttsGsvSpeakers : []).map(String));
+
+        // 把一条消息的正文转成可朗读文本（去掉 markdown / 生图 tag / 动作括白）。
+        const buildTtsText = (message) => tts.sanitizeText(message?.content ?? message?.mes ?? '', {
+            stripActions: settings.ttsStripActions !== false,
+            readDialogueOnly: settings.ttsReadDialogueOnly === true
+        });
+
+        const stopTts = () => {
+            ttsPlayer.stop();
+            ttsState.playing = false;
+            ttsState.activeKey = '';
+        };
+
+        // 合成并播放一段文本。key 用来标记「这段话属于哪条消息」，供按钮高亮与再次点击停止。
+        const speakTtsText = async (text, key = '') => {
+            const clean = String(text || '').trim();
+            if (!clean) {
+                showToast('这条消息没有可朗读的文字', 'warning');
+                return;
+            }
+            stopTts();
+            ttsState.busy = true;
+            ttsState.activeKey = key;
+            try {
+                const chunks = settings.ttsSplitByParagraph
+                    ? tts.splitText(clean, settings.ttsMaxChars)
+                    : [clean];
+                const blobs = [];
+                for (const chunk of chunks) {
+                    blobs.push(await tts.synthesize(chunk, settings));
+                }
+                ttsState.playing = true;
+                await ttsPlayer.playSequence(blobs, { volume: settings.ttsVolume, rate: settings.ttsRate });
+            } catch (error) {
+                console.error('TTS 朗读失败:', error);
+                showToast(`语音合成失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.busy = false;
+                ttsState.playing = false;
+                ttsState.activeKey = '';
+            }
+        };
+
+        // 消息卡片上的朗读按钮：正在读同一条就停止，否则开始读。
+        const narrateMessage = (message, index) => {
+            const key = `msg-${index}`;
+            if (ttsState.activeKey === key && (ttsState.busy || ttsState.playing)) {
+                stopTts();
+                return;
+            }
+            speakTtsText(buildTtsText(message), key);
+        };
+
+        const isMessageNarrating = (index) => ttsState.activeKey === `msg-${index}` && (ttsState.busy || ttsState.playing);
+
+        const previewTts = () => speakTtsText(ttsState.previewText, 'preview');
+
+        const testTtsConnection = async () => {
+            ttsState.testing = true;
+            ttsState.status = '';
+            try {
+                const message = await tts.testConnection(settings);
+                ttsState.statusOk = true;
+                ttsState.status = message;
+            } catch (error) {
+                ttsState.statusOk = false;
+                ttsState.status = error?.message || String(error);
+            } finally {
+                ttsState.testing = false;
+            }
+        };
+
+        // GPT-SoVITS 音色 = 参考音频文件名，靠 /speakers 拉取。
+        const refreshGsvSpeakers = async () => {
+            ttsState.testing = true;
+            try {
+                const speakers = await tts.fetchGptSovitsSpeakers(settings.ttsGsvEndpoint);
+                settings.ttsGsvSpeakers = speakers;
+                showToast(speakers.length ? `已拉取 ${speakers.length} 个音色` : '服务端没有返回音色', speakers.length ? 'success' : 'warning');
+            } catch (error) {
+                showToast(`拉取音色失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.testing = false;
+            }
+        };
+
+        // MiniMax 官方不提供音色列表接口，只能手动加 voice_id（与酒馆一致）。
+        const addMinimaxVoice = () => {
+            const voiceId = String(ttsState.newMinimaxVoiceId || '').trim();
+            if (!voiceId) {
+                showToast('请先填写 voice_id', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsMinimaxCustomVoices) ? settings.ttsMinimaxCustomVoices : [];
+            if (list.some(item => item.voice_id === voiceId) || tts.MINIMAX_BUILTIN_VOICES.some(item => item.voice_id === voiceId)) {
+                showToast('这个 voice_id 已经在列表里了', 'warning');
+                return;
+            }
+            settings.ttsMinimaxCustomVoices = [...list, {
+                name: String(ttsState.newMinimaxVoiceName || '').trim() || voiceId,
+                voice_id: voiceId,
+                lang: settings.ttsMinimaxLang === 'auto' ? '' : settings.ttsMinimaxLang
+            }];
+            settings.ttsMinimaxVoiceId = voiceId;
+            ttsState.newMinimaxVoiceName = '';
+            ttsState.newMinimaxVoiceId = '';
+            showToast('已添加音色', 'success');
+        };
+
+        const removeMinimaxVoice = (voiceId) => {
+            const id = String(voiceId || '').trim();
+            if (tts.MINIMAX_BUILTIN_VOICES.some(item => item.voice_id === id)) {
+                showToast('内置示例音色不可删除', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsMinimaxCustomVoices) ? settings.ttsMinimaxCustomVoices : [];
+            if (!list.some(item => item.voice_id === id)) {
+                showToast('这条音色不在自定义列表里', 'warning');
+                return;
+            }
+            settings.ttsMinimaxCustomVoices = list.filter(item => item.voice_id !== id);
+            if (settings.ttsMinimaxVoiceId === id) settings.ttsMinimaxVoiceId = tts.MINIMAX_BUILTIN_VOICES[0].voice_id;
+            showToast('已删除音色', 'success');
+        };
+
+        // NovelAI 的音色名即 seed，随便加一个新名字就是一个新随机音色。
+        const addNovelVoice = () => {
+            const name = String(ttsState.newNovelVoice || '').trim();
+            if (!name) {
+                showToast('请先填写音色名', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsNovelCustomVoices) ? settings.ttsNovelCustomVoices : [];
+            if (list.includes(name) || tts.NOVEL_BUILTIN_VOICES.includes(name)) {
+                showToast('这个音色已经在列表里了', 'warning');
+                return;
+            }
+            settings.ttsNovelCustomVoices = [...list, name];
+            settings.ttsNovelVoice = name;
+            ttsState.newNovelVoice = '';
+            showToast('已添加音色', 'success');
+        };
+
+        const removeNovelVoice = (name) => {
+            const value = String(name || '').trim();
+            if (tts.NOVEL_BUILTIN_VOICES.includes(value)) {
+                showToast('内置音色不可删除', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsNovelCustomVoices) ? settings.ttsNovelCustomVoices : [];
+            if (!list.includes(value)) {
+                showToast('这条音色不在自定义列表里', 'warning');
+                return;
+            }
+            settings.ttsNovelCustomVoices = list.filter(item => item !== value);
+            if (settings.ttsNovelVoice === value) settings.ttsNovelVoice = tts.NOVEL_BUILTIN_VOICES[0];
+            showToast('已删除音色', 'success');
+        };
+
+        // 切会话 / 重新生成时打断朗读，避免上一段语音还在播。
+        watch(() => chatHistory.value.length, () => {
+            if (ttsState.playing || ttsState.busy) stopTts();
+        });
 
         const generatedImageTasks = new Map();
         // 已完成生图的结果缓存（以规范化 Prompt Tag 为 key）：
@@ -10454,6 +10672,14 @@ let removedProviderConfigCleared = false;
             isAutoImageGenEnabled,
             apiStatus, apiLatency, imageGenStatus, imageGenLatency, checkAllStatuses, // Status Exports
             toggleAutoImageGen, setWorldInfoEnabled, handleGeneratedImageReroll,
+            // TTS 语音：设置页分区折叠 + 三种服务的参数与朗读控制
+            settingsSectionOpen, toggleSettingsSection,
+            ttsState, ttsProviderOptions, ttsVoiceOptions, ttsGsvSpeakerOptions,
+            ttsMinimaxModelOptions, ttsMinimaxHostOptions, ttsMinimaxLangOptions,
+            ttsMinimaxFormatOptions, ttsGsvLangOptions, ttsGsvSplitOptions, ttsGsvMediaTypeOptions,
+            narrateMessage, isMessageNarrating, speakTtsText, stopTts, previewTts,
+            testTtsConnection, refreshGsvSpeakers,
+            addMinimaxVoice, removeMinimaxVoice, addNovelVoice, removeNovelVoice,
             quotaValue, quotaLoading, quotaError,
             // Memory System Exports
             classicMemoryPage, classicMemoryPageCount, memorySettings, retryingClassicMemoryId, retryClassicMemory,
