@@ -2678,8 +2678,9 @@
                                                     menu-class="text-sm">
                                                 </custom-select>
                                                 <p class="mt-2 text-xs text-gray-400 leading-relaxed">
-                                                    Speech-2.8 是最新一代（音质/自然度更好），情绪（7 种枚举）与停顿标记全系都支持。
-                                                    本站在 MiniMax 上没有启用「语气词标签」——那是 Speech-2.8 专有能力，为避免默认模型（02 系列）下被逐字念出，一律不下发。
+                                                    Speech-2.8 是最新一代（官方主推，音质与自然度更好），2.6 与 02 系列已归入 Legacy。情绪（7 种枚举）与停顿标记全系都支持；
+                                                    <span class="font-semibold text-rose-700">语气词标签</span>（<code class="px-1 rounded bg-gray-50">[[sfx:叹气]]</code> → <code class="px-1 rounded bg-gray-50">(sighs)</code>）只有
+                                                    <span class="font-semibold text-rose-700">Speech-2.8-HD / 2.8-Turbo</span> 支持——选其它模型时世界书会自动改成「不要写」，避免标签被逐字念出来。
                                                 </p>
                                             </div>
                                             <div v-if="settings.ttsProvider === 'minimax'" class="generation-setting-card">

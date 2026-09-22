@@ -9601,6 +9601,10 @@ let removedProviderConfigCleared = false;
                 content: BUILTIN_PROMPTS.buildAutoVoicePrompt({
                     provider: settings.ttsProvider,
                     voiceBindings: settings.ttsVoiceBindings,
+                    // MiniMax 的语气词标签只有 speech-2.8 能收：白名单的单一真相在 tts-services，
+                    // 这里只把判定结果传进提示词，避免两处各维护一份模型名单。
+                    minimaxModel: settings.ttsMinimaxModel,
+                    minimaxInterjection: tts.supportsMinimaxInterjection(settings.ttsMinimaxModel),
                     // MiMo 的提示词要说明「哪些角色已经有导演演绎」，免得 AI 用文字去改音色。
                     mimoDirections: settings.ttsMimoDirections
                 }),
@@ -9642,11 +9646,13 @@ let removedProviderConfigCleared = false;
             enforceVoiceRules();
         });
 
-        // 换 TTS 服务或改音色绑定后，提示词与正则都要重建
-        // （提示词要按服务能力改写情绪/停顿/语气词的写法），开关状态由 enforceVoiceRules 自动对齐。
+        // 换 TTS 服务 / 改音色绑定 / 换 MiniMax 模型后，提示词与正则都要重建
+        // （提示词要按服务能力改写情绪/停顿/语气词的写法：MiniMax 只有 2.8 支持语气词标签），
+        // 开关状态由 enforceVoiceRules 自动对齐。
         // MiMo 的导演演绎也要进依赖：提示词里会列出「哪些角色已有专属声线设定」。
         watch(() => [
             settings.ttsProvider,
+            settings.ttsMinimaxModel,
             JSON.stringify(settings.ttsVoiceBindings || []),
             JSON.stringify(settings.ttsMimoDirections || [])
         ].join('\u0000'), () => {

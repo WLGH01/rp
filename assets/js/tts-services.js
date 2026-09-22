@@ -31,14 +31,17 @@
     ]);
 
     const MINIMAX_MODELS = Object.freeze([
-        // 2.8 是当前最新一代；语气词标签（(laughs)/(sighs)…）虽然只有它支持，但本站不实现那套
-        // （见下方 supportsMinimaxEmotion 后的说明）——这里保留选项是因为它本身是更新的模型。
-        { value: 'speech-2.8-hd', label: 'Speech-2.8-HD（最新・高音质）' },
-        { value: 'speech-2.8-turbo', label: 'Speech-2.8-Turbo（最新・低延迟）' },
-        { value: 'speech-02-hd', label: 'Speech-02-HD（高音质）' },
-        { value: 'speech-02-turbo', label: 'Speech-02-Turbo（低延迟）' },
-        { value: 'speech-01', label: 'Speech-01（旧版）' },
-        { value: 'speech-01-240228', label: 'Speech-01-240228（旧版）' }
+        // 2.8 是当前主推的一代：官方 Audio 表里写明「40 languages / 7 emotions」，
+        // 而 2.8-hd 的特色是 sound tags（语气词标签）——那是**只有 2.8 才有的能力**（见下）。
+        { value: 'speech-2.8-hd', label: 'Speech-2.8-HD（最新・支持语气词）' },
+        { value: 'speech-2.8-turbo', label: 'Speech-2.8-Turbo（最新・低延迟・支持语气词）' },
+        // 2.6 已被官方归入 Legacy，但仍在售：同样 40 语言 + 7 情绪，**没有**语气词标签。
+        { value: 'speech-2.6-hd', label: 'Speech-2.6-HD（旧版・高音质）' },
+        { value: 'speech-2.6-turbo', label: 'Speech-2.6-Turbo（旧版・低延迟）' },
+        { value: 'speech-02-hd', label: 'Speech-02-HD（旧版・高音质）' },
+        { value: 'speech-02-turbo', label: 'Speech-02-Turbo（旧版・低延迟）' },
+        { value: 'speech-01', label: 'Speech-01（更旧）' },
+        { value: 'speech-01-240228', label: 'Speech-01-240228（更旧）' }
     ]);
 
     const MINIMAX_HOSTS = Object.freeze([
@@ -93,19 +96,62 @@
     // 官方文档只在部分模型上列出该字段，因此按模型白名单放行；不在名单里就整段不下发
     // （官方文档对取值也自相矛盾：HTTP 段写 calm、WebSocket 段写 neutral，这里统一用 neutral）。
     const MINIMAX_EMOTIONS = Object.freeze(['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'neutral']);
+    // 官方 Audio 模型表：2.8 与 2.6 两代都写明「7 emotions supported」；
+    // 更早的 02/01 只有部分模型支持该字段（官方文档只在部分模型上列出），按白名单放行。
     const MINIMAX_EMOTION_MODELS = Object.freeze([
         'speech-2.8-hd', 'speech-2.8-turbo',
+        'speech-2.6-hd', 'speech-2.6-turbo',
         'speech-02-hd', 'speech-02-turbo', 'speech-01-turbo', 'speech-01-hd',
         'speech-2.5-hd-preview', 'speech-2.5-turbo-preview'
     ]);
     const supportsMinimaxEmotion = (model) => MINIMAX_EMOTION_MODELS.includes(String(model || '').trim());
 
-    // 关于 MiniMax 的「语气词 / 非语言标签」（(laughs)/(sighs)/(clear-throat)…）：
-    // 官方 T2A HTTP 文档写明 **只有 speech-2.8-hd / speech-2.8-turbo 支持**，
-    // 而本站默认使用的 speech-02 系列不支持——写了会被当成普通文本逐字念出来
-    // （「（sighs）」→「括号 sighs 括号」）。因此在旧模型上做映射没有意义，
-    // 这里直接不实现该能力：`[[sfx:...]]` 对 MiniMax 一律丢弃（见 translateSfx）。
-    // 如果将来要重新支持，做法是按模型白名单分流，且只对 2.8 下发。
+    // MiniMax「语气词 / 非语言标签」（sound tags / interjection tags）：
+    // 写在待合成文本里的英文圆括号标签，如 `(laughs)`、`(sighs)`、`(clear-throat)`。
+    //
+    // **官方 T2A HTTP 文档明确：仅在 speech-2.8-hd / speech-2.8-turbo 上生效。**
+    // 2.6 与 02 系列都不支持——在那些模型上写标签会被当普通文本逐字念出来
+    // （「(sighs)」→「括号 sighs 括号」），所以必须按模型白名单分流下发。
+    const MINIMAX_INTERJECTIONS = Object.freeze([
+        'laughs', 'chuckle', 'coughs', 'clear-throat', 'groans', 'breath', 'pant',
+        'inhale', 'exhale', 'gasps', 'sniffs', 'sighs', 'snorts', 'burps',
+        'lip-smacking', 'humming', 'hissing', 'emm', 'sneezes'
+    ]);
+    const MINIMAX_INTERJECTION_MODELS = Object.freeze(['speech-2.8-hd', 'speech-2.8-turbo']);
+    const supportsMinimaxInterjection = (model) => MINIMAX_INTERJECTION_MODELS.includes(String(model || '').trim());
+
+    // 中文语气词 → 官方英文标签。AI 写的是与 MiMo 共用的统一标记 `[[sfx:叹气]]`（中文），
+    // 由这里翻成 MiniMax 认的英文标签；AI 直接写 `[[sfx:sighs]]` 也认（见 normalizeMinimaxInterjection）。
+    // 只映射官方 HTTP 文档列出的标签——不认识的绝不臆造（发了不存在的标签同样会被念出来）。
+    const MINIMAX_SFX_ALIASES = Object.freeze({
+        '笑': 'laughs', '大笑': 'laughs', '笑出声': 'laughs', '哈哈': 'laughs', '噗嗤': 'laughs', '放声大笑': 'laughs',
+        '轻笑': 'chuckle', '偷笑': 'chuckle', '嗤笑': 'chuckle', '苦笑': 'chuckle', '低声笑': 'chuckle', '干笑': 'chuckle',
+        '咳嗽': 'coughs', '咳': 'coughs', '清嗓子': 'clear-throat', '清清嗓子': 'clear-throat', '咳了一声': 'clear-throat',
+        '呻吟': 'groans', '闷哼': 'groans', '痛苦出声': 'groans',
+        '呼吸': 'breath', '呼吸声': 'breath', '换气': 'breath',
+        '喘气': 'pant', '喘息': 'pant', '气喘': 'pant', '急促呼吸': 'pant',
+        '吸气': 'inhale', '深呼吸': 'inhale', '深吸一口气': 'inhale', '倒吸一口气': 'gasps', '抽气': 'gasps', '惊呼': 'gasps',
+        '呼气': 'exhale', '吐气': 'exhale', '长出一口气': 'exhale', '舒一口气': 'exhale',
+        '抽鼻子': 'sniffs', '吸鼻子': 'sniffs', '嗅了嗅': 'sniffs', '啜泣': 'sniffs',
+        '叹气': 'sighs', '长叹一口气': 'sighs', '叹息': 'sighs', '叹口气': 'sighs', '唉声叹气': 'sighs',
+        '哼': 'snorts', '冷哼': 'snorts', '鼻音': 'snorts', '嗤鼻': 'snorts', '哼一声': 'snorts',
+        '打嗝': 'burps', '嗝': 'burps',
+        '咂嘴': 'lip-smacking', '咂舌': 'lip-smacking', '舔嘴唇': 'lip-smacking', '咂了咂嘴': 'lip-smacking',
+        '哼唱': 'humming', '哼歌': 'humming', '哼着歌': 'humming',
+        '嘶': 'hissing', '嘶声': 'hissing', '嘶嘶声': 'hissing', '倒吸冷气': 'hissing',
+        '嗯': 'emm', '呃': 'emm', '呃嗯': 'emm', '唔': 'emm', '嗯嗯': 'emm',
+        '打喷嚏': 'sneezes', '喷嚏': 'sneezes', '阿嚏': 'sneezes'
+    });
+
+    // → 官方标签；认不出就返回空串（宁可不发，也不要发一个会被念出来的野生标签）。
+    const normalizeMinimaxInterjection = (value) => {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const lower = raw.toLowerCase();
+        if (MINIMAX_INTERJECTIONS.includes(lower)) return lower;
+        const mapped = MINIMAX_SFX_ALIASES[raw];
+        return mapped && MINIMAX_INTERJECTIONS.includes(mapped) ? mapped : '';
+    };
 
     const GSV_TEXT_SPLIT_METHODS = Object.freeze([
         { value: 'cut0', label: 'cut0 不切' },
@@ -435,21 +481,30 @@
     };
 
     // 语气词 / 发声动作标记（`[[sfx:叹气]]`）按 provider 落地：
-    //   MiMo   → 翻成官方音频标签 `（叹气）`，原样进入合成文本（模型会把它演出来，不念字面）
-    //   其他家 → 直接丢弃（没有这个能力，留着只会被逐字念出来）
-    // MiniMax 也走「丢弃」：它的语气词标签是 speech-2.8 专有，而本站默认跑 speech-02 系列，
-    // 做半套映射只会让默认配置下的用户听到「括号 sighs 括号」。
-    const translateSfx = (raw, provider) => {
+    //   MiniMax 2.8 → 翻成官方英文语气词标签 `(sighs)`（**只有 2.8 支持**，见 MINIMAX_INTERJECTION_MODELS）
+    //   MiMo       → 翻成官方音频标签 `（叹气）`，原样进入合成文本（模型会把它演出来，不念字面）
+    //   其他家（含 MiniMax 2.6/02）→ 直接丢弃：没有这个能力，留着只会被逐字念出来
+    // options.minimaxModel 决定 MiniMax 走哪条分支——这就是「按模型白名单分流」的落点。
+    const translateSfx = (raw, provider, options = {}) => {
         const text = String(raw ?? '');
         if (provider === 'mimo') {
             return text.replace(SFX_PATTERN, (full, word) => `（${String(word).trim()}）`);
+        }
+        if (provider === 'minimax') {
+            if (!supportsMinimaxInterjection(options.minimaxModel)) return text.replace(SFX_PATTERN, '');
+            return text.replace(SFX_PATTERN, (full, word) => {
+                const tag = normalizeMinimaxInterjection(word);
+                return tag ? `(${tag})` : '';
+            });
         }
         return text.replace(SFX_PATTERN, '');
     };
 
     // 标记翻译的统一入口：停顿 + 语气词。所有合成路径都必须走这里，
     // 否则会出现「停顿翻译了、语气词却原样念出来」这类半边生效。
-    const translateVoiceMarkers = (raw, provider) => translateSfx(translatePauses(raw, provider), provider);
+    const translateVoiceMarkers = (raw, provider, options = {}) => (
+        translateSfx(translatePauses(raw, provider), provider, options)
+    );
 
     // ===== MiMo 音色标识：由音色决定模型 =====
     // 值为 `preset:冰糖` / `design:播音员` / `clone:旁白样本`。裸名（老存档、手写绑定）
@@ -1021,9 +1076,9 @@
     // ===== 统一入口 =====
     const synthesize = (text, settings, options = {}) => {
         const provider = String(settings?.ttsProvider || 'minimax');
-        // 停顿与语气词都按 provider 翻译成它自己的语法（MiMo 是括号音频标签，MiniMax 是 <#x#>，
-        // 语气词只有 MiMo 能表达，其余家一律丢弃）。
-        const spoken = translateVoiceMarkers(text, provider);
+        // 停顿与语气词都按 provider 翻译成它自己的语法
+        // （MiMo 是括号音频标签；MiniMax 是 <#x#> 停顿，语气词标签只有 2.8 能收）。
+        const spoken = translateVoiceMarkers(text, provider, { minimaxModel: settings?.ttsMinimaxModel });
         if (provider === 'novel') return synthesizeNovel(spoken, settings, options);
         if (provider === 'gpt-sovits') return synthesizeGptSovits(spoken, settings, options);
         if (provider === 'mimo') return synthesizeMimo(spoken, settings, options);
@@ -1065,7 +1120,7 @@
                 voice,
                 // MiMo 的整体风格标签要在翻译前贴到文本开头（它规定标签必须在开头）。
                 text: applyMimoStyleTag(
-                    translateVoiceMarkers(clean, provider),
+                    translateVoiceMarkers(clean, provider, { minimaxModel: settings?.ttsMinimaxModel }),
                     provider === 'mimo' ? segment.emotion : ''
                 )
             });
@@ -1233,6 +1288,11 @@
         MINIMAX_EMOTIONS,
         MINIMAX_EMOTION_MODELS,
         supportsMinimaxEmotion,
+        MINIMAX_INTERJECTIONS,
+        MINIMAX_INTERJECTION_MODELS,
+        MINIMAX_SFX_ALIASES,
+        supportsMinimaxInterjection,
+        normalizeMinimaxInterjection,
         NOVEL_BUILTIN_VOICES,
         GSV_TEXT_SPLIT_METHODS,
         GSV_LANGS,

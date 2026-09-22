@@ -445,6 +445,10 @@ console.log('\n14) 源码级断言：开关两个方向都要同步世界书与�
         appSource.includes('|| scriptName === voiceSfxRegexName'));
     assertTrue('MiMo 走 OpenAI 兼容的 chat/completions',
         readFileSync(join(root, 'assets/js/tts-services.js'), 'utf8').includes('/chat/completions'));
+    assertTrue('世界书提示词按 MiniMax 模型能力分流（语气词标签只有 2.8 能收）',
+        appSource.includes('minimaxInterjection: tts.supportsMinimaxInterjection(settings.ttsMinimaxModel)'));
+    assertTrue('换 MiniMax 模型会重建世界书提示词',
+        appSource.includes('settings.ttsProvider,\n            settings.ttsMinimaxModel,'));
 }
 
 // ---------------------------------------------------------------------------
@@ -636,51 +640,104 @@ console.log('\n20) MiMo 提示词：世界书教复合情绪与语气词，AI �
 }
 
 // ---------------------------------------------------------------------------
-console.log('\n21) MiniMax 语气词标签：官方是 speech-2.8 专有 → 本站不实现，一律丢弃');
+console.log('\n21) MiniMax 语气词标签：仅 speech-2.8 支持，中文标记翻成官方英文标签');
 // ---------------------------------------------------------------------------
 {
-    // 官方 T2A HTTP 文档写明：interjection tags 仅在 speech-2.8-hd / speech-2.8-turbo 上生效，
-    // speech-02 系列不支持。本站默认跑 speech-02，做半套映射只会让默认配置听到
-    // 「（sighs）」被逐字念出来，因此对 MiniMax 一律丢弃 [[sfx:...]]（与另两家同策）。
-    assertEqual('MiniMax 下语气词一律丢弃',
+    // 官方 T2A HTTP 文档：interjection tags 仅在 speech-2.8-hd / speech-2.8-turbo 上生效；
+    // 2.6 与 02 系列都没有（写了会被当普通文本逐字念成「括号 sighs 括号」），故按模型白名单分流。
+    assertTrue('2.8-hd 支持语气词标签', tts.supportsMinimaxInterjection('speech-2.8-hd'));
+    assertTrue('2.8-turbo 支持语气词标签', tts.supportsMinimaxInterjection('speech-2.8-turbo'));
+    assertEqual('2.6-hd 不支持（官方只给 2.8 标 sound tags）',
+        tts.supportsMinimaxInterjection('speech-2.6-hd'), false);
+    assertEqual('2.6-turbo 不支持', tts.supportsMinimaxInterjection('speech-2.6-turbo'), false);
+    assertEqual('02-hd 不支持', tts.supportsMinimaxInterjection('speech-02-hd'), false);
+    assertTrue('2.8 与 2.6 都在情绪白名单里（官方 Audio 表：7 emotions）',
+        tts.supportsMinimaxEmotion('speech-2.8-hd')
+        && tts.supportsMinimaxEmotion('speech-2.6-hd')
+        && tts.supportsMinimaxEmotion('speech-2.6-turbo'));
+    assertTrue('模型下拉里有 2.8 与 2.6 两代共四个新型号',
+        ['speech-2.8-hd', 'speech-2.8-turbo', 'speech-2.6-hd', 'speech-2.6-turbo']
+            .every(model => tts.MINIMAX_MODELS.some(item => item.value === model)));
+    assertTrue('旧型号仍保留在列表里（老存档不能失去自己的选项）',
+        ['speech-02-hd', 'speech-02-turbo', 'speech-01', 'speech-01-240228']
+            .every(model => tts.MINIMAX_MODELS.some(item => item.value === model)));
+
+    assertEqual('中文「叹气」→ sighs', tts.normalizeMinimaxInterjection('叹气'), 'sighs');
+    assertEqual('中文「轻笑」→ chuckle', tts.normalizeMinimaxInterjection('轻笑'), 'chuckle');
+    assertEqual('中文「大笑」→ laughs', tts.normalizeMinimaxInterjection('大笑'), 'laughs');
+    assertEqual('中文「清嗓子」→ clear-throat', tts.normalizeMinimaxInterjection('清嗓子'), 'clear-throat');
+    assertEqual('官方英文标签原样通过', tts.normalizeMinimaxInterjection('coughs'), 'coughs');
+    assertEqual('英文标签大小写不敏感', tts.normalizeMinimaxInterjection('SIGHS'), 'sighs');
+    assertEqual('认不出的词返回空串（宁可不发，也不发会被念出来的标签）',
+        tts.normalizeMinimaxInterjection('转身'), '');
+    assertEqual('非 HTTP 版标签（whistles）也不放行', tts.normalizeMinimaxInterjection('whistles'), '');
+
+    // 官方标签表必须逐项可原样下发：漏一个就会在翻译时被静默丢弃。
+    const missing = tts.MINIMAX_INTERJECTIONS.filter(tag => tts.normalizeMinimaxInterjection(tag) !== tag);
+    assertEqual('官方 19 个标签全部可原样下发', missing, []);
+
+    assertEqual('2.8 下 [[sfx:叹气]] → (sighs)',
+        tts.translateSfx('a[[sfx:叹气]]b', 'minimax', { minimaxModel: 'speech-2.8-hd' }), 'a(sighs)b');
+    assertEqual('2.8-turbo 同样生效',
+        tts.translateSfx('a[[sfx:大笑]]b', 'minimax', { minimaxModel: 'speech-2.8-turbo' }), 'a(laughs)b');
+    assertEqual('2.8 下停顿与语气词一次翻完',
+        tts.translateVoiceMarkers('她说[[sfx:叹气]]好[[pause:0.5]]吧', 'minimax', { minimaxModel: 'speech-2.8-hd' }),
+        '她说(sighs)好<#0.50#>吧');
+    assertEqual('2.6 下语气词整条丢弃（该代不支持，留着会被念出来）',
+        tts.translateSfx('a[[sfx:叹气]]b', 'minimax', { minimaxModel: 'speech-2.6-hd' }), 'ab');
+    assertEqual('02 下同样丢弃',
+        tts.translateSfx('a[[sfx:叹气]]b', 'minimax', { minimaxModel: 'speech-02-hd' }), 'ab');
+    assertEqual('没传模型时保守丢弃（不知道能力就别发）',
         tts.translateSfx('a[[sfx:叹气]]b', 'minimax'), 'ab');
-    assertEqual('即使显式传 2.8 也丢弃（本站不启用该能力）',
-        tts.translateSfx('a[[sfx:叹气]]b', 'minimax', { minimaxModel: 'speech-2.8-hd' }), 'ab');
-    assertEqual('MiniMax 的停顿语义未被影响',
-        tts.translateVoiceMarkers('a[[sfx:叹气]][[pause:0.5]]b', 'minimax'), 'a<#0.50#>b');
-    assertEqual('MiMo 仍保留语气词（唯一支持的一家）',
+    assertEqual('认不出的语气词不会污染文本',
+        tts.translateSfx('a[[sfx:转身]]b', 'minimax', { minimaxModel: 'speech-2.8-hd' }), 'ab');
+    assertEqual('MiMo 路径不受 MiniMax 模型判定影响',
         tts.translateSfx('a[[sfx:叹气]]b', 'mimo'), 'a（叹气）b');
-    assertEqual('服务层不再导出语气词白名单（避免「半套能力」复活）',
-        typeof tts.supportsMinimaxInterjection, 'undefined');
-    assertEqual('也不再导出语气词映射表', typeof tts.normalizeMinimaxInterjection, 'undefined');
-    assertTrue('2.8 仍留在模型列表与情绪白名单里（它本身是更新的模型）',
-        tts.MINIMAX_MODELS.some(item => item.value === 'speech-2.8-hd')
-        && tts.supportsMinimaxEmotion('speech-2.8-hd'));
-    assertEqual('默认模型仍是 speech-02-hd（不擅自把默认值换成 2.8）',
+    assertEqual('默认模型仍是 speech-02-hd（不擅自改默认值）',
         tts.DEFAULTS.ttsMinimaxModel, 'speech-02-hd');
 }
 
 // ---------------------------------------------------------------------------
-console.log('\n22) MiniMax 世界书：情绪粒度（一块一个情绪 → 拆块换情绪）');
+console.log('\n22) MiniMax 世界书：语气词按模型分流 + 情绪粒度（一块一个情绪）');
 // ---------------------------------------------------------------------------
 {
-    const p = prompts.buildAutoVoicePrompt({ provider: 'minimax' });
+    const withTag = prompts.buildAutoVoicePrompt({
+        provider: 'minimax', minimaxModel: 'speech-2.8-hd', minimaxInterjection: true
+    });
+    assertTrue('2.8 提示词给出语气词标记写法', withTag.includes('[[sfx:叹气]]'));
+    assertTrue('2.8 提示词列出官方英文标签映射',
+        withTag.includes('(sighs)') && withTag.includes('(clear-throat)') && withTag.includes('(chuckle)'));
+    assertTrue('2.8 提示词说明它能在同一句内做细节变化', withTag.includes('同一句台词内部做细节变化'));
+    assertTrue('2.8 提示词禁止把身体动作当语气词', withTag.includes('不要写转身、坐下、挥手这类身体动作'));
+    assertTrue('2.8 提示词点名当前模型', withTag.includes('speech-2.8-hd'));
+    assertTrue('2.8 提示词要求不要堆砌标签', withTag.includes('不要堆砌'));
+
+    const noTag = prompts.buildAutoVoicePrompt({
+        provider: 'minimax', minimaxModel: 'speech-2.6-hd', minimaxInterjection: false
+    });
+    assertTrue('2.6/02 提示词明确说不支持语气词标签', noTag.includes('不支持语气词标签'));
+    assertTrue('2.6/02 提示词不给出可照抄的语气词示例', !noTag.includes('[[sfx:叹气]]'));
+    assertTrue('2.6/02 提示词建议换到 Speech-2.8', noTag.includes('Speech-2.8'));
+
+    // 情绪粒度与模型无关：两种分支都必须交代清楚
+    const p = prompts.buildAutoVoicePrompt({ provider: 'minimax', minimaxModel: 'speech-02-hd' });
     assertTrue('明确「一个语音块只能有一个情绪」', p.includes('一个语音块只能有一个情绪'));
     assertTrue('给出同角色拆块换情绪的示例', p.includes('『哦？』[[/voice]][[voice:'));
     assertTrue('指出复合情绪不是合法取值', p.includes('复合情绪不是合法取值'));
     assertTrue('保留 7 种情绪枚举', p.includes('happy / sad / angry'));
     assertTrue('保留停顿写法', p.includes('[[pause:秒数]]'));
-    assertTrue('不出现语气词标记（官方专有、本站不实现）', !p.includes('[[sfx:'));
-    assertTrue('不出现英文语气词标签', !p.includes('(sighs)'));
+    assertTrue('情绪粒度说明在 2.8 分支里同样存在', withTag.includes('一个语音块只能有一个情绪'));
 
     const bound = prompts.buildAutoVoicePrompt({
-        provider: 'minimax', voiceBindings: [{ name: '姜黎', voice: 'v1' }]
+        provider: 'minimax', minimaxInterjection: true, voiceBindings: [{ name: '姜黎', voice: 'v1' }]
     });
     assertTrue('拆块示例使用用户真实绑定的角色名', bound.includes('[[voice:姜黎|neutral]]'));
     assertTrue('拆块示例把两种情绪写进两个块', bound.includes('|angry]]『你再说一遍试试。』[[/voice]]'));
+    assertTrue('语气词示例也使用绑定的角色名', bound.includes('[[voice:姜黎|sad]]『我没事。'));
 
     const mimo = prompts.buildAutoVoicePrompt({ provider: 'mimo' });
-    assertTrue('MiMo 分支仍保留语气词写法', mimo.includes('[[sfx:叹气]]'));
+    assertTrue('MiMo 分支仍保留自己的语气词写法',
+        mimo.includes('[[sfx:叹气]]') && !mimo.includes('(sighs)'));
     const novel = prompts.buildAutoVoicePrompt({ provider: 'novel' });
     assertTrue('NovelAI 提示词不提语气词', !novel.includes('[[sfx:'));
 }

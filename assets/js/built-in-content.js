@@ -243,13 +243,19 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
     // 说话人；必须由标记来界定「这句话是谁说的」。因此这里把完整写法、具体示例、
     // 以及「只写引号不允许」都写死，并声明本条优先于卡片/预设里的对白格式要求。
     const buildAutoVoicePrompt = ({
-        provider = 'minimax', voiceBindings = [], mimoDirections = []
+        provider = 'minimax', voiceBindings = [], mimoDirections = [],
+        minimaxModel = '', minimaxInterjection = false
     } = {}) => {
         const bindings = (Array.isArray(voiceBindings) ? voiceBindings : [])
             .map(item => ({ name: String(item?.name || '').trim(), voice: String(item?.voice || '').trim() }))
             .filter(item => item.name);
         const isMinimax = provider === 'minimax';
         const isMimo = provider === 'mimo';
+        // 语气词标签是 speech-2.8-hd / 2.8-turbo 专有（2.6 与 02 系列都不支持，官方 T2A 文档写明）。
+        // 白名单的单一真相在 tts-services 的 supportsMinimaxInterjection，这里只接收判定结果，
+        // 避免两处各维护一份模型名单。
+        const hasInterjection = isMinimax && minimaxInterjection === true;
+        const minimaxModelName = String(minimaxModel || '').trim() || 'speech-2.8';
         // 示例优先用用户真实绑定过的角色名，AI 可以直接照抄格式。
         const sampleA = bindings[0]?.name || '角色甲';
         const sampleB = bindings[1]?.name || '角色乙';
@@ -294,13 +300,25 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             rules.push('当前语音服务不支持停顿标记，请改用标点表达停顿（短停顿用「，」，长停顿用「……」或「。」）。');
         }
 
-        // 语气词 / 发声动作：目前只有 MiMo 能真正演出来（把 `[[sfx:叹气]]` 变成音频标签）。
-        // MiniMax 的同类标签（(laughs)/(sighs)…）是 speech-2.8 专有，本站默认跑 speech-02，
-        // 因此**对 MiniMax 一个字都不提**——不提，AI 就不会去写一个会被逐字念出来的标签。
+        // 语气词 / 发声动作：MiMo 与 MiniMax 2.8 都能真正演出来，但两家的标签语法完全不同，
+        // 且 MiniMax 的这套只在 2.8 上生效——因此提示词必须按「当前 provider + 当前模型」分流。
         if (isMimo) {
             rules.push('需要叹气、哽咽、哭笑不得、吸气、低语、咳嗽这类**能发出声音**的表演时，就在台词中间插入 [[sfx:标签]]：'
                 + '[[sfx:叹气]] [[sfx:长叹一口气]] [[sfx:轻笑]] [[sfx:冷笑]] [[sfx:哽咽]] [[sfx:吸气]] [[sfx:低语]] [[sfx:轻声]] [[sfx:语速加快]]。'
                 + '标签里只写声音，**不要写身体动作**（转身、坐下、挥手、皱眉之类都无效）；一句话最多一个语气词标签，不要堆砌。');
+        } else if (hasInterjection) {
+            rules.push(`**当前模型（${minimaxModelName}）支持语气词标签**。`
+                + '在台词中间任意位置插入 [[sfx:标签]]，系统会翻成官方英文标签，让这句台词出现真实的气声、笑与咳：\n'
+                + '   [[sfx:叹气]]→(sighs)、[[sfx:轻笑]]→(chuckle)、[[sfx:大笑]]→(laughs)、[[sfx:咳嗽]]→(coughs)、[[sfx:清嗓子]]→(clear-throat)、'
+                + '[[sfx:吸气]]→(inhale)、[[sfx:呼气]]→(exhale)、[[sfx:喘息]]→(pant)、[[sfx:呼吸]]→(breath)、[[sfx:冷哼]]→(snorts)、'
+                + '[[sfx:呻吟]]→(groans)、[[sfx:打喷嚏]]→(sneezes)、[[sfx:抽鼻子]]→(sniffs)、[[sfx:咂嘴]]→(lip-smacking)、[[sfx:哼唱]]→(humming)、[[sfx:嗯]]→(emm)。\n'
+                + '   它的价值是**能在同一句台词内部做细节变化**，正好补上「一个语音块只能有一个情绪」的粒度不足：\n'
+                + `   [[voice:${sampleA}|sad]]『我没事。[[sfx:抽鼻子]][[pause:0.6]]真的。[[sfx:叹气]]』[[/voice]]\n`
+                + '   只写能发出声音的内容（叹气、笑、咳嗽、吸气…），**不要写转身、坐下、挥手这类身体动作**；'
+                + '一处最多一个标签，整句最多两三个，不要堆砌——堆多了会显得刻意、也不像真人说话。');
+        } else if (isMinimax) {
+            rules.push('当前模型**不支持语气词标签**（那是 Speech-2.8 的能力），请**不要**写 [[sfx:...]] 这类标记；'
+                + '需要气息感就靠标点与停顿表达；若确实需要，可到设置里把模型换成 Speech-2.8-HD / 2.8-Turbo。');
         }
 
         rules.push('即使正文使用 HTML 或美化面板排版，对白也照常使用该标记包裹。');
@@ -317,7 +335,9 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             '<auto_voice>',
             isMimo
                 ? '用户已开启自动语音（小米 MiMo-V2.5-TTS）。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪、语气词与停顿都会被 MiMo 真正"演"出来。'
-                : '用户已开启自动语音。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪与停顿都会被真正合成出来。',
+                : (hasInterjection
+                    ? `用户已开启自动语音（MiniMax ${minimaxModelName}）。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪、语气词与停顿都会被真正合成出来。`
+                    : '用户已开启自动语音。请把**人物说出口的台词**用语音标记标出来：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读；情绪与停顿都会被真正合成出来。'),
             '',
             '【写法】每句台词都必须写成下面这种完整形式——**标记在外、引号在内**：',
             '[[voice:角色名|情绪]]『台词原文』[[/voice]]',
@@ -330,7 +350,9 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             `[[voice:${sampleB}]]『挣点钱。』[[/voice]]`,
             isMimo
                 ? `[[voice:${sampleA}|温柔但疲惫]][[sfx:长叹一口气]]『……算了，先这样吧。』[[/voice]]`
-                : `[[voice:${sampleA}|sad]]『……算了，先这样吧。』[[/voice]]`,
+                : (hasInterjection
+                    ? `[[voice:${sampleA}|sad]]『……算了，先这样吧。[[sfx:叹气]]』[[/voice]]`
+                    : `[[voice:${sampleA}|sad]]『……算了，先这样吧。』[[/voice]]`),
             isMimo
                 ? `[[voice:${sampleB}|哽咽着强装镇定]]『我没事。[[pause:0.8]]真的没事。』[[/voice]]`
                 : `[[voice:${sampleB}|neutral]]『哦？』[[/voice]][[voice:${sampleB}|angry]]『你再说一遍试试。』[[/voice]]`,
