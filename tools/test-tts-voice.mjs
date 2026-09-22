@@ -262,7 +262,7 @@ console.log('\n10) 两条系统正则的渲染顺序契约（清理必须排在�
     // 与 app.js 里 enforceVoiceRules 写入的内容逐字一致，任何一边改动都会在这里暴露。
     const renderScript = {
         regex: '/\\[\\[voice:\\s*([^\\]|"\'<>\\r\\n]{1,40}?)\\s*(?:\\|\\s*([a-zA-Z\\u4e00-\\u9fff]{0,20}?)\\s*)?\\]\\]\\s*([^"<>]*?)\\s*\\[\\[\\/voice\\]\\]/gi',
-        replacement: '<span class="tts-voice-line" role="button" tabindex="0" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="点击朗读这句台词">$3</span>'
+        replacement: '<button type="button" class="tts-voice-btn" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="朗读这句台词" aria-label="朗读这句台词"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 4.4v15.2a1 1 0 0 1-1.7.7L7.1 16H4.5A1.5 1.5 0 0 1 3 14.5v-5A1.5 1.5 0 0 1 4.5 8h2.6l4.2-4.3a1 1 0 0 1 1.7.7Z"/></svg></button>$3'
     };
     const cleanupScript = {
         regex: '/(data-tts-text="[^"]*")|\\[\\[(?:pause:\\s*\\d+(?:\\.\\d+)?|emo:\\s*[a-zA-Z\\u4e00-\\u9fff]+|\\/?voice\\b[^\\]]*)\\]\\]|<#\\s*\\d+(?:\\.\\d+)?\\s*#>/gi',
@@ -280,7 +280,10 @@ console.log('\n10) 两条系统正则的渲染顺序契约（清理必须排在�
     const rendered = apply(msg, [renderScript, cleanupScript]);
     // 只看**可见文字**（剥掉标签属性），属性里按设计要保留停顿供点击朗读使用。
     const visibleText = rendered.replace(/<[^>]*>/g, '');
-    assertTrue('渲染后产出语音框', rendered.includes('class="tts-voice-line"'));
+    assertTrue('渲染后产出语音按钮', rendered.includes('class="tts-voice-btn"'));
+    assertTrue('按钮是 <button>（可聚焦、可键盘触发）', rendered.includes('<button type="button" class="tts-voice-btn"'));
+    assertTrue('按钮排在台词**之前**', rendered.indexOf('tts-voice-btn') < rendered.indexOf('你好呀！'));
+    assertTrue('台词本身不再被包成高亮块', !rendered.includes('>你好呀！[[pause:0.5]]再见。</span>'));
     assertTrue('渲染后可见文字里没有标记', !visibleText.includes('[[voice:'));
     assertTrue('渲染后可见文字里没有停顿标记', !visibleText.includes('[[pause:'));
     assertTrue('属性里保留了停顿（点击朗读要用）', rendered.includes('data-tts-text="你好呀！[[pause:0.5]]再见。"'));
@@ -289,17 +292,17 @@ console.log('\n10) 两条系统正则的渲染顺序契约（清理必须排在�
 
     // 顺序反过来（先清理）会破坏成对匹配——这正是必须防住的回归。
     const wrongOrder = apply(msg, [cleanupScript, renderScript]);
-    assertTrue('若清理先跑，成对匹配失效、渲染不出语音框（守住顺序契约）',
-        !wrongOrder.includes('class="tts-voice-line"'));
+    assertTrue('若清理先跑，成对匹配失效、渲染不出语音按钮（守住顺序契约）',
+        !wrongOrder.includes('class="tts-voice-btn"'));
 
     // 关掉自动语音时只剩清理正则：标记必须被抹掉而不是原样显示。
     const cleanupOnly = apply(msg, [cleanupScript]);
     assertTrue('关闭后标记不会漏到界面上', !cleanupOnly.includes('[[voice:') && !cleanupOnly.includes('[[pause:'));
 
-    // 美化卡：正文在 HTML 面板内部时也必须能包上语音框。
+    // 美化卡：正文在 HTML 面板内部时也必须能包上语音按钮。
     const fancy = '<div class="panel"><p style="color:red">[[voice:小雨|happy]]老板，来一杯。[[pause:1.2]]谢谢！[[/voice]]</p></div>';
     const fancyRendered = apply(fancy, [renderScript, cleanupScript]);
-    assertTrue('美化卡（HTML 面板内）也能渲染出语音框', fancyRendered.includes('class="tts-voice-line"'));
+    assertTrue('美化卡（HTML 面板内）也能渲染出语音按钮', fancyRendered.includes('class="tts-voice-btn"'));
     assertTrue('美化卡内属性保留停顿', fancyRendered.includes('data-tts-text="老板，来一杯。[[pause:1.2]]谢谢！"'));
     assertTrue('美化卡原有 HTML 结构未被破坏', fancyRendered.includes('<div class="panel">'));
 

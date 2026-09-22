@@ -2425,14 +2425,28 @@ let removedProviderConfigCleared = false;
         const ttsVoiceOptions = computed(() => tts.listVoices(settings));
         const ttsGsvSpeakerOptions = computed(() => (Array.isArray(settings.ttsGsvSpeakers) ? settings.ttsGsvSpeakers : []).map(String));
 
+        // 取出「该被念出来」的那部分正文。
+        //
+        // 绝不能直接用消息的原始 content：它里面除了正文，还混着
+        //   ① CoT / 思考块（<cot>…</cot>、<thinking>…</thinking>，或模型原生的 reasoning 字段）
+        //   ② UI 变量更新块（<ui_template_updates>{…JSON…}</ui_template_updates>）
+        // 这两类都不是剧情，念出来就是「模型在自言自语 + 报 JSON」。
+        // 与界面渲染保持同一口径：先 parseCot 取 main（丢弃 CoT），再剥 UI 变量块。
+        const getSpeakableMessageText = (message) => {
+            const raw = String(message?.content ?? message?.mes ?? '');
+            if (!raw.trim()) return '';
+            const main = parseCot(raw).main || raw;
+            return stripUiTemplateUpdateBlock(main);
+        };
+
         // 把一条消息的正文转成可朗读文本（去掉 markdown / 生图 tag / 语音标记 / 动作括白）。
-        const buildTtsText = (message) => tts.sanitizeText(message?.content ?? message?.mes ?? '', {
+        const buildTtsText = (message) => tts.sanitizeText(getSpeakableMessageText(message), {
             stripActions: settings.ttsStripActions !== false,
             readDialogueOnly: settings.ttsReadDialogueOnly === true
         });
 
         // 按「语音块」把一条消息拆成待朗读片段：每段带自己的音色与情绪。
-        const buildTtsParts = (message) => tts.buildSpeechParts(message?.content ?? message?.mes ?? '', settings, {
+        const buildTtsParts = (message) => tts.buildSpeechParts(getSpeakableMessageText(message), settings, {
             stripActions: settings.ttsStripActions !== false,
             readDialogueOnly: settings.ttsReadDialogueOnly === true
         });
@@ -2598,7 +2612,7 @@ let removedProviderConfigCleared = false;
 
         // 正文点击的统一入口：语音框优先，其余交给生图卡片处理。
         const handleMessageContentClick = (event, messageIndex) => {
-            const line = event.target?.closest?.('.tts-voice-line');
+            const line = event.target?.closest?.('.tts-voice-btn');
             if (line) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -9202,7 +9216,9 @@ let removedProviderConfigCleared = false;
                 // 出现引号会把 data-tts-* 属性截断（从而让后续标记泄漏到界面上）。
                 // 角色名与情绪同样限制在安全字符集内。
                 regex: '/\\[\\[voice:\\s*([^\\]|"\'<>\\r\\n]{1,40}?)\\s*(?:\\|\\s*([a-zA-Z\\u4e00-\\u9fff]{0,20}?)\\s*)?\\]\\]\\s*([^"<>]*?)\\s*\\[\\[\\/voice\\]\\]/gi',
-                replacement: '<span class="tts-voice-line" role="button" tabindex="0" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="点击朗读这句台词">$3</span>',
+                // 渲染成「台词前的一个小喇叭按钮」+ 原样台词，而不是把整句台词做成高亮块：
+                // 整句高亮会跟正文抢视线（尤其美化卡里），小按钮不打扰阅读，点起来也够大。
+                replacement: '<button type="button" class="tts-voice-btn" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="朗读这句台词" aria-label="朗读这句台词"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 4.4v15.2a1 1 0 0 1-1.7.7L7.1 16H4.5A1.5 1.5 0 0 1 3 14.5v-5A1.5 1.5 0 0 1 4.5 8h2.6l4.2-4.3a1 1 0 0 1 1.7.7Z"/><path d="M16.1 8.3a1 1 0 0 1 1.4.1 5.5 5.5 0 0 1 0 7.2 1 1 0 0 1-1.5-1.3 3.5 3.5 0 0 0 0-4.6 1 1 0 0 1 .1-1.4Z"/></svg></button>$3',
                 placement: [2],
                 markdownOnly: true,
                 promptOnly: false,

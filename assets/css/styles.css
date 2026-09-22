@@ -1961,47 +1961,78 @@
             display: none;
         }
 
-        /* 语音框：正文里的可点击台词。点击即按该角色的音色朗读。
-           视觉上刻意做得像「台词高亮」而不是按钮——它出现在正文中间，
-           太重的按钮样式会破坏阅读节奏；hover / 播放中才明显。 */
-        .tts-voice-line {
-            display: inline;
-            padding: 0.05em 0.2em;
-            margin: 0 -0.05em;
-            border-radius: 0.35em;
-            border-bottom: 1px solid rgba(225, 29, 72, 0.35);
-            background: rgba(255, 241, 242, 0.55);
-            color: inherit;
+        /* 语音按钮：放在台词前面，点一下就按该角色的音色朗读这一句。
+           刻意做得**不抢视线**——默认只是淡淡一个小喇叭，不改变台词排版，
+           鼠标移到消息上或直接悬停按钮时才明显起来；播放中常亮。
+           点击区域比图标本身大一圈（padding），手机上也好点。 */
+        .tts-voice-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.5em;
+            height: 1.5em;
+            margin: 0 0.12em 0 0;
+            padding: 0.28em;
+            border: 0;
+            border-radius: 999px;
+            background: transparent;
+            color: #94a3b8;
+            vertical-align: -0.35em;
+            opacity: 0.5;
             cursor: pointer;
-            transition: background 160ms ease, border-color 160ms ease;
+            transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
+            -webkit-tap-highlight-color: transparent;
         }
 
-        .tts-voice-line:hover {
-            background: rgba(255, 228, 230, 0.92);
-            border-bottom-color: rgba(190, 18, 60, 0.7);
+        .tts-voice-btn svg {
+            display: block;
+            width: 100%;
+            height: 100%;
         }
 
-        .tts-voice-line:focus-visible {
+        /* 鼠标移到消息气泡上时稍微显眼一点，方便发现（触屏无 hover，靠默认可见度）。 */
+        .msg-bubble-glass:hover .tts-voice-btn,
+        .group:hover .tts-voice-btn {
+            opacity: 0.85;
+        }
+
+        .tts-voice-btn:hover {
+            opacity: 1;
+            color: #e11d48;
+            background: rgba(255, 241, 242, 0.9);
+        }
+
+        .tts-voice-btn:focus-visible {
+            opacity: 1;
             outline: 2px solid rgba(225, 29, 72, 0.55);
             outline-offset: 1px;
         }
 
-        /* 正在朗读这一句：常亮，移动端（无 hover）也看得见。 */
-        .tts-voice-line.is-narrating {
-            background: rgba(254, 205, 211, 0.95);
-            border-bottom-color: #be123c;
-            color: #881337;
+        /* 正在朗读这一句：常亮 + 轻微脉动，移动端也看得见。 */
+        .tts-voice-btn.is-narrating {
+            opacity: 1;
+            color: #be123c;
+            background: rgba(254, 205, 211, 0.9);
+            animation: tts-voice-pulse 1.4s ease-in-out infinite;
         }
 
-        [data-app-theme="dark"] .tts-voice-line {
-            background: rgba(159, 18, 57, 0.28);
-            border-bottom-color: rgba(251, 113, 133, 0.5);
+        @keyframes tts-voice-pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.12); }
         }
 
-        [data-app-theme="dark"] .tts-voice-line:hover,
-        [data-app-theme="dark"] .tts-voice-line.is-narrating {
-            background: rgba(190, 18, 60, 0.45);
+        [data-app-theme="dark"] .tts-voice-btn {
+            color: #94a3b8;
+        }
+
+        [data-app-theme="dark"] .tts-voice-btn:hover {
+            color: #fda4af;
+            background: rgba(159, 18, 57, 0.4);
+        }
+
+        [data-app-theme="dark"] .tts-voice-btn.is-narrating {
             color: #ffe4e6;
+            background: rgba(190, 18, 60, 0.55);
         }
 
         @keyframes generated-image-spinner-rotate {

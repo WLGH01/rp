@@ -1244,7 +1244,7 @@
                 };
 
                 document.addEventListener('click', function(event) {
-                    var target = event.target && event.target.closest && event.target.closest('.tts-voice-line');
+                    var target = event.target && event.target.closest && event.target.closest('.tts-voice-btn');
                     if (target) {
                         event.preventDefault();
                         event.stopPropagation();
