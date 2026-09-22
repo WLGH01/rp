@@ -315,7 +315,8 @@ console.log('\n11) 提示词按 provider 能力分流（用哪家就按哪家写
     const minimaxPrompt = prompts.buildAutoVoicePrompt({ provider: 'minimax' });
     assertTrue('MiniMax 提示词给出情绪白名单', minimaxPrompt.includes('happy / sad / angry'));
     assertTrue('MiniMax 提示词给出停顿写法', minimaxPrompt.includes('[[pause:秒数]]'));
-    assertTrue('提示词说明只标记人物说的话', minimaxPrompt.includes('人物说的话'));
+    assertTrue('提示词说明只标记人物说的话', minimaxPrompt.includes('人物说出口的台词'));
+    assertTrue('提示词排除旁白/动作/心理描写', minimaxPrompt.includes('旁白、动作、心理与环境描写'));
     assertTrue('提示词要求兼容美化卡/HTML', minimaxPrompt.includes('美化面板'));
 
     const novelPrompt = prompts.buildAutoVoicePrompt({ provider: 'novel' });
@@ -339,8 +340,51 @@ console.log('\n12) next_response 提示词带上自动语音指令');
 {
     const on = prompts.buildNextResponsePrompt({ autoVoiceEnabled: true });
     assertTrue('开启时要求使用语音标记', on.includes('[[voice:角色名|情绪]]'));
+    assertTrue('开启时交代「标记在外、引号在内」', on.includes('标记在外、引号在内'));
+    assertTrue('开启时禁止「只写引号不写标记」', on.includes('只写引号而不写标记是不允许的'));
     const off = prompts.buildNextResponsePrompt({ autoVoiceEnabled: false });
     assertTrue('关闭时不含语音标记说明', !off.includes('[[voice:角色名|情绪]]'));
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n13) 提示词必须交代「台词本身怎么写」（第一版漏了：AI 只写『』不写标记）');
+// ---------------------------------------------------------------------------
+{
+    const p = prompts.buildAutoVoicePrompt({ provider: 'minimax', voiceBindings: [{ name: '姜黎', voice: 'v1' }] });
+    assertTrue('写明「标记在外、引号在内」', p.includes('标记在外、引号在内'));
+    assertTrue('示例把引号包在标记内部', p.includes('[[voice:姜黎|happy]]『哟，人都齐了吧。』[[/voice]]'));
+    assertTrue('示例使用用户已绑定的角色名', p.includes('姜黎'));
+    assertTrue('明确禁止「只写引号不写标记」', p.includes('而不写 [[voice:...]] 标记是不允许的'));
+    assertTrue('解释为什么：引号界定不了说话人', p.includes('界定说话人的是标记'));
+    assertTrue('要求原有引号保留在标记内部', p.includes('保留在标记内部'));
+    assertTrue('声明本规则优先于卡片/预设的对白格式', p.includes('优先于角色卡、预设'));
+
+    // 未绑定角色时示例退化为占位名，但写法说明不能少
+    const noBind = prompts.buildAutoVoicePrompt({ provider: 'novel' });
+    assertTrue('无绑定时仍有写法说明', noBind.includes('标记在外、引号在内'));
+    assertTrue('无绑定时仍禁止只写引号', noBind.includes('而不写 [[voice:...]] 标记是不允许的'));
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n14) 源码级断言：开关两个方向都要同步世界书与「语音朗读正则」');
+// ---------------------------------------------------------------------------
+{
+    // 这是第一版的第二个真 bug：开启时会把正则打开，关闭时却只关了世界书，
+    // 正则一直留在打开状态，两处状态不一致。属于「不报错、只是行为不对」的类型，
+    // 纯函数测不到，因此按仓库既有做法做源码级断言。
+    const appSource = readFileSync(join(root, 'assets/js/app.js'), 'utf8');
+    assertTrue('enforceVoiceRules 把正则开关对齐到世界书条目',
+        appSource.includes('if (renderRegex) renderRegex.enabled = !!voiceWI.enabled;'));
+    assertTrue('清理正则被强制保持启用（关掉会让历史标记漏到界面）',
+        appSource.includes('forceEnabled: true'));
+
+    const watcherAt = appSource.indexOf('watch(isAutoVoiceEnabled');
+    assertTrue('存在 isAutoVoiceEnabled 的 watcher', watcherAt >= 0);
+    const watcherBlock = appSource.slice(watcherAt, watcherAt + 400);
+    assertTrue('watcher 里没有「只在开启时动作」的提前 return（旧 bug）',
+        !/if\s*\(\s*!newVal\s*\)\s*return/.test(watcherBlock));
+    assertTrue('watcher 两个方向都会调用 enforceVoiceRules',
+        watcherBlock.includes('enforceVoiceRules()'));
 }
 
 // ---------------------------------------------------------------------------

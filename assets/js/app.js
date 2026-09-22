@@ -2355,9 +2355,12 @@ let removedProviderConfigCleared = false;
         };
 
         // ===== 自动语音开关 =====
-        // 与「自动生图」完全同构：开关状态就存在世界书条目 `自动语音` 的 enabled 上，
-        // 开启时把「语音朗读正则」与世界书条目一起打开，并同步提示词与正则内容。
-        // 这样对话输入框上的语音按钮、世界书面板、正则面板三处看到的永远是同一个状态。
+        // 与「自动生图」同构：开关状态存在世界书条目 `自动语音` 的 enabled 上。
+        // 但**两处状态必须一起变**——世界书条目与「语音朗读正则」同开同关，
+        // 否则会出现「世界书开着、正则关着」的不一致（第一版就踩了这个：
+        // 开启时会打开正则，关闭时却只关了世界书，正则一直留在打开状态）。
+        // 同步逻辑集中在 enforceVoiceRules（见下方）：它每次都会按世界书条目
+        // 重新对齐「语音朗读正则」的开关，因此开关两个方向都会一致。
         const isAutoVoiceEnabled = computed({
             get: () => {
                 const entry = worldInfo.value.find(w => w.comment === '自动语音');
@@ -2373,7 +2376,12 @@ let removedProviderConfigCleared = false;
         const setAutoVoiceEnabled = (enabled) => {
             isAutoVoiceEnabled.value = enabled;
             const changed = isAutoVoiceEnabled.value === enabled;
-            if (changed) showToast(enabled ? '自动语音已开启' : '自动语音已关闭', enabled ? 'success' : 'info');
+            if (changed) {
+                showToast(
+                    enabled ? '自动语音已开启：世界书与「语音朗读正则」已同步开启' : '自动语音已关闭：世界书与「语音朗读正则」已同步关闭',
+                    enabled ? 'success' : 'info'
+                );
+            }
             return changed;
         };
 
@@ -9262,43 +9270,33 @@ let removedProviderConfigCleared = false;
                 worldInfo.value.splice(wiIndex, 1);
             }
             worldInfo.value.unshift(voiceWI);
+
+            // 世界书条目是**唯一真相**：重建资产时把「语音朗读正则」的开关对齐到它。
+            // 否则会出现「世界书开着、正则关着」（或反过来）的不一致状态——
+            // 用户在正则面板手动改过、或老存档里两处状态不同时都会撞上。
+            //
+            // 例外：「语音标记清理」**始终启用**，它不跟随开关。
+            // 它只负责把残留标记从显示里抹掉，没有标记时是空转；
+            // 一旦关掉，开关关闭后历史消息里的 [[voice:..]] 就会原样漏到界面上。
+            const renderRegex = regexScripts.value.find(r => r.name === voiceRegexName);
+            if (renderRegex) renderRegex.enabled = !!voiceWI.enabled;
         };
 
-        // 开关打开时：确保世界书条目与两条正则都启用（与自动生图的处理一致）。
-        const updateVoiceRegexState = ({ enableRegex = false } = {}) => {
+        // 开关同步：世界书条目是唯一真相，「语音朗读正则」永远跟着它。
+        // 两个方向都要同步——第一版只在开启时动作（`if (!newVal) return`），
+        // 关闭时只关了世界书、正则一直留在打开状态，两处状态就不一致了。
+        // 这里不需要额外的状态判断：enforceVoiceRules 每次都会按条目重新对齐。
+        watch(isAutoVoiceEnabled, () => {
             enforceVoiceRules();
-            const messages = [];
-            const voiceEntry = worldInfo.value.find(w => w.comment === autoVoiceWIName);
-            if (voiceEntry && !voiceEntry.enabled) {
-                voiceEntry.enabled = true;
-                messages.push(`${autoVoiceWIName} 世界书已启用`);
-            }
-            if (enableRegex) {
-                [voiceRegexName, voiceCleanupRegexName].forEach(name => {
-                    const regex = regexScripts.value.find(r => r.name === name);
-                    if (regex && !regex.enabled) {
-                        regex.enabled = true;
-                        messages.push(`${name} 已启用`);
-                    }
-                });
-            }
-            return messages;
-        };
-
-        watch(isAutoVoiceEnabled, (newVal) => {
-            if (!newVal) return;
-            const messages = updateVoiceRegexState({ enableRegex: true });
-            if (messages.length > 0) showToast('为适配语音：' + messages.join('，'), 'info');
         });
 
         // 换 TTS 服务或改音色绑定后，提示词与正则都要重建
-        // （提示词要按服务能力改写情绪/停顿的写法）。
+        // （提示词要按服务能力改写情绪/停顿的写法），开关状态由 enforceVoiceRules 自动对齐。
         watch(() => [
             settings.ttsProvider,
             JSON.stringify(settings.ttsVoiceBindings || [])
         ].join('\u0000'), () => {
             enforceVoiceRules();
-            if (isAutoVoiceEnabled.value) updateVoiceRegexState({ enableRegex: true });
         });
 
         watch(() => [
