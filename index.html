@@ -423,7 +423,7 @@
                                 <!-- Message Bubble -->
                                 <div class="group relative"
                                     :class="{'w-full': messageUsesWideLayout(msg) || msg.isEditing_Message, 'message-edit-group': msg.isEditing_Message}">
-                                    <div @click="handleGeneratedImageReroll($event, index)"
+                                    <div @click="handleMessageContentClick($event, index)"
                                         :class="['p-0 rounded-2xl shadow-sm text-sm md:text-base leading-relaxed overflow-hidden',
                                         msg.shouldAnimate && !(msg.role === 'assistant' && msg.reasoning) ? 'animate-message-in' : '',
                                         messageUsesWideLayout(msg) || msg.isEditing_Message ? 'w-full' : '',
@@ -877,6 +877,16 @@
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                             d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
                                         </path>
+                                    </svg>
+                                </button>
+                                <!-- Auto Voice Button -->
+                                <button @click="toggleAutoVoice"
+                                    :class="isAutoVoiceEnabled ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 border-rose-200' : 'bg-white text-gray-500 hover:text-gray-700 hover:bg-gray-50 border-gray-200'"
+                                    :aria-pressed="isAutoVoiceEnabled"
+                                    class="rounded-full w-8 h-8 flex items-center justify-center border shadow-sm transition-colors active:scale-95"
+                                    title="自动语音开关：开启后 AI 会把人物台词标成可点击的语音框">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <use href="#icon-tts"></use>
                                     </svg>
                                 </button>
                                 <!-- Context Viewer Button -->
@@ -2592,6 +2602,24 @@
                                         </label>
                                     </div>
 
+                                    <!-- 自动语音开关（与生图开关同构：同时控制世界书条目与两条正则） -->
+                                    <div class="generation-setting-card md:col-span-2 bg-gradient-to-r from-rose-50/50 via-pink-50/40 to-fuchsia-50/40 border-rose-100">
+                                        <label class="flex items-center justify-between gap-3 text-left cursor-pointer group">
+                                            <span class="flex flex-col">
+                                                <span class="text-sm font-bold text-rose-800">自动语音（台词语音框）</span>
+                                                <span class="text-xs text-gray-500 mt-1 leading-relaxed">
+                                                    AI 生成正文时，会把人物台词包成可点击的语音框，点击即按该角色的音色朗读。
+                                                    开启后会自动启用世界书「自动语音」与正则「语音朗读正则 / 语音标记清理」，可到对应面板手动调整。
+                                                </span>
+                                            </span>
+                                            <div class="relative inline-flex flex-none items-center">
+                                                <input type="checkbox" :checked="isAutoVoiceEnabled" @change="setAutoVoiceEnabled($event.target.checked)" class="settings-toggle-input sr-only">
+                                                <div class="settings-toggle settings-toggle--rose"></div>
+                                            </div>
+                                        </label>
+                                        <p v-if="!settings.ttsEnabled" class="mt-2 text-xs text-amber-600">提示：上面的「启用 TTS 语音」还没打开，点击语音框会提示未配置。</p>
+                                    </div>
+
                                     <!-- 语音服务 -->
                                     <div class="pt-2">
                                         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -2792,6 +2820,38 @@
                                                     button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
                                                     menu-class="text-sm">
                                                 </custom-select>
+                                            </div>
+
+                                            <!-- 多角色音色绑定 -->
+                                            <div class="generation-setting-card md:col-span-2">
+                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">多角色音色绑定</label>
+                                                <p class="mb-3 text-xs text-gray-400 leading-relaxed">
+                                                    开启「自动语音」后，AI 会把人物台词写成 <code class="px-1 rounded bg-gray-50">[[voice:角色名|情绪]]台词[[/voice]]</code>。
+                                                    这里给角色名绑定音色；未绑定的角色与旁白一律走上面的默认音色。
+                                                </p>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <input v-model="ttsState.newVoiceBindingName" type="text" placeholder="角色名（需与卡内写法一致）"
+                                                        class="w-52 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-700 text-sm focus:border-rose-400 focus:outline-none shadow-sm">
+                                                    <div class="min-w-[12rem] flex-1">
+                                                        <custom-select v-model="ttsState.newVoiceBindingVoice" :options="ttsVoiceBindingOptions"
+                                                            button-class="rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:border-rose-400 focus:ring-rose-100"
+                                                            menu-class="text-sm">
+                                                        </custom-select>
+                                                    </div>
+                                                    <button type="button" @click="addTtsVoiceBinding"
+                                                        class="px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg active:scale-95 transition-all shadow-sm">绑定</button>
+                                                </div>
+                                                <div v-if="Array.isArray(settings.ttsVoiceBindings) && settings.ttsVoiceBindings.length"
+                                                    class="mt-3 space-y-1.5">
+                                                    <div v-for="(binding, bindingIndex) in settings.ttsVoiceBindings" :key="'tts-binding-' + bindingIndex"
+                                                        class="flex items-center justify-between gap-2 rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2">
+                                                        <span class="min-w-0 truncate text-sm font-medium text-gray-700">{{ binding.name }}</span>
+                                                        <span class="min-w-0 flex-1 truncate text-xs text-gray-500" :title="binding.voice">→ {{ binding.voice }}</span>
+                                                        <button type="button" @click="removeTtsVoiceBinding(binding.name)"
+                                                            class="flex-none text-xs font-bold text-red-600 hover:text-red-700">解除</button>
+                                                    </div>
+                                                </div>
+                                                <p v-else class="mt-3 text-xs text-gray-400">还没有绑定任何角色，全部走默认音色。</p>
                                             </div>
 
                                             <!-- 朗读行为 -->

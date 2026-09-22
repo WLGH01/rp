@@ -91,7 +91,7 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
     ].filter(Boolean).join('\n\n');
 
     const replyToolInstruction = '需通过 `output_reply` 工具提交回复，不要用普通正文代替工具调用。';
-    const buildNextResponsePrompt = ({ autoImageGenEnabled = false, cotEnabled = false, imageGenCount = 2, memoryEnabled = false, uiTemplateEnabled = false, storyPanelsEnabled = false, useThinkingTag = false, writingStylePrompt = '' } = {}) => {
+    const buildNextResponsePrompt = ({ autoImageGenEnabled = false, autoVoiceEnabled = false, cotEnabled = false, imageGenCount = 2, memoryEnabled = false, uiTemplateEnabled = false, storyPanelsEnabled = false, useThinkingTag = false, writingStylePrompt = '' } = {}) => {
         const analysisTag = useThinkingTag ? 'thinking' : 'cot';
         return [
             '<next_response>',
@@ -107,6 +107,9 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             '按系统中当前启用的人称、时间戳、NSFW及输出格式执行。',
             autoImageGenEnabled
                 ? `当前已开启自动生图，请按系统中的自动生图规则生成并插入${Math.min(8, Math.max(2, Number(imageGenCount) || 2))}张图片。`
+                : '',
+            autoVoiceEnabled
+                ? '当前已开启自动语音，请按系统中的自动语音规则，用 [[voice:角色名|情绪]]台词[[/voice]] 标记每一句人物对白。'
                 : '',
             uiTemplateEnabled
                 ? '正文结束后，按系统提供的当前变量JSON检查并输出本轮需要更新的变量。'
@@ -223,6 +226,45 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
         '    这些记忆已按原对话时间顺序排列；它们不一定是今天或刚才发生的内容，请不要误当作当前现场，只把它们作为过往经历和关系背景参考。'
     ]);
 
+    // 自动语音：告诉 AI 把「人物说的话」包进语音标记。
+    //
+    // 为什么要按 provider 换措辞：三家的能力差得很远（都对着官方文档/官方源码核实过）——
+    //   MiniMax     唯一支持请求级 emotion 与文本内停顿 `<#x#>`（本站统一标记为 [[pause:x]]）
+    //   GPT-SoVITS  官方无任何情绪/停顿标记，情绪只能靠参考音频，停顿只能靠标点
+    //   NovelAI     官方无任何情绪/停顿标记，只能靠标点
+    // 所以「用哪家就按哪家的能力写提示词」，避免让 AI 输出该服务根本不认的东西。
+    const buildAutoVoicePrompt = ({ provider = 'minimax', voiceBindings = [] } = {}) => {
+        const bindings = (Array.isArray(voiceBindings) ? voiceBindings : [])
+            .map(item => ({ name: String(item?.name || '').trim(), voice: String(item?.voice || '').trim() }))
+            .filter(item => item.name);
+        const isMinimax = provider === 'minimax';
+        const lines = [
+            '<auto_voice>',
+            '用户已开启自动语音。请在正文中用语音标记标出**人物说的话**：系统会把它渲染成一个可点击的语音框，点击即按该角色的音色朗读。',
+            '',
+            '格式（必须逐字使用双方括号，不要用别的括号或写法）：',
+            '[[voice:角色名|情绪]]台词内容[[/voice]]',
+            '- 角色名：说话者的名字，必须与角色卡或正文里的写法完全一致。',
+            isMinimax
+                ? '- 情绪：可选，只能填 happy / sad / angry / fearful / disgusted / surprised / neutral 之一；没把握就整体省略「|情绪」这一段。'
+                : '- 情绪：当前语音服务不支持情绪控制，请**不要**写「|情绪」这一段。',
+            isMinimax
+                ? '- 停顿：需要在台词中间明显停顿处插入 [[pause:秒数]]，秒数取 0.01–99.99，例如 [[pause:0.5]]；不要连续写两个停顿。'
+                : '- 停顿：当前语音服务不支持停顿标记，请改用标点表达停顿（短停顿用「，」，长停顿用「……」或「。」）。',
+            '',
+            '要求：',
+            '1. 每一句人物对白都必须包在 [[voice:...]] 里；旁白、动作、心理与环境描写**不要**包。',
+            '2. 一个语音块只放一个人说的话，不要把多个人的对白放进同一个块。',
+            '3. 语音块不要跨空行；同一段里有多人对话时，写多个语音块即可。',
+            '4. 即使正文使用 HTML 或美化面板排版，对白也照常使用该标记包裹。',
+            '5. 不要用代码块包裹这些标记，也不要向用户解释它们的存在。',
+            bindings.length
+                ? `6. 以下角色已绑定专属音色，请使用这些名字：${bindings.map(item => item.name).join('、')}。未绑定的角色直接写其真实姓名即可，系统会用默认音色朗读。`
+                : ''
+        ];
+        return lines.filter(line => line !== '').join('\n').trim() + '\n</auto_voice>';
+    };
+
     const buildAutoImageGenPrompt = (imageGenCount) => `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
 围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。所有Tag必须使用英文并以英文逗号分隔，禁止中文Tag；提示词必须详尽、细致且可直接绘制，不得使用笼统省略的Tag或脱离场景拼凑通用画面。
 强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。
@@ -286,6 +328,7 @@ image###英文Tag###
     const prompts = Object.freeze({
         buildActiveToolSystemPrompt,
         buildAutoImageGenPrompt,
+        buildAutoVoicePrompt,
         buildCharacterPrompt,
         buildClassicSecondarySummaryPrompt,
         buildClassicSummaryFinalInstruction,

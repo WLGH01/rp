@@ -2345,7 +2345,40 @@ let removedProviderConfigCleared = false;
                 return;
             }
 
+            if (entry?.comment === '自动语音') {
+                const changed = setAutoVoiceEnabled(enabled);
+                if (!changed && event?.target) event.target.checked = isAutoVoiceEnabled.value;
+                return;
+            }
+
             if (entry) entry.enabled = enabled;
+        };
+
+        // ===== 自动语音开关 =====
+        // 与「自动生图」完全同构：开关状态就存在世界书条目 `自动语音` 的 enabled 上，
+        // 开启时把「语音朗读正则」与世界书条目一起打开，并同步提示词与正则内容。
+        // 这样对话输入框上的语音按钮、世界书面板、正则面板三处看到的永远是同一个状态。
+        const isAutoVoiceEnabled = computed({
+            get: () => {
+                const entry = worldInfo.value.find(w => w.comment === '自动语音');
+                return entry ? entry.enabled : false;
+            },
+            set: (val) => {
+                const entry = worldInfo.value.find(w => w.comment === '自动语音');
+                if (entry) entry.enabled = val;
+                else showToast('未找到“自动语音”世界书条目，请确认配置', 'warning');
+            }
+        });
+
+        const setAutoVoiceEnabled = (enabled) => {
+            isAutoVoiceEnabled.value = enabled;
+            const changed = isAutoVoiceEnabled.value === enabled;
+            if (changed) showToast(enabled ? '自动语音已开启' : '自动语音已关闭', enabled ? 'success' : 'info');
+            return changed;
+        };
+
+        const toggleAutoVoice = () => {
+            setAutoVoiceEnabled(!isAutoVoiceEnabled.value);
         };
 
         // ===== TTS 语音 =====
@@ -2364,7 +2397,10 @@ let removedProviderConfigCleared = false;
             previewText: '你好，这是一段语音试听。',
             newMinimaxVoiceName: '',
             newMinimaxVoiceId: '',
-            newNovelVoice: ''
+            newNovelVoice: '',
+            // 多角色音色绑定：正在填写的「角色名 / 音色」。
+            newVoiceBindingName: '',
+            newVoiceBindingVoice: ''
         });
 
         const ttsProviderOptions = computed(() => tts.PROVIDERS.map(item => ({ value: item.value, label: item.label })));
@@ -2381,8 +2417,14 @@ let removedProviderConfigCleared = false;
         const ttsVoiceOptions = computed(() => tts.listVoices(settings));
         const ttsGsvSpeakerOptions = computed(() => (Array.isArray(settings.ttsGsvSpeakers) ? settings.ttsGsvSpeakers : []).map(String));
 
-        // 把一条消息的正文转成可朗读文本（去掉 markdown / 生图 tag / 动作括白）。
+        // 把一条消息的正文转成可朗读文本（去掉 markdown / 生图 tag / 语音标记 / 动作括白）。
         const buildTtsText = (message) => tts.sanitizeText(message?.content ?? message?.mes ?? '', {
+            stripActions: settings.ttsStripActions !== false,
+            readDialogueOnly: settings.ttsReadDialogueOnly === true
+        });
+
+        // 按「语音块」把一条消息拆成待朗读片段：每段带自己的音色与情绪。
+        const buildTtsParts = (message) => tts.buildSpeechParts(message?.content ?? message?.mes ?? '', settings, {
             stripActions: settings.ttsStripActions !== false,
             readDialogueOnly: settings.ttsReadDialogueOnly === true
         });
@@ -2391,15 +2433,56 @@ let removedProviderConfigCleared = false;
             ttsPlayer.stop();
             ttsState.playing = false;
             ttsState.activeKey = '';
+            clearActiveVoiceLine();
+        };
+
+        // 正在朗读的语音框高亮。元素可能已经被重渲染替换掉，因此用 isConnected 兜底。
+        let activeVoiceLineEl = null;
+        const setActiveVoiceLine = (element) => {
+            clearActiveVoiceLine();
+            if (element && element.classList) {
+                element.classList.add('is-narrating');
+                activeVoiceLineEl = element;
+            }
+        };
+        const clearActiveVoiceLine = () => {
+            if (activeVoiceLineEl?.classList && activeVoiceLineEl.isConnected) {
+                activeVoiceLineEl.classList.remove('is-narrating');
+            }
+            activeVoiceLineEl = null;
+        };
+
+        // 语音合成前的统一检查：没开 TTS 或没配服务时给出可操作的提示，
+        // 而不是让用户看到一个底层报错。
+        const ensureTtsReady = () => {
+            if (!settings.ttsEnabled) {
+                showToast('请先在「设置 → TTS 语音设置」里启用 TTS 语音', 'warning');
+                return false;
+            }
+            const provider = String(settings.ttsProvider || 'minimax');
+            if (provider === 'minimax' && !String(settings.ttsMinimaxKey || '').trim()) {
+                showToast('请先在 TTS 设置里填写 MiniMax API Key', 'warning');
+                return false;
+            }
+            if (provider === 'novel' && !String(settings.ttsNovelToken || '').trim()) {
+                showToast('请先在 TTS 设置里填写 NovelAI Access Token', 'warning');
+                return false;
+            }
+            if (provider === 'gpt-sovits' && !String(settings.ttsGsvRefAudio || '').trim()) {
+                showToast('请先在 TTS 设置里选择 GPT-SoVITS 参考音频（音色）', 'warning');
+                return false;
+            }
+            return true;
         };
 
         // 合成并播放一段文本。key 用来标记「这段话属于哪条消息」，供按钮高亮与再次点击停止。
-        const speakTtsText = async (text, key = '') => {
+        const speakTtsText = async (text, key = '', options = {}) => {
             const clean = String(text || '').trim();
             if (!clean) {
                 showToast('这条消息没有可朗读的文字', 'warning');
                 return;
             }
+            if (!ensureTtsReady()) return;
             stopTts();
             ttsState.busy = true;
             ttsState.activeKey = key;
@@ -2409,7 +2492,45 @@ let removedProviderConfigCleared = false;
                     : [clean];
                 const blobs = [];
                 for (const chunk of chunks) {
-                    blobs.push(await tts.synthesize(chunk, settings));
+                    blobs.push(await tts.synthesize(chunk, settings, options));
+                }
+                ttsState.playing = true;
+                await ttsPlayer.playSequence(blobs, { volume: settings.ttsVolume, rate: settings.ttsRate });
+            } catch (error) {
+                console.error('TTS 朗读失败:', error);
+                showToast(`语音合成失败：${error?.message || error}`, 'error', 4000);
+            } finally {
+                ttsState.busy = false;
+                ttsState.playing = false;
+                ttsState.activeKey = '';
+            }
+        };
+
+        // 按片段朗读整条消息：每段用自己绑定的音色（旁白用默认音色），
+        // 每段各自按 provider 带上情绪，然后串行连播。
+        const speakTtsParts = async (parts, key = '') => {
+            const list = (Array.isArray(parts) ? parts : []).filter(part => part && String(part.text || '').trim());
+            if (!list.length) {
+                showToast('这条消息没有可朗读的文字', 'warning');
+                return;
+            }
+            if (!ensureTtsReady()) return;
+            stopTts();
+            ttsState.busy = true;
+            ttsState.activeKey = key;
+            try {
+                const blobs = [];
+                for (const part of list) {
+                    // 同一个片段仍按字符上限切段（长台词），音色与情绪保持一致。
+                    const chunks = settings.ttsSplitByParagraph
+                        ? tts.splitText(part.text, settings.ttsMaxChars)
+                        : [part.text];
+                    for (const chunk of chunks) {
+                        blobs.push(await tts.synthesize(chunk, settings, {
+                            voice: part.voice,
+                            emotion: part.emotion
+                        }));
+                    }
                 }
                 ttsState.playing = true;
                 await ttsPlayer.playSequence(blobs, { volume: settings.ttsVolume, rate: settings.ttsRate });
@@ -2430,10 +2551,54 @@ let removedProviderConfigCleared = false;
                 stopTts();
                 return;
             }
+            // 有语音块时按块分音色朗读；没有块（纯旁白）则走单段路径。
+            const parts = buildTtsParts(message);
+            if (parts.some(part => part.type === 'speech')) {
+                speakTtsParts(parts, key);
+                return;
+            }
             speakTtsText(buildTtsText(message), key);
         };
 
         const isMessageNarrating = (index) => ttsState.activeKey === `msg-${index}` && (ttsState.busy || ttsState.playing);
+
+        // 点击正文里的语音框：只朗读这一句台词，用该角色绑定的音色与情绪。
+        // 走事件委托（与生图卡片的 ↻ 同一个入口），因此美化面板/iframe 之外的
+        // 普通正文都能命中，不需要为每条消息绑定监听。
+        const narrateVoiceLine = (element) => {
+            if (!element) return;
+            // 属性里就是原始台词（含 [[pause:x]]，由「语音标记清理」正则的保护分支留住）。
+            const rawText = element.getAttribute('data-tts-text') || element.textContent || '';
+            const name = element.getAttribute('data-tts-name') || '';
+            const emotion = element.getAttribute('data-tts-emotion') || '';
+            const key = `line-${name}-${rawText.slice(0, 24)}`;
+            if (ttsState.activeKey === key && (ttsState.busy || ttsState.playing)) {
+                stopTts();
+                return;
+            }
+            // 保留停顿标记清洗：清洗规则看不到标记，标记也不会被吃掉。
+            const clean = tts.sanitizeWithPauses(rawText, {
+                stripActions: settings.ttsStripActions !== false,
+                readDialogueOnly: false
+            });
+            setActiveVoiceLine(element);
+            speakTtsText(clean, key, {
+                voice: tts.resolveVoiceForName(settings, name),
+                emotion
+            });
+        };
+
+        // 正文点击的统一入口：语音框优先，其余交给生图卡片处理。
+        const handleMessageContentClick = (event, messageIndex) => {
+            const line = event.target?.closest?.('.tts-voice-line');
+            if (line) {
+                event.preventDefault();
+                event.stopPropagation();
+                narrateVoiceLine(line);
+                return;
+            }
+            handleGeneratedImageReroll(event, messageIndex);
+        };
 
         const previewTts = () => speakTtsText(ttsState.previewText, 'preview');
 
@@ -2537,6 +2702,43 @@ let removedProviderConfigCleared = false;
             settings.ttsNovelCustomVoices = list.filter(item => item !== value);
             if (settings.ttsNovelVoice === value) settings.ttsNovelVoice = tts.NOVEL_BUILTIN_VOICES[0];
             showToast('已删除音色', 'success');
+        };
+
+        // 角色名 → 音色 的绑定表。没绑定的角色（含旁白）走设置里的默认音色。
+        const ttsVoiceBindingOptions = computed(() => {
+            const list = tts.listVoices(settings);
+            // 默认音色也要能显式绑给某个角色，因此把它并进来去重。
+            const fallback = tts.defaultVoiceFor(settings);
+            const values = list.map(item => item.value);
+            if (fallback && !values.includes(fallback)) {
+                list.unshift({ value: fallback, label: `${fallback}（当前默认）` });
+            }
+            return list;
+        });
+
+        const addTtsVoiceBinding = () => {
+            const name = String(ttsState.newVoiceBindingName || '').trim();
+            const voice = String(ttsState.newVoiceBindingVoice || '').trim();
+            if (!name) {
+                showToast('请先填写角色名', 'warning');
+                return;
+            }
+            if (!voice) {
+                showToast('请先选择音色', 'warning');
+                return;
+            }
+            const list = Array.isArray(settings.ttsVoiceBindings) ? settings.ttsVoiceBindings : [];
+            const others = list.filter(item => String(item?.name || '').trim() !== name);
+            settings.ttsVoiceBindings = [...others, { name, voice }];
+            ttsState.newVoiceBindingName = '';
+            showToast(`已把「${name}」绑定到该音色`, 'success');
+        };
+
+        const removeTtsVoiceBinding = (name) => {
+            const target = String(name || '').trim();
+            const list = Array.isArray(settings.ttsVoiceBindings) ? settings.ttsVoiceBindings : [];
+            settings.ttsVoiceBindings = list.filter(item => String(item?.name || '').trim() !== target);
+            showToast('已解除绑定', 'success');
         };
 
         // 切会话 / 重新生成时打断朗读，避免上一段语音还在播。
@@ -5369,9 +5571,17 @@ let removedProviderConfigCleared = false;
             let result = replaceUserNamePlaceholder(text);
             if (role === 'system') return result;
             const orderedScripts = [...regexScripts.value].sort((a, b) => {
-                const aIsImageGen = (a.name || a.scriptName) === 'NAI画图正则';
-                const bIsImageGen = (b.name || b.scriptName) === 'NAI画图正则';
-                return aIsImageGen === bIsImageGen ? 0 : (aIsImageGen ? 1 : -1);
+                const nameOf = item => item.name || item.scriptName;
+                // 生图正则必须最后执行（它会产出大量 HTML，先跑会被后续规则破坏）。
+                const aIsImageGen = nameOf(a) === 'NAI画图正则';
+                const bIsImageGen = nameOf(b) === 'NAI画图正则';
+                if (aIsImageGen !== bIsImageGen) return aIsImageGen ? 1 : -1;
+                // 语音清理必须排在语音渲染**之后**：否则 [[/voice]] 先被清掉，
+                // 成对匹配失效，标记会原样显示在界面上。
+                const aIsVoiceCleanup = nameOf(a) === '语音标记清理';
+                const bIsVoiceCleanup = nameOf(b) === '语音标记清理';
+                if (aIsVoiceCleanup !== bIsVoiceCleanup) return aIsVoiceCleanup ? 1 : -1;
+                return 0;
             });
 
             orderedScripts.forEach(script => {
@@ -5402,7 +5612,12 @@ let removedProviderConfigCleared = false;
                         : (script.replaceString || '');
 
                     if (!regexPattern) return;
-                    const isImageGenScript = (script.name || script.scriptName) === 'NAI画图正则';
+                    const scriptName = script.name || script.scriptName;
+                    const isImageGenScript = scriptName === 'NAI画图正则';
+                    // 语音两条正则必须作用在**整段文本**上，不能只作用于「未被 HTML 保护」的部分：
+                    // 美化卡会把正文包在 HTML 面板里，若走保护分支，面板内的台词就永远包不上语音框
+                    // （需求「兼容带美化的卡」）。清理正则也同理——它要能清到属性之外的所有残留标记。
+                    const isVoiceScript = scriptName === voiceRegexName || scriptName === voiceCleanupRegexName;
 
                     // 解析 /pattern/flags 格式
                     if (regexPattern.startsWith('/') && regexPattern.lastIndexOf('/') > 0) {
@@ -5421,7 +5636,9 @@ let removedProviderConfigCleared = false;
                         : new RegExp(regexPattern, flags);
 
                     // 普通正则保护 HTML/代码；明确匹配标签或代码围栏的规则仍直接执行。
-                    if (!/[<>]/.test(regexPattern) && !regexPattern.includes('```')) {
+                    if (isVoiceScript) {
+                        result = result.replace(re, replacement);
+                    } else if (!/[<>]/.test(regexPattern) && !regexPattern.includes('```')) {
                         const wholeMatch = re.exec(result);
                         re.lastIndex = 0;
                         const wrapped = wholeMatch?.[0] === result ? result.replace(re, replacement) : null;
@@ -6499,6 +6716,7 @@ let removedProviderConfigCleared = false;
 
             const prompt = BUILTIN_PROMPTS.buildNextResponsePrompt({
                 autoImageGenEnabled: isAutoImageGenEnabled.value,
+                autoVoiceEnabled: isAutoVoiceEnabled.value,
                 cotEnabled,
                 imageGenCount: settings.imageGenCount,
                 memoryEnabled: memorySettings.enabled,
@@ -8954,6 +9172,135 @@ let removedProviderConfigCleared = false;
 
         };
 
+        // ===== 自动语音：世界书条目 + 两条显示用正则 =====
+        //
+        // 与自动生图同构，但**不依赖生图地址**（没填生图地址时也要能用），所以单独一个函数。
+        // 三条资产：
+        //   世界书「自动语音」   → 按当前 TTS 服务的能力，教 AI 怎么输出语音标记
+        //   正则「语音朗读正则」 → 把 [[voice:角色|情绪]]台词[[/voice]] 渲染成可点击的语音框
+        //   正则「语音标记清理」 → 清掉停顿/情绪/未闭合标记，保证它们永远不会显示出来
+        // 两条正则都是 markdownOnly（只影响显示），因此发给模型的上下文里保留原始标记，
+        // AI 能在历史里看到自己上一轮的写法，格式不会漂移。
+        const voiceRegexName = '语音朗读正则';
+        const voiceCleanupRegexName = '语音标记清理';
+        const autoVoiceWIName = '自动语音';
+
+        const enforceVoiceRules = () => {
+            // 角色名与情绪都限制在安全字符集内：正则的 replacement 只能是字符串，
+            // 没法在这里做转义，因此直接从源头挡掉会破坏 HTML 属性的引号与尖括号。
+            const voiceRegexContent = {
+                name: voiceRegexName,
+                // 台词正文里不允许出现引号与尖括号：replacement 只能拼字符串，
+                // 出现引号会把 data-tts-* 属性截断（从而让后续标记泄漏到界面上）。
+                // 角色名与情绪同样限制在安全字符集内。
+                regex: '/\\[\\[voice:\\s*([^\\]|"\'<>\\r\\n]{1,40}?)\\s*(?:\\|\\s*([a-zA-Z\\u4e00-\\u9fff]{0,20}?)\\s*)?\\]\\]\\s*([^"<>]*?)\\s*\\[\\[\\/voice\\]\\]/gi',
+                replacement: '<span class="tts-voice-line" role="button" tabindex="0" data-tts-name="$1" data-tts-emotion="$2" data-tts-text="$3" title="点击朗读这句台词">$3</span>',
+                placement: [2],
+                markdownOnly: true,
+                promptOnly: false,
+                scope: 'global',
+                enabled: false // 默认关闭，随开关打开
+            };
+
+            // 顺序很重要：本条必须排在「语音朗读正则」**之后**执行。
+            // 否则 `[[/voice]]` 会先被清掉，成对匹配失效，标记就会原样显示出来
+            // （与 sanitizeText 里「生图 tag 必须排在标题井号之前」是同一类顺序陷阱）。
+            //
+            // 第一个分支 `(data-tts-text="[^"]*")` 是必须的：整条替换用的是 `$1`，
+            // 属性整体被匹配后原样保留，属性值里的 `[[pause:0.5]]` 就不会被后面的分支清掉
+            // ——那是点击单句朗读时要用的停顿信息，清了就只能读到没有停顿的版本。
+            //
+            // 默认**开启**：它只负责把标记从显示里抹掉，没有标记时是无副作用的空转。
+            // 这样即使自动语音后来被关掉，历史消息里的标记也不会漏到界面上。
+            const voiceCleanupRegexContent = {
+                name: voiceCleanupRegexName,
+                regex: '/(data-tts-text="[^"]*")|\\[\\[(?:pause:\\s*\\d+(?:\\.\\d+)?|emo:\\s*[a-zA-Z\\u4e00-\\u9fff]+|\\/?voice\\b[^\\]]*)\\]\\]|<#\\s*\\d+(?:\\.\\d+)?\\s*#>/gi',
+                replacement: '$1',
+                placement: [1, 2],
+                markdownOnly: true,
+                promptOnly: false,
+                scope: 'global',
+                enabled: true
+            };
+
+            // 已存在的条目一律保留用户的启用状态，只更新内容与顺序。
+            // 例外：清理正则是「安全网」，必须保持启用（否则关掉自动语音后历史标记会漏显示）。
+            const upsertSystemRegex = (content, afterName, { forceEnabled = false } = {}) => {
+                const existing = regexScripts.value.find(r => r.name === content.name);
+                if (existing) {
+                    content.enabled = forceEnabled ? true : existing.enabled;
+                    regexScripts.value = regexScripts.value.filter(r => r !== existing);
+                }
+                const anchor = afterName ? regexScripts.value.findIndex(r => r.name === afterName) : -1;
+                if (anchor >= 0) regexScripts.value.splice(anchor + 1, 0, content);
+                else regexScripts.value.unshift(content);
+            };
+
+            upsertSystemRegex(voiceRegexContent);
+            upsertSystemRegex(voiceCleanupRegexContent, voiceRegexName, { forceEnabled: true });
+
+            const voiceWI = {
+                comment: autoVoiceWIName,
+                keys: [],
+                content: BUILTIN_PROMPTS.buildAutoVoicePrompt({
+                    provider: settings.ttsProvider,
+                    voiceBindings: settings.ttsVoiceBindings
+                }),
+                constant: true,
+                enabled: false,
+                scope: 'global',
+                position: 'at_depth',
+                depth: 4,
+                order: 99,
+                useProbability: false,
+                probability: 100
+            };
+
+            const wiIndex = worldInfo.value.findIndex(w => w.comment === autoVoiceWIName);
+            if (wiIndex !== -1) {
+                voiceWI.enabled = worldInfo.value[wiIndex].enabled;
+                worldInfo.value.splice(wiIndex, 1);
+            }
+            worldInfo.value.unshift(voiceWI);
+        };
+
+        // 开关打开时：确保世界书条目与两条正则都启用（与自动生图的处理一致）。
+        const updateVoiceRegexState = ({ enableRegex = false } = {}) => {
+            enforceVoiceRules();
+            const messages = [];
+            const voiceEntry = worldInfo.value.find(w => w.comment === autoVoiceWIName);
+            if (voiceEntry && !voiceEntry.enabled) {
+                voiceEntry.enabled = true;
+                messages.push(`${autoVoiceWIName} 世界书已启用`);
+            }
+            if (enableRegex) {
+                [voiceRegexName, voiceCleanupRegexName].forEach(name => {
+                    const regex = regexScripts.value.find(r => r.name === name);
+                    if (regex && !regex.enabled) {
+                        regex.enabled = true;
+                        messages.push(`${name} 已启用`);
+                    }
+                });
+            }
+            return messages;
+        };
+
+        watch(isAutoVoiceEnabled, (newVal) => {
+            if (!newVal) return;
+            const messages = updateVoiceRegexState({ enableRegex: true });
+            if (messages.length > 0) showToast('为适配语音：' + messages.join('，'), 'info');
+        });
+
+        // 换 TTS 服务或改音色绑定后，提示词与正则都要重建
+        // （提示词要按服务能力改写情绪/停顿的写法）。
+        watch(() => [
+            settings.ttsProvider,
+            JSON.stringify(settings.ttsVoiceBindings || [])
+        ].join('\u0000'), () => {
+            enforceVoiceRules();
+            if (isAutoVoiceEnabled.value) updateVoiceRegexState({ enableRegex: true });
+        });
+
         watch(() => [
             settings.imageGenKey,
             settings.imageGenBaseUrl,
@@ -9543,6 +9890,9 @@ let removedProviderConfigCleared = false;
 
             // Enforce special rules (Nai画图正则 & 自动生图)
             enforceSpecialRules();
+            // 语音资产（世界书 + 两条正则）同样要在每次切换角色后重建：
+            // 世界书条目是按角色作用域合并的，切卡后可能被换掉。
+            enforceVoiceRules();
 
             // Sync image style rules
             if (isAutoImageGenEnabled.value) {
@@ -10181,6 +10531,26 @@ let removedProviderConfigCleared = false;
             inputBox.value?.focus();
         };
 
+        // 供美化卡的 iframe 回调：iframe 内的语音框点击会转到这里朗读。
+        window.triggerVoiceLine = (payload) => {
+            const text = String(payload?.text || '').trim();
+            if (!text) return;
+            const name = String(payload?.name || '').trim();
+            const emotion = String(payload?.emotion || '').trim();
+            const key = `line-${name}-${text.slice(0, 24)}`;
+            if (ttsState.activeKey === key && (ttsState.busy || ttsState.playing)) {
+                stopTts();
+                return;
+            }
+            speakTtsText(tts.sanitizeWithPauses(text, {
+                stripActions: settings.ttsStripActions !== false,
+                readDialogueOnly: false
+            }), key, {
+                voice: tts.resolveVoiceForName(settings, name),
+                emotion
+            });
+        };
+
         // Lifecycle
         onMounted(async () => {
             document.addEventListener('fullscreenchange', syncChatFullscreenState);
@@ -10378,6 +10748,7 @@ let removedProviderConfigCleared = false;
 
                 // Enforce special rules (Nai画图正则 & 自动生图)
                 enforceSpecialRules();
+                enforceVoiceRules();
 
                 // Sync image style rules
                 if (isAutoImageGenEnabled.value) {
@@ -10670,6 +11041,7 @@ let removedProviderConfigCleared = false;
             isNovelLoading, novelUrl, onNovelLoad, // Novel exports
             editorTab, characterDisplayLimit, hasOpenedCharacterManager, isDesktopCharacterLayout, characterGridView, characterDeck, useCharacterDeck, displayedCharacters, loadMoreCharacters, getCharacterWICount, getCharacterRegexCount,
             isAutoImageGenEnabled,
+            isAutoVoiceEnabled, toggleAutoVoice, setAutoVoiceEnabled,
             apiStatus, apiLatency, imageGenStatus, imageGenLatency, checkAllStatuses, // Status Exports
             toggleAutoImageGen, setWorldInfoEnabled, handleGeneratedImageReroll,
             // TTS 语音：设置页分区折叠 + 三种服务的参数与朗读控制
@@ -10678,6 +11050,8 @@ let removedProviderConfigCleared = false;
             ttsMinimaxModelOptions, ttsMinimaxHostOptions, ttsMinimaxLangOptions,
             ttsMinimaxFormatOptions, ttsGsvLangOptions, ttsGsvSplitOptions, ttsGsvMediaTypeOptions,
             narrateMessage, isMessageNarrating, speakTtsText, stopTts, previewTts,
+            handleMessageContentClick, narrateVoiceLine,
+            ttsVoiceBindingOptions, addTtsVoiceBinding, removeTtsVoiceBinding,
             testTtsConnection, refreshGsvSpeakers,
             addMinimaxVoice, removeMinimaxVoice, addNovelVoice, removeNovelVoice,
             quotaValue, quotaLoading, quotaError,

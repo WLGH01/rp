@@ -1961,10 +1961,52 @@
             display: none;
         }
 
+        /* 语音框：正文里的可点击台词。点击即按该角色的音色朗读。
+           视觉上刻意做得像「台词高亮」而不是按钮——它出现在正文中间，
+           太重的按钮样式会破坏阅读节奏；hover / 播放中才明显。 */
+        .tts-voice-line {
+            display: inline;
+            padding: 0.05em 0.2em;
+            margin: 0 -0.05em;
+            border-radius: 0.35em;
+            border-bottom: 1px solid rgba(225, 29, 72, 0.35);
+            background: rgba(255, 241, 242, 0.55);
+            color: inherit;
+            cursor: pointer;
+            transition: background 160ms ease, border-color 160ms ease;
+        }
+
+        .tts-voice-line:hover {
+            background: rgba(255, 228, 230, 0.92);
+            border-bottom-color: rgba(190, 18, 60, 0.7);
+        }
+
+        .tts-voice-line:focus-visible {
+            outline: 2px solid rgba(225, 29, 72, 0.55);
+            outline-offset: 1px;
+        }
+
+        /* 正在朗读这一句：常亮，移动端（无 hover）也看得见。 */
+        .tts-voice-line.is-narrating {
+            background: rgba(254, 205, 211, 0.95);
+            border-bottom-color: #be123c;
+            color: #881337;
+        }
+
+        [data-app-theme="dark"] .tts-voice-line {
+            background: rgba(159, 18, 57, 0.28);
+            border-bottom-color: rgba(251, 113, 133, 0.5);
+        }
+
+        [data-app-theme="dark"] .tts-voice-line:hover,
+        [data-app-theme="dark"] .tts-voice-line.is-narrating {
+            background: rgba(190, 18, 60, 0.45);
+            color: #ffe4e6;
+        }
+
         @keyframes generated-image-spinner-rotate {
             100% { transform: rotate(360deg); }
         }
-
         @keyframes generated-image-spinner-dash {
             0% {
                 stroke-dasharray: 1, 150;

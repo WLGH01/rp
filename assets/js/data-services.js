@@ -1232,6 +1232,26 @@
                     if (window.parent && window.parent.triggerSlash) window.parent.triggerSlash(text);
                 };
 
+                // 语音框桥接：美化卡会把正文放进 iframe，点击发生在 iframe 内部，
+                // 父页面的事件委托收不到，因此这里把点击转交给父页面的朗读入口。
+                window.triggerVoiceLine = function(el) {
+                    if (!el || !window.parent || !window.parent.triggerVoiceLine) return;
+                    window.parent.triggerVoiceLine({
+                        text: el.getAttribute('data-tts-text') || '',
+                        name: el.getAttribute('data-tts-name') || '',
+                        emotion: el.getAttribute('data-tts-emotion') || ''
+                    });
+                };
+
+                document.addEventListener('click', function(event) {
+                    var target = event.target && event.target.closest && event.target.closest('.tts-voice-line');
+                    if (target) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        window.triggerVoiceLine(target);
+                    }
+                }, true);
+
                 let lastHeight = 0;
                 let isUpdating = false;
                 function updateHeight() {

@@ -1128,8 +1128,8 @@ window.RPHubUtils = {
 // --- Application configuration ---
 (function () {
     window.RPHubConfig = Object.freeze({
-        systemRegexNames: Object.freeze(['NAI画图正则']),
-        systemWorldInfoNames: Object.freeze(['自动生图']),
+        systemRegexNames: Object.freeze(['NAI画图正则', '语音朗读正则', '语音标记清理']),
+        systemWorldInfoNames: Object.freeze(['自动生图', '自动语音']),
         // 生图与聊天一样只走用户自填的接口；不再预置项目作者的网关。
         imageGenBaseUrl: '',
         defaultApiProviderId: 'custom',
