@@ -649,14 +649,19 @@ const app = createApp({
             naiOfficialSeed: '',
             // 生图配置预设列表：可保存多个不同的生图服务地址，随时切换。
             savedImageEndpoints: [
-                { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '' },
-                { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '' },
+                { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '', builtin: true },
+                { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '', builtin: true },
                 // ComfyUI 默认端口；直连需给 ComfyUI 加 --enable-cors-header（见设置页提示）。
-                { id: 'preset-comfyui-local', name: '本机 ComfyUI（直连 8188）', url: 'http://127.0.0.1:8188', provider: 'comfyui', key: '' }
+                { id: 'preset-comfyui-local', name: '本机 ComfyUI（直连 8188）', url: 'http://127.0.0.1:8188', provider: 'comfyui', key: '', builtin: true }
             ],
             activeImageEndpointId: 'preset-forge-proxy',
             imageStyle: 'vertical',
             customImageArtists: '',
+            // 自定义风格的命名预设：{ id, name, artists }。
+            // 刻意是**全局**字段（不进 IMAGE_PROFILE_FIELDS）：需求是「存下来的风格在
+            // 所有生图方式下都能选到」，跟着生图预设走的话换个服务就看不到了。
+            // 「当前选了哪一个」由 imageStyle（'custom:<id>'）承载，那个照旧随预设走。
+            imageStylePresets: [],
             imageModel: 'nai-diffusion-4-5-full',
             imageSize: '竖图',
             // --- NAI（RP Hub 网关）专用：写进生图 URL 的出图参数 ---
@@ -743,9 +748,38 @@ const app = createApp({
         // NovelAI 官方 API：与 RP Hub 网关那套协议完全不同（Bearer + /ai/generate-image + ZIP 响应）。
         const isNaiOfficialProvider = computed(() => settings.imageProvider === 'novelai-official');
         const naiOfficialUtils = window.RPHubNaiOfficialUtils;
+
+        // ===== 生图风格预设（自定义画师串的命名保存）=====
+        // 这一份列表是**全局**的：四个生图方式（NAI 网关 / 官方 API / SD / ComfyUI）共用它，
+        // 由 cardUtils.getImageStyleArtists 统一取值，因此「全局所有生图方式都有效」
+        // 只需要保证这一处是全局的即可。
+        const imageStylePresets = computed(() => cardUtils.normalizeImageStylePresets(settings.imageStylePresets));
+        // 当前选中的是不是自定义预设（而不是内置风格或裸「自定义」）。
+        const activeImageStylePresetId = computed(() => (
+            cardUtils.isImageStylePresetValue(settings.imageStyle)
+                ? cardUtils.parseImageStylePresetValue(settings.imageStyle)
+                : ''
+        ));
+        const activeImageStylePreset = computed(() => (
+            cardUtils.findImageStylePreset(imageStylePresets.value, activeImageStylePresetId.value)
+        ));
+        const isCustomImageStyle = computed(() => (
+            activeImageStylePresetId.value !== '' || settings.imageStyle === 'custom'
+        ));
+        // 风格下拉 = 内置风格 + 用户保存的自定义预设（带「(自定义)」后缀）。
+        // V5 不支持的那几项在下面按模型过滤，自定义预设不受影响。
+        const imageStyleOptionsWithPresets = computed(() => {
+            const list = [...imageStyleOptions];
+            // 「自定义」内置项保留：它是「临时手填一段画师串」的入口，
+            // 与「保存下来的命名预设」并存，用户想临时试一段不必先存一条。
+            imageStylePresets.value.forEach(item => {
+                list.push({ value: cardUtils.imageStylePresetValue(item.id), label: cardUtils.imageStylePresetLabel(item.name) });
+            });
+            return list;
+        });
         const availableImageStyleOptions = computed(() => settings.imageModel === 'nai-diffusion-5-full'
-            ? imageStyleOptions.filter(option => !v5UnsupportedImageStyles.has(option.value))
-            : imageStyleOptions);
+            ? imageStyleOptionsWithPresets.value.filter(option => !v5UnsupportedImageStyles.has(option.value))
+            : imageStyleOptionsWithPresets.value);
         // --- NovelAI 官方 API 的下拉选项（全部来自 core-utils 的官方常量，不在这里手写）---
         const naiOfficialModelOptions = computed(() => (window.RPHubConfig?.uiOptions?.novelaiOfficialModels || []).map(item => ({
             value: item.value,
@@ -1050,7 +1084,7 @@ let removedProviderConfigCleared = false;
         }, { deep: true });
 
         // Watch image gen and model settings for sync
-        watch(() => [settings.imageGenKey, settings.imageGenBaseUrl, settings.imageModel, settings.imageStyle, settings.customImageArtists, settings.imageGenCount, settings.qualityModel, settings.balancedModel, settings.fastModel, settings.uiTemplateModel, settings.fontFamily, settings.fontFamilyVersion], () => {
+        watch(() => [settings.imageGenKey, settings.imageGenBaseUrl, settings.imageModel, settings.imageStyle, settings.customImageArtists, settings.imageStylePresets, settings.imageGenCount, settings.qualityModel, settings.balancedModel, settings.fastModel, settings.uiTemplateModel, settings.fontFamily, settings.fontFamilyVersion], () => {
             syncSettingsToGenerator();
         });
 
@@ -1980,13 +2014,18 @@ let removedProviderConfigCleared = false;
                 if (!Array.isArray(settings.savedImageEndpoints) || settings.savedImageEndpoints.length === 0) {
                     settings.savedImageEndpoints = [
                         // 示例预设：/sd 走本站 nginx 反代（同源，绕开 CORS），或直连本机 Forge。
-                        { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '' },
-                        { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '' }
+                        // builtin: true = 内置预设，界面上不允许删除（用户另存的没有这个标记）。
+                        { id: 'preset-forge-proxy', name: '本地 Forge（经本站 /sd 反向代理）', url: '/sd', provider: 'stable-diffusion', key: '', builtin: true },
+                        { id: 'preset-forge-direct', name: '本机 Forge（直连 7860）', url: 'http://127.0.0.1:7860', provider: 'stable-diffusion', key: '', builtin: true }
                     ];
                 }
                 // 升级前保存的预设只有地址、没有出图参数，用当前这套补一份基线并落盘，
                 // 否则「切预设带出自己的风格/SD 参数」对老预设不生效。
-                if (imageUtils.seedEndpointProfiles(settings.savedImageEndpoints, settings)) {
+                let endpointMetaChanged = imageUtils.seedEndpointProfiles(settings.savedImageEndpoints, settings);
+                // 老存档里的内置预设没有 builtin 标记：按 id 补上并落盘，
+                // 让「内置预设不可删除」对既有用户也立刻生效。
+                if (imageUtils.markBuiltinImageEndpoints(settings.savedImageEndpoints)) endpointMetaChanged = true;
+                if (endpointMetaChanged) {
                     try {
                         await setStoredValue('settings', settings);
                     } catch (error) {
@@ -2022,6 +2061,13 @@ let removedProviderConfigCleared = false;
                 }
                 // SD 自定义分辨率：老存档没有这几个键，靠默认值兜底；这里只做合法性收敛。
                 settings.sdCustomSizeEnabled = settings.sdCustomSizeEnabled === true;
+                // 风格预设：老存档没有这个键；坏条目由 normalize 统一兜掉。
+                settings.imageStylePresets = cardUtils.normalizeImageStylePresets(settings.imageStylePresets);
+                // 指向已被删掉的预设时收敛回「自定义」：否则下拉显示空白、出图也取不到画师串。
+                const stylePresetId = cardUtils.parseImageStylePresetValue(settings.imageStyle);
+                if (stylePresetId && !cardUtils.findImageStylePreset(settings.imageStylePresets, stylePresetId)) {
+                    settings.imageStyle = 'custom';
+                }
                 // VAE 同理：老存档没有 sdVae，收敛成空串 = 不使用 VAE。
                 settings.sdVae = String(settings.sdVae || '').trim();
                 if (!(sdSizePresets || []).some(item => item.value === settings.sdSizePreset)) {
@@ -2591,7 +2637,7 @@ let removedProviderConfigCleared = false;
         // 组装 SD 的正向提示词：风格画师串 + 自定义前缀 + LoRA + 角色标签
         const buildSdPrompt = (tags) => {
             const parts = [];
-            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
             if (styleArtists) parts.push(styleArtists);
             const prefix = String(settings.sdPromptPrefix || '').trim();
             if (prefix) parts.push(prefix);
@@ -2775,6 +2821,7 @@ let removedProviderConfigCleared = false;
                 settings.savedImageEndpoints = [];
             }
             const existingIndex = settings.savedImageEndpoints.findIndex(e => e.id === activeImageEndpointId.value || e.name === cleanName);
+            const existing = existingIndex !== -1 ? settings.savedImageEndpoints[existingIndex] : null;
             const endpointData = {
                 id: existingIndex !== -1 ? settings.savedImageEndpoints[existingIndex].id : `endpoint-${Date.now()}`,
                 name: cleanName,
@@ -2784,6 +2831,10 @@ let removedProviderConfigCleared = false;
                 // 出图参数随预设一起保存，切回来即恢复。
                 profile: captureImageProfile()
             };
+            // 覆盖保存内置预设时保留「不可删除」标记（改参数不等于变成用户预设）。
+            if (imageUtils.isBuiltinImageEndpoint(existing)) {
+                endpointData.builtin = true;
+            }
             if (existingIndex !== -1) {
                 settings.savedImageEndpoints[existingIndex] = endpointData;
                 showToast(`已更新生图配置「${cleanName}」`, 'success');
@@ -2803,6 +2854,12 @@ let removedProviderConfigCleared = false;
             }
             const found = getActiveImageEndpoint();
             if (!found) return;
+            // 内置 preset（/sd 反代、直连 7860、本机 ComfyUI）是开箱可用的示例配置，
+            // 删了就回不来，因此只允许删用户自己保存的。
+            if (imageUtils.isBuiltinImageEndpoint(found)) {
+                showToast(`「${found.name}」是内置预设，不可删除；可用「保存为预设」另存一份再改`, 'warning');
+                return;
+            }
             if (!window.confirm(`确定要删除生图配置「${found.name}」吗？`)) return;
 
             settings.savedImageEndpoints = settings.savedImageEndpoints.filter(e => e.id !== found.id);
@@ -2818,6 +2875,74 @@ let removedProviderConfigCleared = false;
                 activeImageEndpointId.value = '';
                 settings.activeImageEndpointId = '';
             }
+        });
+
+        // ===== 生图风格预设：保存 / 删除 =====
+        // 存的是「当前自定义文本框里的画师串」。存完立刻选中它，省一次手动切换。
+        const saveImageStylePreset = () => {
+            const artists = String(settings.customImageArtists || '').trim();
+            if (!artists) {
+                showToast('请先在下面的自定义画师串里填入内容，再保存为风格预设', 'warning');
+                return;
+            }
+            // 已经选中某个自定义预设时，默认名沿用它的名字（相当于「更新这条」）。
+            const defaultName = activeImageStylePreset.value?.name || '可爱风格';
+            // 名字语义要说清：同名 = 覆盖更新（与「保存为预设」那套一致），改名 = 另存新的一条。
+            // 不做「改名即重命名」是刻意的：那是静默改动，用户在别处引用过的名字会突然消失。
+            const promptHint = activeImageStylePreset.value
+                ? '（沿用原名会更新当前预设，改成别的名字则另存为新的预设）'
+                : '（下拉里会显示为「名称(自定义)」）';
+            const name = window.prompt(`请输入风格预设的名称${promptHint}：`, defaultName);
+            if (!name || !name.trim()) return;
+            const cleanName = name.trim();
+
+            const result = cardUtils.upsertImageStylePreset(settings.imageStylePresets, {
+                // 选中已有预设 + 名字没变 = 原地更新；改了名字则存成新的一条。
+                id: activeImageStylePreset.value?.name === cleanName ? activeImageStylePresetId.value : '',
+                name: cleanName,
+                artists
+            });
+            if (result.error) {
+                showToast(result.error, 'error');
+                return;
+            }
+            settings.imageStylePresets = result.presets;
+            // 存完就切过去，让用户立刻看到「名称(自定义)」出现在下拉里。
+            settings.imageStyle = cardUtils.imageStylePresetValue(result.id);
+            saveData();
+            showToast(`${result.added ? '已保存' : '已更新'}风格预设「${cardUtils.imageStylePresetLabel(cleanName)}」`, 'success');
+        };
+
+        // 删除当前选中的自定义风格预设。内置风格（韩漫/同人/2.5D/本子/GalGame/自定义）
+        // 不是这里保存的，因此不在删除范围内，下拉里也不会出现删除按钮。
+        const deleteImageStylePreset = () => {
+            const preset = activeImageStylePreset.value;
+            if (!preset) {
+                showToast('请先在下拉里选择一个自己保存的「(自定义)」风格预设', 'info');
+                return;
+            }
+            if (!window.confirm(`确定要删除风格预设「${cardUtils.imageStylePresetLabel(preset.name)}」吗？`)) return;
+            settings.imageStylePresets = cardUtils.removeImageStylePreset(settings.imageStylePresets, preset.id);
+            // 画师串留在文本框里，方便用户改个名再存回去；只把风格切回内置「自定义」。
+            settings.imageStyle = 'custom';
+            saveData();
+            showToast(`已删除风格预设「${cardUtils.imageStylePresetLabel(preset.name)}」`, 'info');
+        };
+
+        // 选中某个自定义预设时，把它的画师串载入文本框：
+        // 四个生图方式都从文本框取最终画师串（见 getImageStyleArtists），
+        // 载入后既能看到当前用的内容，也能直接在原文基础上微调。
+        watch(() => settings.imageStyle, (style) => {
+            const id = cardUtils.parseImageStylePresetValue(style);
+            if (!id) return;
+            const preset = cardUtils.findImageStylePreset(settings.imageStylePresets, id);
+            // 预设被删后又从某个生图预设的 profile 里被载回来（'custom:<已删 id>'）：
+            // 收敛成内置「自定义」，至少还能用文本框里的画师串出图，不会显示成空白选项。
+            if (!preset) {
+                settings.imageStyle = 'custom';
+                return;
+            }
+            if (settings.customImageArtists !== preset.artists) settings.customImageArtists = preset.artists;
         });
 
         const sdModelOptions = computed(() => {
@@ -3036,7 +3161,7 @@ let removedProviderConfigCleared = false;
         // 正向提示词拼装：沿用 SD 那套（风格画师串 → 自定义前缀 → LoRA → 角色标签）。
         const buildComfyPositivePrompt = (tags) => {
             const parts = [];
-            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
             if (styleArtists) parts.push(styleArtists);
             const extra = String(settings.comfyPrompt || '').trim();
             if (extra) parts.push(extra);
@@ -3526,7 +3651,7 @@ let removedProviderConfigCleared = false;
         // 正向提示词：风格画师串 → 额外前缀 → 角色标签（与其余链路同一套拼装口径）。
         const buildNaiOfficialPrompt = (tags) => {
             const parts = [];
-            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            const styleArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
             if (styleArtists) parts.push(styleArtists);
             const prefix = String(settings.sdPromptPrefix || '').trim();
             if (prefix) parts.push(prefix);
@@ -3974,8 +4099,10 @@ let removedProviderConfigCleared = false;
                 if (!regex) return [];
             }
 
-            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
-            const styleName = imageStyleOptions.find(option => option.value === settings.imageStyle)?.label
+            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
+            // 提示文案要能认出「自定义预设」：内置风格的 label 在 imageStyleOptions 里，
+            // 自定义预设的 label 在带预设的那一份列表里，两边都查一遍。
+            const styleName = imageStyleOptionsWithPresets.value.find(option => option.value === settings.imageStyle)?.label
                 || imageStyleOptions[0].label;
             const modelName = getImageModelName(settings.imageModel);
 
@@ -4046,13 +4173,26 @@ let removedProviderConfigCleared = false;
         });
 
         watch(() => settings.customImageArtists, () => {
-            if (settings.imageStyle === 'custom') {
+            // 内置「自定义」与保存下来的「(自定义)」预设都从文本框取画师串，两者都要同步进正则。
+            if (isCustomImageStyle.value) {
                 updateImageGenRegexState({ enableRegex: isAutoImageGenEnabled.value });
             }
         });
 
+        // 新增/删除/改名风格预设后，正则里内嵌的艺术家串也要跟着更新
+        // （否则同一条正则还会继续用上一份画师串出图）。
+        watch(() => settings.imageStylePresets, () => {
+            if (isCustomImageStyle.value) {
+                updateImageGenRegexState({ enableRegex: isAutoImageGenEnabled.value });
+            }
+        }, { deep: true });
+
         watch(() => settings.imageModel, (imageModel) => {
-            if (imageModel === 'nai-diffusion-5-full' && v5UnsupportedImageStyles.has(settings.imageStyle)) {
+            // V5 不认那几项内置风格，但自定义预设（'custom:<id>'）与裸「自定义」不在限制内：
+            // 用 startsWith 判定而不是 Set.has，避免把用户刚存的预设一起打回内置风格。
+            if (imageModel === 'nai-diffusion-5-full'
+                && !isCustomImageStyle.value
+                && v5UnsupportedImageStyles.has(settings.imageStyle)) {
                 settings.imageStyle = 'vertical';
             }
             const messages = updateImageGenRegexState({ enableRegex: isAutoImageGenEnabled.value });
@@ -8531,7 +8671,7 @@ let removedProviderConfigCleared = false;
 
             // 1. NAI画图正则 (统一版本)
             const imageGenRegexName = 'NAI画图正则';
-            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
+            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
 
             const encodedTargetArtists = encodeURIComponent(targetArtists);
             // SD 的实际像素也要进 URL：卡片靠 w/h 还原宽高比，切到自定义分辨率后比例才会跟着变。
@@ -10301,6 +10441,9 @@ let removedProviderConfigCleared = false;
             comfyLibrary, comfyLibraryOptions, comfyLibrarySelection,
             saveComfyWorkflowToLibrary, deleteComfyWorkflowFromLibrary, importComfyWorkflowFile,
             activeImageEndpointId, savedImageEndpointOptions, selectImageEndpoint, saveCurrentImageEndpoint, deleteActiveImageEndpoint,
+            // 生图风格：自定义画师串的命名预设（保存 / 删除）
+            imageStylePresets, activeImageStylePreset, activeImageStylePresetId, isCustomImageStyle,
+            saveImageStylePreset, deleteImageStylePreset,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
             getToolCallModeText, hasThinkingOrTools, isMessageThinkingOrRunning, isThinkingSummaryOpen, toggleThinkingSummary, markThinkingSummaryDetailOpened, getTimelineSteps,
             isStyleFilterDetailsOpen, toggleStyleFilterDetails, getStyleFilterHitSegments,

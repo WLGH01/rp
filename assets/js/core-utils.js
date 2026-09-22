@@ -300,9 +300,102 @@ window.RPHubUtils = {
     const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
 
     const { imageStyleArtists } = window.RPHubBuiltinContent;
-    const getImageStyleArtists = (style, customArtists = '') => {
-        if (style === 'custom') return customArtists || '';
-        const normalizedStyle = style === 'default' ? 'vertical' : style === 'hentai' ? 'r18' : style;
+
+    // ===== 生图风格：自定义画师串的命名预设（保存 / 删除）=====
+    //
+    // 背景：生图风格原先只有内置那几项 + 一个「自定义」文本框，画师串只能现场手填，
+    // 换一次就要重新粘一遍。这里允许把自定义画师串存成命名预设：存「可爱风格」，
+    // 下拉里就显示「可爱风格(自定义)」，与内置风格并列。
+    //
+    // 为什么是全局资产（不进 IMAGE_PROFILE_FIELDS）：
+    // 需求是「保存下来的风格在所有生图方式下都能选到」。若塞进生图预设的 profile，
+    // 换个生图服务（NAI 网关 / 官方 API / SD / ComfyUI）就看不到自己存过的风格了。
+    // 「当前选了哪一个」仍然是 imageStyle 字段本身，那个照旧随生图预设走。
+    const IMAGE_STYLE_PRESET_PREFIX = 'custom:';
+    const IMAGE_STYLE_PRESET_LIMIT = 50;
+
+    // 预设 id 编进 imageStyle 的值里（'custom:<id>'），而不是另开一个「当前风格预设」字段：
+    // 四个生图方式、生图正则、缓存指纹、界面上都只认 imageStyle 这一个字段，
+    // 少一处状态就少一处能对不上的地方。
+    const isImageStylePresetValue = (style) => String(style ?? '').startsWith(IMAGE_STYLE_PRESET_PREFIX);
+    const parseImageStylePresetValue = (style) => (
+        isImageStylePresetValue(style) ? String(style).slice(IMAGE_STYLE_PRESET_PREFIX.length) : ''
+    );
+    const imageStylePresetValue = (id) => `${IMAGE_STYLE_PRESET_PREFIX}${String(id ?? '')}`;
+
+    // 存档里的预设列表按不可信输入处理：丢掉坏条目、去重 id、夹住数量上限。
+    // 兜底 id 刻意用「位置」而不是时间戳：normalize 会在每次解析画师串时被调用，
+    // 若 id 每次都变，手改坏存档里那种没有 id 的条目会永远匹配不上自己。
+    const normalizeImageStylePresets = (presets) => {
+        const list = Array.isArray(presets) ? presets : [];
+        const seen = new Set();
+        const out = [];
+        for (const item of list) {
+            if (!item || typeof item !== 'object') continue;
+            const name = String(item.name || '').trim();
+            const artists = String(item.artists || '').trim();
+            if (!name || !artists) continue;
+            let id = String(item.id || '').trim() || `style-${out.length + 1}`;
+            while (seen.has(id)) id = `${id}-1`;
+            seen.add(id);
+            out.push({ id, name, artists });
+            if (out.length >= IMAGE_STYLE_PRESET_LIMIT) break;
+        }
+        return out;
+    };
+
+    const findImageStylePreset = (presets, id) => {
+        const target = String(id ?? '');
+        if (!target) return null;
+        return normalizeImageStylePresets(presets).find(item => item.id === target) || null;
+    };
+
+    // 保存/更新一条。传 id 且命中则覆盖，同名也视为更新那一条
+    // （否则连点两次「可爱风格」会出现两个一模一样的选择项）。
+    // 返回 { presets, id, added, error }，由调用方决定提示文案。
+    const upsertImageStylePreset = (presets, entry = {}) => {
+        const list = normalizeImageStylePresets(presets);
+        const name = String(entry.name || '').trim();
+        const artists = String(entry.artists || '').trim();
+        if (!name) return { presets: list, id: '', added: false, error: '预设名称不能为空' };
+        if (!artists) return { presets: list, id: '', added: false, error: '画师串不能为空' };
+        const targetId = String(entry.id || '').trim();
+        const index = targetId ? list.findIndex(item => item.id === targetId) : -1;
+        const useIndex = index !== -1 ? index : list.findIndex(item => item.name === name);
+        if (useIndex === -1 && list.length >= IMAGE_STYLE_PRESET_LIMIT) {
+            return { presets: list, id: '', added: false, error: `最多保存 ${IMAGE_STYLE_PRESET_LIMIT} 个风格预设` };
+        }
+        const record = {
+            id: useIndex !== -1
+                ? list[useIndex].id
+                : `style-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+            name,
+            artists
+        };
+        if (useIndex !== -1) list[useIndex] = record;
+        else list.push(record);
+        return { presets: list, id: record.id, added: useIndex === -1 };
+    };
+
+    const removeImageStylePreset = (presets, id) => normalizeImageStylePresets(presets)
+        .filter(item => item.id !== String(id ?? ''));
+
+    // 风格下拉里的显示名：自定义预设统一带「(自定义)」后缀，
+    // 一眼区分「内置风格」与「自己存的风格」。
+    const imageStylePresetLabel = (name) => `${String(name || '').trim()}(自定义)`;
+
+    // 四个生图方式（NAI 网关 / 官方 API / SD / ComfyUI）都走这一个取值函数，
+    // 所以「存下来的风格全局有效」这件事只有这一处需要保证。
+    const getImageStyleArtists = (style, customArtists = '', stylePresets = []) => {
+        const rawStyle = String(style ?? '');
+        if (isImageStylePresetValue(rawStyle)) {
+            const preset = findImageStylePreset(stylePresets, parseImageStylePresetValue(rawStyle));
+            // 文本框优先：选中预设时已把它的画师串载入文本框，用户改动即所见即所得。
+            // 文本框为空（或预设被删掉）时退回预设里存的那一份，绝不静默换成内置风格出图。
+            return customArtists || preset?.artists || '';
+        }
+        if (rawStyle === 'custom') return customArtists || '';
+        const normalizedStyle = rawStyle === 'default' ? 'vertical' : rawStyle === 'hentai' ? 'r18' : rawStyle;
         return imageStyleArtists[normalizedStyle] || imageStyleArtists.vertical;
     };
 
@@ -1003,6 +1096,15 @@ window.RPHubUtils = {
         findUnprotectedMatches,
         isNativeReasoningPart,
         getImageStyleArtists,
+        isImageStylePresetValue,
+        parseImageStylePresetValue,
+        imageStylePresetValue,
+        imageStylePresetLabel,
+        normalizeImageStylePresets,
+        findImageStylePreset,
+        upsertImageStylePreset,
+        removeImageStylePreset,
+        imageStylePresetLimit: IMAGE_STYLE_PRESET_LIMIT,
         imageUrlToPngBytes,
         injectPngTextChunk,
         normalizeImportedRegexScript,
@@ -1552,6 +1654,41 @@ window.RPHubUtils = {
             applied = true;
         });
         return applied;
+    };
+
+    // ===== 内置生图预设：不可删除 =====
+    //
+    // 启动时自动补的那几个示例预设（本站 /sd 反代、直连 7860、本机 ComfyUI 8188）
+    // 是「新用户第一眼能直接用的配置」。以前它们与用户自己存的预设完全同权，
+    // 手滑删掉后只能靠改存档或重置才能回来，所以这里给它们打上 builtin 标记：
+    //   - 按 id 认（老存档里没有 builtin 字段，靠 id 兜底识别，升级后立刻生效）；
+    //   - 只有这些内置项不可删，用户自己保存的一律可删。
+    const BUILTIN_IMAGE_ENDPOINT_IDS = Object.freeze([
+        'preset-forge-proxy',
+        'preset-forge-direct',
+        'preset-comfyui-local'
+    ]);
+
+    const isBuiltinImageEndpoint = (endpoint) => {
+        if (!endpoint || typeof endpoint !== 'object') return false;
+        if (endpoint.builtin === true) return true;
+        // builtin === false 是显式「用户自己存的」，优先于 id 兜底。
+        if (endpoint.builtin === false) return false;
+        return BUILTIN_IMAGE_ENDPOINT_IDS.includes(String(endpoint.id || ''));
+    };
+
+    // 给老存档里的内置预设补 builtin 字段并落盘，让「不可删除」对既有用户也生效。
+    const markBuiltinImageEndpoints = (endpoints) => {
+        if (!Array.isArray(endpoints)) return false;
+        let marked = false;
+        endpoints.forEach(endpoint => {
+            if (!endpoint || typeof endpoint !== 'object') return;
+            if (Object.prototype.hasOwnProperty.call(endpoint, 'builtin')) return;
+            if (!BUILTIN_IMAGE_ENDPOINT_IDS.includes(String(endpoint.id || ''))) return;
+            endpoint.builtin = true;
+            marked = true;
+        });
+        return marked;
     };
 
     // 老存档的预设只有地址、没有出图参数：用当前这套补一份基线，
@@ -2724,6 +2861,8 @@ window.RPHubUtils = {
         captureImageProfile,
         applyImageProfile,
         seedEndpointProfiles,
+        isBuiltinImageEndpoint,
+        markBuiltinImageEndpoints,
         promoteImageJobToServer,
         resolveArchivedImageFallbackUrl,
         isLocalBase64ImageJob,

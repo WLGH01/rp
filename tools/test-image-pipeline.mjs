@@ -1266,4 +1266,199 @@ assertTrue('批量导入不逐张落盘（save: false）', appJs.includes('save:
 assertTrue('整批只落盘一次并在失败时回滚', appJs.includes('const rollback = new Set(importedUuids);'));
 assertTrue('顺序处理且逐张让出主线程', appJs.includes('for (const item of queue)') && appJs.includes('await new Promise(resolve => setTimeout(resolve, 0));'));
 
+// --- 17. 生图风格：自定义画师串的命名预设（保存 / 删除）---
+// 需求：把自定义画师串存成命名预设（存「可爱风格」→ 下拉显示「可爱风格(自定义)」），
+// 且**所有生图方式**都能选到；内置风格不可删除，只有自己存的能删。
+const cardUtils = sandbox.window.RPHubCardUtils;
+assertTrue('core-utils 导出 RPHubCardUtils', Boolean(cardUtils));
+
+section('17) 生图风格预设：命名、显示、取值');
+const cuteArtists = 'artist:cute, soft lighting, pastel colors';
+const stylePreset = cardUtils.upsertImageStylePreset([], { name: '可爱风格', artists: cuteArtists });
+assertEqual('保存成功', stylePreset.added, true);
+assertEqual('返回新 id', typeof stylePreset.id, 'string');
+assertEqual('列表里有一条', stylePreset.presets.length, 1);
+assertEqual('画师串原样保存', stylePreset.presets[0].artists, cuteArtists);
+
+// 显示名：自定义预设统一带「(自定义)」后缀，与内置风格区分开
+assertEqual('下拉显示名带「(自定义)」后缀', cardUtils.imageStylePresetLabel('可爱风格'), '可爱风格(自定义)');
+assertEqual('下拉显示名能拼进选项列表', cardUtils.imageStylePresetLabel(stylePreset.presets[0].name), '可爱风格(自定义)');
+
+// imageStyle 的值：'custom:<id>'，四个生图方式共用同一个字段
+const cuteValue = cardUtils.imageStylePresetValue(stylePreset.id);
+assertTrue('预设值以 custom: 前缀标识', cardUtils.isImageStylePresetValue(cuteValue));
+assertEqual('能从值里取回 id', cardUtils.parseImageStylePresetValue(cuteValue), stylePreset.id);
+assertEqual('内置风格不会被认成预设', cardUtils.isImageStylePresetValue('vertical'), false);
+assertEqual('裸「自定义」不是命名预设', cardUtils.isImageStylePresetValue('custom'), false);
+assertEqual('空值安全', cardUtils.parseImageStylePresetValue(null), '');
+
+// 取值：选中预设 + 文本框为空 → 用预设里存的画师串（不能静默回落到内置风格）
+assertEqual('选中预设时用预设的画师串',
+    cardUtils.getImageStyleArtists(cuteValue, '', stylePreset.presets), cuteArtists);
+// 文本框优先：选中预设时界面已把画师串载入文本框，用户改动要生效
+assertEqual('文本框优先于预设（可见即可得）',
+    cardUtils.getImageStyleArtists(cuteValue, 'artist:edited', stylePreset.presets), 'artist:edited');
+// 预设被删（或老存档没带列表）→ 退回文本框，绝不换成内置风格出图
+assertEqual('预设已删时退回文本框内容', cardUtils.getImageStyleArtists(cuteValue, 'artist:kept', []), 'artist:kept');
+assertEqual('预设与文本框都没有时不落到内置风格',
+    cardUtils.getImageStyleArtists(cuteValue, '', []), '');
+
+// 内置风格的行为完全不变
+assertEqual('内置风格仍然取内置画师串',
+    cardUtils.getImageStyleArtists('vertical', '', stylePreset.presets),
+    sandbox.window.RPHubBuiltinContent.imageStyleArtists.vertical);
+assertEqual('裸「自定义」仍然只认文本框',
+    cardUtils.getImageStyleArtists('custom', 'artist:raw', stylePreset.presets), 'artist:raw');
+assertEqual('未知风格仍然回落内置竖图风格',
+    cardUtils.getImageStyleArtists('who-knows', '', stylePreset.presets),
+    sandbox.window.RPHubBuiltinContent.imageStyleArtists.vertical);
+
+section('17b) 生图风格预设：更新 / 去重 / 删除');
+// 同名再存 = 更新那一条，不会出现两个「可爱风格(自定义)」
+const styleUpdated = cardUtils.upsertImageStylePreset(stylePreset.presets, { name: '可爱风格', artists: 'artist:cute-v2' });
+assertEqual('同名不新增', styleUpdated.presets.length, 1);
+assertEqual('同名视为更新', styleUpdated.added, false);
+assertEqual('id 保持不变（选中状态不丢）', styleUpdated.id, stylePreset.id);
+assertEqual('画师串被更新', styleUpdated.presets[0].artists, 'artist:cute-v2');
+
+const styleTwo = cardUtils.upsertImageStylePreset(styleUpdated.presets, { name: '暗黑风格', artists: 'artist:dark' });
+assertEqual('不同名会新增', styleTwo.presets.length, 2);
+
+// 空名 / 空画师串要报错，不能存出无名或空预设
+assertEqual('空名被拒', cardUtils.upsertImageStylePreset(styleTwo.presets, { name: '  ', artists: 'x' }).error, '预设名称不能为空');
+assertEqual('空画师串被拒', cardUtils.upsertImageStylePreset(styleTwo.presets, { name: 'n', artists: ' ' }).error, '画师串不能为空');
+assertEqual('被拒时不改动列表', cardUtils.upsertImageStylePreset(styleTwo.presets, { name: '', artists: '' }).presets.length, 2);
+
+// 删除只影响指定的一条
+const styleAfterDelete = cardUtils.removeImageStylePreset(styleTwo.presets, styleTwo.id);
+assertEqual('删除后只剩一条', styleAfterDelete.length, 1);
+assertEqual('删掉的是指定那条', styleAfterDelete[0].id, stylePreset.id);
+assertEqual('删不存在的 id 不报错', cardUtils.removeImageStylePreset(styleAfterDelete, 'nope').length, 1);
+assertEqual('删空列表安全', cardUtils.removeImageStylePreset(null, 'x').length, 0);
+
+section('17c) 生图风格预设：坏存档收敛');
+// 存档是不可信输入：坏条目丢弃、重复 id 收敛、数量封顶
+assertEqual('非数组 → 空列表', cardUtils.normalizeImageStylePresets('oops'), []);
+assertEqual('缺 name 的条目被丢弃', cardUtils.normalizeImageStylePresets([{ artists: 'x' }]).length, 0);
+assertEqual('缺画师串的条目被丢弃', cardUtils.normalizeImageStylePresets([{ name: 'n' }]).length, 0);
+assertEqual('非对象条目被丢弃', cardUtils.normalizeImageStylePresets([null, 'x', 3]).length, 0);
+const duped = cardUtils.normalizeImageStylePresets([
+    { id: 'same', name: 'a', artists: '1' },
+    { id: 'same', name: 'b', artists: '2' }
+]);
+assertEqual('重复 id 被收敛成两条', duped.length, 2);
+assertTrue('重复 id 不再相同', duped[0].id !== duped[1].id);
+// 无 id 的坏条目兜底 id 必须稳定：normalize 会被反复调用，id 每次都变就永远匹配不上
+assertEqual('无 id 条目兜底 id 稳定',
+    cardUtils.normalizeImageStylePresets([{ name: 'a', artists: '1' }])[0].id,
+    cardUtils.normalizeImageStylePresets([{ name: 'a', artists: '1' }])[0].id);
+assertEqual('查询命中', cardUtils.findImageStylePreset(styleTwo.presets, styleTwo.id).name, '暗黑风格');
+assertEqual('查询未命中返回 null', cardUtils.findImageStylePreset(styleTwo.presets, 'nope'), null);
+assertTrue('数量有上限',
+    cardUtils.normalizeImageStylePresets(Array.from({ length: 80 }, (_, i) => ({ id: `s${i}`, name: `n${i}`, artists: 'a' }))).length <= 50);
+
+section('17d) 生图风格预设：全局生效（不进生图预设 profile）');
+// 关键回归：「存下来的风格在所有生图方式下都能选到」。
+// 若把预设列表塞进 IMAGE_PROFILE_FIELDS，换个生图服务就会被预设的 profile 覆盖/看不到。
+assertTrue('风格预设列表不进生图预设 profile（否则换服务就看不到自己的风格）',
+    !imageUtils.IMAGE_PROFILE_FIELDS.includes('imageStylePresets'));
+// 「当前选了哪一个」仍然是 imageStyle，照旧随生图预设走
+assertTrue('imageStyle 仍在 profile 字段里（选中状态跟着生图预设）',
+    imageUtils.IMAGE_PROFILE_FIELDS.includes('imageStyle'));
+
+// 四条生图链路都走同一个取值函数（它不接收 provider 参数），
+// 所以「全局所有生图方式都有效」只需要保证：预设列表是全局的，不随生图预设被换掉。
+const providerSwitch = { ...baseSettings, imageStyle: cuteValue, imageStylePresets: stylePreset.presets };
+for (const provider of ['novelai', 'novelai-official', 'stable-diffusion', 'comfyui']) {
+    const settingsForProvider = { ...providerSwitch, imageProvider: provider };
+    assertEqual(`${provider} 取到同一份自定义风格画师串`,
+        cardUtils.getImageStyleArtists(
+            settingsForProvider.imageStyle,
+            settingsForProvider.customImageArtists,
+            settingsForProvider.imageStylePresets),
+        cuteArtists);
+}
+// 切换生图预设（换服务）会用 profile 覆盖 imageStyle，但预设列表不在 profile 字段里 → 不会被抹掉
+const switched = { ...providerSwitch };
+imageUtils.applyImageProfile(switched, presetA.profile);
+assertEqual('切换生图预设后风格预设列表仍在（全局资产）', switched.imageStylePresets.length, 1);
+assertEqual('切回自定义预设仍取到原画师串',
+    cardUtils.getImageStyleArtists(cuteValue, '', switched.imageStylePresets), cuteArtists);
+
+section('17e) 生图风格预设：界面与接线');
+assertTrue('index.html 有「保存预设」按钮', indexSource.includes('@click="saveImageStylePreset"'));
+assertTrue('index.html 有「删除预设」按钮', indexSource.includes('@click="deleteImageStylePreset"'));
+assertTrue('删除按钮只在选中自定义预设时出现', /v-if="activeImageStylePreset"[\s\S]{0,300}deleteImageStylePreset/.test(indexSource));
+assertTrue('文本框在自定义预设下也显示（不再是 imageStyle === custom）',
+    indexSource.includes('v-if="isCustomImageStyle"'));
+assertTrue('素材串文本框仍绑定 customImageArtists', indexSource.includes('v-model="settings.customImageArtists"'));
+assertTrue('设置页说明了「名称(自定义)」的显示规则', indexSource.includes('可爱风格(自定义)'));
+assertTrue('设置页说明了只有自己存的能删', indexSource.includes('只有自己保存的预设能删除'));
+assertTrue('app.js 接线保存/删除处理函数',
+    appJs.includes('const saveImageStylePreset = () =>') && appJs.includes('const deleteImageStylePreset = () =>'));
+assertTrue('保存/删除导出给模板',
+    appJs.includes('saveImageStylePreset, deleteImageStylePreset,'));
+assertTrue('新状态默认空列表', /imageStylePresets: \[\],/.test(appJs));
+assertTrue('启动时收敛风格预设（老存档没有该键）',
+    appJs.includes('cardUtils.normalizeImageStylePresets(settings.imageStylePresets)'));
+assertTrue('预设被删后 imageStyle 收敛回 custom',
+    /const stylePresetId = cardUtils\.parseImageStylePresetValue\(settings\.imageStyle\)[\s\S]{0,220}settings\.imageStyle = 'custom'/.test(appJs));
+assertTrue('选中预设时把画师串载入文本框',
+    /watch\(\(\) => settings\.imageStyle, \(style\) => \{[\s\S]{0,600}settings\.customImageArtists = preset\.artists/.test(appJs));
+assertTrue('风格预设变更会同步进生图正则',
+    /settings\.imageStylePresets[\s\S]{0,200}updateImageGenRegexState/.test(appJs));
+assertTrue('风格预设随 SYNC_SETTINGS 同步进角色卡生成器',
+    /settings\.imageStylePresets,[\s\S]{0,400}syncSettingsToGenerator/.test(appJs));
+// 五处取画师串的地方都要带上预设列表，漏一处就会出现「某条链路不认自定义风格」
+const styleArtistCalls = appJs.match(/getImageStyleArtists\(settings\.imageStyle, settings\.customImageArtists, settings\.imageStylePresets\)/g) || [];
+assertEqual('app.js 五处取画师串都传了预设列表', styleArtistCalls.length, 5);
+assertTrue('角色卡生成器同步时也传预设列表',
+    /getImageStyleArtists\(\s*mainSettings\.imageStyle,\s*mainSettings\.customImageArtists,\s*mainSettings\.imageStylePresets\s*\)/.test(
+        readFileSync(join(root, 'character/index.html'), 'utf8')));
+// V5 只过滤内置的少数风格，不能把自定义预设一起打回内置风格
+assertTrue('V5 模型过滤不误伤自定义预设',
+    /nai-diffusion-5-full'[\s\S]{0,150}!isCustomImageStyle\.value[\s\S]{0,150}v5UnsupportedImageStyles\.has/.test(appJs));
+
+// --- 18. 内置生图预设不可删除 ---
+section('18) 内置生图预设：只有自定义的能删除');
+assertTrue('内置预设按 id 识别（老存档没有 builtin 字段）',
+    imageUtils.isBuiltinImageEndpoint({ id: 'preset-forge-proxy' }));
+assertTrue('ComfyUI 默认节点也是内置',
+    imageUtils.isBuiltinImageEndpoint({ id: 'preset-comfyui-local' }));
+assertTrue('用户自己存的预设可删除',
+    !imageUtils.isBuiltinImageEndpoint({ id: 'endpoint-123456' }));
+assertTrue('builtin 标记优先于 id 兜底',
+    !imageUtils.isBuiltinImageEndpoint({ id: 'preset-forge-proxy', builtin: false }));
+assertTrue('显式 builtin: true 也算内置',
+    imageUtils.isBuiltinImageEndpoint({ id: 'endpoint-user', builtin: true }));
+assertEqual('非对象安全', imageUtils.isBuiltinImageEndpoint(null), false);
+assertEqual('空对象安全', imageUtils.isBuiltinImageEndpoint({}), false);
+
+// 老存档补标记：只动内置那几条
+const legacyEndpoints = [
+    { id: 'preset-forge-proxy', name: 'a' },
+    { id: 'endpoint-mine', name: '我的节点' }
+];
+assertTrue('老存档的内置预设被补上标记', imageUtils.markBuiltinImageEndpoints(legacyEndpoints));
+assertEqual('内置预设被标记', legacyEndpoints[0].builtin, true);
+assertEqual('用户预设不被标记', legacyEndpoints[1].builtin, undefined);
+assertTrue('已标记过的不重复标记', !imageUtils.markBuiltinImageEndpoints(legacyEndpoints));
+assertEqual('非数组安全', imageUtils.markBuiltinImageEndpoints(null), false);
+// 用户预设即使 id 撞上内置 id（不可能，但存档不可信）也按 builtin:false 放行
+const explicitUser = [{ id: 'preset-forge-proxy', builtin: false }];
+assertTrue('显式 builtin:false 不被补标记', !imageUtils.markBuiltinImageEndpoints(explicitUser));
+
+assertTrue('删除时拦截内置预设', /imageUtils\.isBuiltinImageEndpoint\(found\)[\s\S]{0,200}return;/.test(appJs));
+assertTrue('覆盖保存内置预设时保留不可删标记',
+    /isBuiltinImageEndpoint\(existing\)[\s\S]{0,120}endpointData\.builtin = true/.test(appJs));
+assertTrue('默认示例预设带 builtin: true', /preset-comfyui-local'[\s\S]{0,200}builtin: true/.test(appJs));
+assertTrue('启动时为老存档补内置标记', appJs.includes('imageUtils.markBuiltinImageEndpoints(settings.savedImageEndpoints)'));
+
+// --- 19. 期望生图数量：界面上有注释说明 ---
+section('19) 期望生图数量：注释说明其语义与不随预设走');
+assertTrue('数量下拉下方有说明文字',
+    /Image Count[\s\S]{0,1200}期望生图数量[\s\S]{0,1600}每一次 AI 回复要插入几张插图/.test(indexSource));
+assertTrue('说明了不随生图预设切换而改变', indexSource.includes('不随「生图预设配置」的切换而改变'));
+assertTrue('说明了可点 ↻ 重出失败的图', /期望生图数量[\s\S]{0,1600}点 ↻ 重出/.test(indexSource));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);
