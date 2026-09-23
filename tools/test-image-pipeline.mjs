@@ -1595,9 +1595,11 @@ assertTrue('新卡开场白算新图', /markLiveImageTagsByText\(char\.first_mes
 const markLiveCalls = (appJs.match(/markLiveImageTagsByText\(/g) || []).length;
 assertEqual('登记入口只有三处（流式 / 非流式 / 开场白），历史加载那条路不许登记', markLiveCalls, 3);
 assertTrue('缓存没命中且不是本会话新图 → 走占位卡',
-    /const isLiveImage[\s\S]{0,200}if \(!options\.fresh && !isLiveImage\) \{\s*\n\s*renderUncachedImageCard/.test(appJs));
+    /const isLiveImage[\s\S]{0,200}if \(!options\.fresh && !isLiveImage\) \{[\s\S]{0,300}renderUncachedImageCard/.test(appJs));
 assertTrue('占位卡由 renderUncachedImageCard 渲染', appJs.includes('const renderUncachedImageCard'));
 assertTrue('占位卡给出「生成这张图」按钮', appJs.includes('generated-image-generate'));
+assertTrue('占位卡文案区分「历史图缺缓存」与「本会话新图生成没成功」',
+    appJs.includes('历史图未缓存') && appJs.includes('这张图没生成成功'));
 assertTrue('点它走 fresh 出图（按原 tag，不改写消息）',
     /generated-image-generate'\)[\s\S]{0,700}loadGeneratedImageCard\(card, requestUrl, \{ fresh: true \}\)/.test(appJs));
 assertTrue('出图前把占位层收掉', /card\.classList\.remove\('is-image-uncached'\)/.test(appJs));

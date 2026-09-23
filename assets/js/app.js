@@ -4746,7 +4746,8 @@ let removedProviderConfigCleared = false;
 
         // 「这张图没有缓存，先不自动生成」的占位卡：
         // 用户看到的是一个框 + 一个明确的按钮，而不是一个悄悄开始的生成任务。
-        const renderUncachedImageCard = (card, requestUrl) => {
+        // 两种情形文案不同：历史图缺缓存（当年没归档/条目被挤掉） vs 本会话新图但生成没成功。
+        const renderUncachedImageCard = (card, requestUrl, { attempted = false } = {}) => {
             card.dataset.imageRequest = requestUrl;
             card.dataset.imageJobState = 'uncached';
             card.classList.remove('is-generating', 'is-waiting', 'is-generation-error');
@@ -4762,7 +4763,9 @@ let removedProviderConfigCleared = false;
             if (!card.querySelector('.generated-image-uncached')) {
                 const box = document.createElement('div');
                 box.className = 'generated-image-uncached';
-                box.innerHTML = '<span class="generated-image-uncached-text">历史图未缓存<br><small>不会自动生成</small></span>'
+                box.innerHTML = `<span class="generated-image-uncached-text">${attempted
+                    ? '这张图没生成成功<br><small>不会自动重试</small>'
+                    : '历史图未缓存<br><small>不会自动生成</small>'}</span>`
                     + '<button type="button" class="generated-image-generate">生成这张图</button>';
                 card.appendChild(box);
             }
@@ -4811,7 +4814,8 @@ let removedProviderConfigCleared = false;
             // 花额度且画面会变，用户明确要求改成「留个框自己点」。见 liveImageTagKeys。
             const isLiveImage = !!tagKey && liveImageTagKeys.has(tagKey) && !attemptedImageTagKeys.has(tagKey);
             if (!options.fresh && !isLiveImage) {
-                renderUncachedImageCard(card, requestUrl);
+                // attempted=true 说明是本会话新图但那次生成没成功（失败/取消），文案区分开。
+                renderUncachedImageCard(card, requestUrl, { attempted: !!tagKey && attemptedImageTagKeys.has(tagKey) });
                 return Promise.resolve({ status: 'uncached' });
             }
             if (tagKey) attemptedImageTagKeys.add(tagKey);
