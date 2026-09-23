@@ -2023,6 +2023,19 @@
                                                 与生图服务、画风、比例无关，属于<span class="font-bold text-teal-700">本机的操作习惯</span>，不随「生图预设配置」的切换而改变；实际张数仍受服务端额度/队列限制，失败的可点 ↻ 重出。
                                             </p>
                                         </div>
+
+                                        <!-- 附加正面提示词：四条生图链路共用（第 82 条） -->
+                                        <div class="generation-setting-card md:col-span-2">
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">附加正面提示词（可选 · 四种生图方式共用）</label>
+                                            <textarea v-model="settings.sdPromptPrefix" rows="2"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
+                                                placeholder="追加在画师串之后、角色标签之前（如：year 2025, realistic, 4k）"></textarea>
+                                            <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                最终提示词的结构是<span class="font-bold text-teal-700">画师串 → 附加前缀 → 角色标签</span>，
+                                                四种方式都生效。网关（Nai2API）没有单独的前缀参数，这里是把它并进 artist 一并下发，
+                                                所以网关与官方 API 收到的提示词结构一致（以前这个框只在 SD 面板里显示，官方/网关的用户看不到也改不了）。
+                                            </p>
+                                        </div>
                                     </div>
 
                                     <!-- Stable Diffusion 专用参数 -->
@@ -2112,13 +2125,6 @@
                                                 <p class="mt-2 text-xs text-gray-400 leading-relaxed">
                                                     会自动转成 &lt;lora:名称:权重&gt; 追加到提示词。LoRA 文件需已放在 Forge 的 models/Lora 目录。
                                                 </p>
-                                            </div>
-
-                                            <div class="generation-setting-card md:col-span-2">
-                                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">额外正向提示词（可选）</label>
-                                                <textarea v-model="settings.sdPromptPrefix" rows="2"
-                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm resize-y custom-scrollbar"
-                                                    placeholder="追加在风格预设之后、角色标签之前"></textarea>
                                             </div>
 
                                             <div class="generation-setting-card md:col-span-2">

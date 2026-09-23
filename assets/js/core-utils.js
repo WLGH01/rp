@@ -2430,6 +2430,74 @@ window.RPHubUtils = {
 
     // 构建官方 API 的请求体。
     // 返回 { input, model, action, parameters }，可直接 JSON.stringify 后 POST。
+    // ===== 多角色提示词（V4 及以上）=====
+    //
+    // 官方文档（docs.novelai.net/en/image/multiplecharacters）：
+    //   - 基础提示词（base）管场景/风格/人数；每个角色单独一段，只写这个角色本人；
+    //   - 人数 tag（`2girls` / `1boy`…）**只能写在 base 里**，角色段里写不带数字的 `girl` / `boy` / `other`；
+    //   - 顺序默认「从上到下、从左到右」，也能给每个角色指定位置；
+    //   - **V4 / V4.5 的位置只支持 5×5 网格**，V5 重做过定位（可自由放）；
+    //   - V4 最多 6 个角色、V5 最多 22 个；
+    //   - 交互动作用 `source#hug` / `target#hug` / `mutual#hug` 标明主动/被动。
+    //
+    // 本站的写法（AI 写在 `image###…###` 里，用官方文档里的 `|` 分隔）：
+    //   `2girls, indoors, night | @左上 girl, purple hair, pointing | @右下 girl, long hair, blush`
+    //   —— 段内可选的位置前缀 `@位置` 只是给官方 API 的 `char_captions.centers` 用的，
+    //   解析后会被**从文本里剥掉**（它对我们不是可读的提示词内容）。
+    const NAI_CHAR_POSITIONS = Object.freeze({
+        '左上': [0.1, 0.1], '上': [0.5, 0.1], '右上': [0.9, 0.1],
+        '左': [0.1, 0.5], '中': [0.5, 0.5], '右': [0.9, 0.5],
+        '左下': [0.1, 0.9], '下': [0.5, 0.9], '右下': [0.9, 0.9]
+    });
+
+    // V4 / V4.5 只支持 5×5 网格 → 坐标吸附到 0.1 的格点；V5 可以自由放。
+    const snapNaiCharPosition = (x, y, { grid = true } = {}) => {
+        const clamp = (value) => Math.max(0, Math.min(1, Number(value)));
+        if (!grid) return { x: clamp(x), y: clamp(y) };
+        const snap = (value) => Math.max(0.1, Math.min(0.9, Math.round(clamp(value) * 10) / 10));
+        return { x: snap(x), y: snap(y) };
+    };
+
+    // 把一段提示词拆成 { base, chars: [{ caption, centers }] }。
+    // 没有 `|` 或没有角色段时 chars 为空 —— 调用方据此保持原来的单段行为。
+    const parseNaiMultiCharacterPrompt = (prompt, { grid = true } = {}) => {
+        const text = String(prompt || '').trim();
+        const rawBlocks = text.split('|');
+        const base = String(rawBlocks.shift() || '').trim();
+        const chars = [];
+        for (const raw of rawBlocks) {
+            let block = String(raw || '').trim();
+            if (!block) continue;
+            let centers = null;
+            // 位置前缀只有两种写法：`@左上`（九宫格关键字）或 `@0.2,0.8`（归一化坐标）。
+            const match = block.match(/^@\s*([^\s,，、]+(?:\s*[,，]\s*[0-9.]+)?)\s*[,，、]?\s*([\s\S]*)$/);
+            if (match) {
+                const marker = String(match[1] || '').trim();
+                const rest = String(match[2] || '').trim();
+                if (rest) {
+                    const keyword = NAI_CHAR_POSITIONS[marker.replace(/^@/, '')];
+                    if (keyword) {
+                        centers = [snapNaiCharPosition(keyword[0], keyword[1], { grid })];
+                        block = rest;
+                    } else {
+                        const coords = marker.match(/^(-?[0-9.]+)\s*[,，]\s*([0-9.]+)$/);
+                        if (coords) {
+                            centers = [snapNaiCharPosition(Number(coords[1]), Number(coords[2]), { grid })];
+                            block = rest;
+                        }
+                    }
+                }
+            }
+            chars.push({ caption: block, centers });
+        }
+        return { base, chars, hasPositions: chars.some(item => !!item.centers) };
+    };
+
+    // 官方 API 的载荷构建。
+    // prompt 允许带多角色写法（`|` 分隔、段首可带 `@位置`）：
+    //   - V4 / V5：解析成 v4_prompt.caption.{base_caption, char_captions}（官方推荐的写法，
+    //     char_captions 能显著减少角色之间「串味」）；给了位置就 use_coords = true；
+    //   - V3 / Furry V3：不解析，原样当普通提示词（这些模型没有这套结构）。
     const buildNaiOfficialPayload = ({ settings = {}, prompt = '', negativePrompt = '' } = {}) => {
         const uiOptions = window.RPHubConfig?.uiOptions || {};
         const model = String(settings.naiOfficialModel || uiOptions.novelaiOfficialModels?.[0]?.value || 'nai-diffusion-5-full');
@@ -2486,11 +2554,19 @@ window.RPHubUtils = {
 
         // V4 及以上才有 v4_prompt / v4_negative_prompt 这套结构。
         if (model.startsWith('nai-diffusion-4') || model.startsWith('nai-diffusion-5')) {
+            // V4 / V4.5 的定位是 5×5 网格（官方文档明确）；V5 重做过定位，坐标不吸附。
+            const grid = model.startsWith('nai-diffusion-4');
+            const multi = parseNaiMultiCharacterPrompt(prompt, { grid });
+            const charCaptions = multi.chars.map(item => ({
+                char_caption: item.caption,
+                centers: item.centers || [{ x: 0.5, y: 0.5 }]
+            }));
             parameters.add_original_image = true;
             parameters.legacy_uc = false;
             parameters.v4_prompt = {
-                caption: { base_caption: String(prompt || ''), char_captions: [] },
-                use_coords: false,
+                caption: { base_caption: multi.base, char_captions: charCaptions },
+                // 没给位置就交给模型自己排（官方界面里的「AI's Choice」）。
+                use_coords: multi.hasPositions,
                 use_order: true
             };
             parameters.v4_negative_prompt = {
@@ -2498,6 +2574,10 @@ window.RPHubUtils = {
                 use_coords: false,
                 use_order: false
             };
+            // input 保留「人看得懂的那份文本」：多角色时用 `|` 拼回原样（只是给人/归档看，
+            // 服务端在 v4_prompt 存在时以 caption 为准）。
+            const flat = [multi.base, ...multi.chars.map(item => item.caption)].filter(Boolean).join(' | ');
+            return { input: flat || String(prompt || ''), model, action: 'generate', parameters };
         }
 
         return { input: String(prompt || ''), model, action: 'generate', parameters };
@@ -2903,6 +2983,10 @@ window.RPHubUtils = {
         naiOfficialUcPresetIds,
         resolveNaiOfficialUcPresetId,
         buildNaiOfficialPayload,
+        // 多角色提示词（V4+）：解析 + 位置吸附
+        NAI_CHAR_POSITIONS,
+        snapNaiCharPosition,
+        parseNaiMultiCharacterPrompt,
         NAI_OFFICIAL_RETRYABLE_STATUS,
         NAI_OFFICIAL_RETRY_DEFAULTS,
         NAI_OFFICIAL_RETRY_MAX_LIMIT,

@@ -1418,9 +1418,12 @@ assertTrue('风格预设变更会同步进生图正则',
     /settings\.imageStylePresets[\s\S]{0,200}updateImageGenRegexState/.test(appJs));
 assertTrue('风格预设随 SYNC_SETTINGS 同步进角色卡生成器',
     /settings\.imageStylePresets,[\s\S]{0,400}syncSettingsToGenerator/.test(appJs));
-// 五处取画师串的地方都要带上预设列表，漏一处就会出现「某条链路不认自定义风格」
+// 取画师串的地方都要带上预设列表，漏一处就会出现「某条链路不认自定义风格」。
+// 断言写成「调用总数 == 带预设列表的调用数」，这样以后增删调用点都不会误报。
 const styleArtistCalls = appJs.match(/getImageStyleArtists\(settings\.imageStyle, settings\.customImageArtists, settings\.imageStylePresets\)/g) || [];
-assertEqual('app.js 五处取画师串都传了预设列表', styleArtistCalls.length, 5);
+const styleArtistTotal = (appJs.match(/getImageStyleArtists\(/g) || []).length;
+assertEqual('app.js 取画师串的地方一律带上预设列表', styleArtistCalls.length, styleArtistTotal);
+assertTrue('四条链路（网关 / 官方 / SD / ComfyUI）都还在取画师串', styleArtistTotal >= 4);
 assertTrue('角色卡生成器同步时也传预设列表',
     /getImageStyleArtists\(\s*mainSettings\.imageStyle,\s*mainSettings\.customImageArtists,\s*mainSettings\.imageStylePresets\s*\)/.test(
         readFileSync(join(root, 'character/index.html'), 'utf8')));
@@ -1616,5 +1619,104 @@ const stylesSource = readFileSync(join(root, 'assets/css/styles.css'), 'utf8');
 assertTrue('占位卡有独立样式', stylesSource.includes('.generated-image-card.is-image-uncached'));
 assertTrue('占位卡样式覆盖深色模式',
     readFileSync(join(root, 'assets/css/theme.css'), 'utf8').includes('.generated-image-generate'));
+
+// --- 22. NAI 多角色 / 模型约束 / 共用附加前缀（第 82 条） ---
+//
+// 官方文档核实（docs.novelai.net）：
+//   - V4.5 / V4：base + 所有角色段合计约 512 T5 token；多角色最多 6 个；定位只支持 5×5 网格；
+//     画面文字**只支持英文且 ≤118 字符**；
+//   - V5：Curated ≈703 / Full ≈1471；最多 22 个角色；定位自由；文字额度独立
+//     （Curated ≈374 / Full ≈750，含空格换行），且能渲染英文/日文/中文；
+//   - 人数 tag 只能写在 base 里，角色段用不带数字的 girl/boy/other；
+//   - 互动动作用 source# / target# / mutual# 标主被动。
+section('22) NAI 多角色：| 分段与 @位置 解析、官方载荷、模型约束世界书、共用附加前缀');
+
+// 22a. 解析
+const naiUtils = sandbox.window.RPHubNaiOfficialUtils;
+const parsedSingle = naiUtils.parseNaiMultiCharacterPrompt('1girl, red hair, solo');
+assertEqual('单段：base 就是整段、没有角色段', [parsedSingle.base, parsedSingle.chars.length], ['1girl, red hair, solo', 0]);
+const parsedMulti = naiUtils.parseNaiMultiCharacterPrompt('2girls, indoors, night | girl, purple hair, pointing | boy, blonde hair, blush');
+assertEqual('多段：base 保留人数与场景', parsedMulti.base, '2girls, indoors, night');
+assertEqual('多段：两个角色段', parsedMulti.chars.map(item => item.caption), ['girl, purple hair, pointing', 'boy, blonde hair, blush']);
+assertEqual('没写位置 → hasPositions 为 false', parsedMulti.hasPositions, false);
+const parsedKeyword = naiUtils.parseNaiMultiCharacterPrompt('2girls, park | @左上 girl, sitting | @右下 boy, standing');
+assertEqual('九宫格关键字 → 5×5 网格上的坐标',
+    parsedKeyword.chars.map(item => item.centers), [[{ x: 0.1, y: 0.1 }], [{ x: 0.9, y: 0.9 }]]);
+assertEqual('位置前缀必须从角色文本里剥掉', parsedKeyword.chars[0].caption, 'girl, sitting');
+assertEqual('给了位置 → hasPositions 为 true', parsedKeyword.hasPositions, true);
+const parsedCoordsV4 = naiUtils.parseNaiMultiCharacterPrompt('2girls | @0.33,0.66 girl, lying', { grid: true });
+assertEqual('V4/V4.5：坐标吸附到 0.1 格点', parsedCoordsV4.chars[0].centers, [{ x: 0.3, y: 0.7 }]);
+const parsedCoordsV5 = naiUtils.parseNaiMultiCharacterPrompt('2girls | @0.33,0.66 girl, lying', { grid: false });
+assertEqual('V5：坐标不被吸附', parsedCoordsV5.chars[0].centers, [{ x: 0.33, y: 0.66 }]);
+assertEqual('空段被忽略', naiUtils.parseNaiMultiCharacterPrompt('solo || girl, x').chars.length, 1);
+assertEqual('@ 后面没有正文时不当作位置（保持原文）',
+    naiUtils.parseNaiMultiCharacterPrompt('solo | @左上').chars[0].caption, '@左上');
+
+// 22b. 官方 API 载荷
+const payloadBase = { naiOfficialModel: 'nai-diffusion-4-5-full', naiOfficialResolution: '832x1216', naiOfficialSteps: 28, naiOfficialScale: 5 };
+const singlePayload = naiUtils.buildNaiOfficialPayload({ settings: payloadBase, prompt: 'artist, 1girl, solo', negativePrompt: 'bad' });
+assertEqual('单段提示词：base_caption 就是原文', singlePayload.parameters.v4_prompt.caption.base_caption, 'artist, 1girl, solo');
+assertEqual('单段：char_captions 为空（不改变原有行为）', singlePayload.parameters.v4_prompt.caption.char_captions.length, 0);
+assertEqual('单段：use_coords 保持 false', singlePayload.parameters.v4_prompt.use_coords, false);
+const multiPayload = naiUtils.buildNaiOfficialPayload({
+    settings: payloadBase,
+    prompt: '2girls, indoors | @左上 girl, purple hair | boy, blonde hair',
+    negativePrompt: 'bad'
+});
+assertEqual('多段：base_caption 只含 base 段', multiPayload.parameters.v4_prompt.caption.base_caption, '2girls, indoors');
+assertEqual('多段：char_captions 逐段给出', multiPayload.parameters.v4_prompt.caption.char_captions.map(item => item.char_caption),
+    ['girl, purple hair', 'boy, blonde hair']);
+assertEqual('多段：给了位置 → use_coords = true', multiPayload.parameters.v4_prompt.use_coords, true);
+assertEqual('多段：未指定位置的角色落到中心', multiPayload.parameters.v4_prompt.caption.char_captions[1].centers, [{ x: 0.5, y: 0.5 }]);
+assertEqual('多段：input 用 | 拼回人可读的整段（@ 已剥掉）',
+    multiPayload.input, '2girls, indoors | girl, purple hair | boy, blonde hair');
+const v5Payload = naiUtils.buildNaiOfficialPayload({ settings: { ...payloadBase, naiOfficialModel: 'nai-diffusion-5-full' }, prompt: '2girls | @0.33,0.66 girl, lying' });
+assertEqual('V5：坐标不吸附', v5Payload.parameters.v4_prompt.caption.char_captions[0].centers, [{ x: 0.33, y: 0.66 }]);
+const v3Payload = naiUtils.buildNaiOfficialPayload({ settings: { ...payloadBase, naiOfficialModel: 'nai-diffusion-3' }, prompt: '2girls, indoors | girl, x' });
+assertEqual('V3：没有 v4_prompt 结构', v3Payload.parameters.v4_prompt, undefined);
+assertEqual('V3：提示词原样下发（不解析 |）', v3Payload.input, '2girls, indoors | girl, x');
+
+// 22c. 世界书按模型切换（V4.5 / V5 的硬差别必须写进去）
+const builtinPrompts = sandbox.window.RPHubBuiltinContent.prompts;
+const v45Rules = builtinPrompts.buildImageModelPromptRules({ provider: 'novelai-official', model: 'nai-diffusion-4-5-full' });
+const v5Rules = builtinPrompts.buildImageModelPromptRules({ provider: 'novelai', model: 'nai-diffusion-5-full' });
+const v3Rules = builtinPrompts.buildImageModelPromptRules({ provider: 'novelai', model: 'nai-diffusion-3' });
+const sdRules = builtinPrompts.buildImageModelPromptRules({ provider: 'stable-diffusion', model: 'mock-model' });
+assertTrue('V4.5：写明 512 T5 token 合计预算', v45Rules.includes('512'));
+assertTrue('V4.5：禁止中文与 emoji（T5 词表）', v45Rules.includes('不要写中文与 emoji'));
+assertTrue('V4.5：多角色上限 6', v45Rules.includes('最多 6 个'));
+assertTrue('V4.5：定位是 5×5 网格', v45Rules.includes('5×5'));
+assertTrue('V4.5：文字只支持英文且 ≤118 字符', v45Rules.includes('118'));
+assertTrue('V5：给出 703 / 1471 预算', v5Rules.includes('703') && v5Rules.includes('1471'));
+assertTrue('V5：多角色上限 22', v5Rules.includes('22'));
+assertTrue('V5：文字额度独立且能写中日文', v5Rules.includes('374') && v5Rules.includes('750') && v5Rules.includes('日文'));
+assertTrue('V5：Text: 必须放在最后', v5Rules.includes('Text:'));
+assertTrue('V3：明确不要用 | 分段', v3Rules.includes('不要用 | 分段'));
+assertTrue('网关（Nai2API）不教 @位置（网关不解析它，会原样进提示词）',
+    builtinPrompts.buildImageModelPromptRules({ provider: 'novelai', model: 'nai-diffusion-4-5-full' }).includes('不要写 @'));
+assertTrue('官方 API 才教 @位置',
+    builtinPrompts.buildImageModelPromptRules({ provider: 'novelai-official', model: 'nai-diffusion-4-5-full' }).includes('定位可选'));
+assertEqual('SD/ComfyUI 不套 NAI 的模型规则', sdRules, '');
+const v5RulesOfficial = builtinPrompts.buildImageModelPromptRules({ provider: 'novelai-official', model: 'nai-diffusion-5-full' });
+assertTrue('网关与官方共用同一份预算 / 多角色规则',
+    v5Rules.includes('703') && v5RulesOfficial.includes('703') && v5Rules.includes('22') && v5RulesOfficial.includes('22'));
+assertTrue('两者唯一的差别是「只有官方教 @位置」',
+    !v5Rules.includes('定位可选') && v5RulesOfficial.includes('定位可选'));
+const worldbookV45 = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'novelai', model: 'nai-diffusion-4-5-full' });
+const worldbookGeneric = builtinPrompts.buildAutoImageGenPrompt(3);
+assertTrue('世界书里带上模型约束段', worldbookV45.includes('<模型约束 · NovelAI V4.5>'));
+assertTrue('旧签名（只传数量）仍然可用，且不带模型段', worldbookGeneric.includes('image###英文Tag###') && !worldbookGeneric.includes('<模型约束'));
+assertTrue('模型约束段不能把世界书写爆（V4.5 增量 ≤ 1200 字）',
+    worldbookV45.length - worldbookGeneric.length < 1200);
+
+// 22d. 接线：模型换了要重建世界书；附加前缀四种方式共用
+assertTrue('世界书按当前模型构建', /buildAutoImageGenPrompt\(\{[\s\S]{0,200}model: autoImageGenModel/.test(appJs));
+assertTrue('官方模型（naiOfficialModel）进入重建 watch', /settings\.naiOfficialModel,[\s\S]{0,1200}enforceSpecialRules/.test(appJs));
+assertTrue('网关的 artist 参数带上附加前缀', appJs.includes('encodeURIComponent(imageArtistsWithPrefix())'));
+assertTrue('附加前缀改动会重建正则', /settings\.sdPromptPrefix\s*\n\s*\], \(\) => \{/.test(appJs));
+assertTrue('附加前缀输入框在四种方式共用区（不在 SD 专属块里）',
+    /附加正面提示词（可选 · 四种生图方式共用）/.test(indexSource));
+assertTrue('SD 专属块里不再有重复的前缀输入框',
+    (indexSource.match(/v-model="settings\.sdPromptPrefix"/g) || []).length === 1);
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

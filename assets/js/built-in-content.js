@@ -444,11 +444,72 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
         '4. 全程以第二人称对演员下令都可以（如「语速极慢，句与句之间留出令人不安的空白」），但不要出现「AI」「模型」「生成」等词。'
     ].filter(Boolean).join('\n');
 
-    const buildAutoImageGenPrompt = (imageGenCount) => `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
+    // ===== 按「当前生图模型」给的硬约束（第 82 条）=====
+    //
+    // 为什么要按模型切换：V4.5 与 V5 的**提示词预算差一倍多**、多角色写法也不同
+    // （V4/V4.5 位置只能落在 5×5 网格上、最多 6 个角色；V5 最多 22 个、定位自由），
+    // 而 V4.5 用的是 T5 词表——**中文与 emoji 基本不被支持**。
+    // 不按模型说清楚，AI 就只能按一套模糊规则写，结果就是「token 超了被截断」「多角色串味」
+    // 「V4.5 上 nsfw 不出效果」。
+    //
+    // 刻意写得很短：世界书每一行都要跟着上下文一起付费，所以这里只写**模型真正的硬差别**，
+    // 通用写法留给下面原有的那段指导。
+    const buildImageModelPromptRules = ({ model = '', provider = '' } = {}) => {
+        const name = String(model || '');
+        // 只有 NovelAI 两路（网关 = RP HUB 网关 / 官方 API）走 NAI 的模型规则。
+        const isNai = provider === 'novelai' || provider === 'novelai-official' || (!provider && name.startsWith('nai-diffusion'));
+        if (!isNai || !name) return '';
+        // 位置标记（@…）只有官方 API 那条链路会解析成 char_captions.centers；
+        // 走网关时它就是一串普通字符，会原样进提示词，所以网关下明确不要写。
+        const positionLine = provider === 'novelai'
+            ? '- 定位：本站网关不解析位置标记，**不要写 @…**；只靠 | 分段的先后顺序（从左到右、从上到下）来表达站位。'
+            : null;
+        if (name.startsWith('nai-diffusion-5')) {
+            return [
+                '<模型约束 · NovelAI V5>',
+                '- 预算：V5 Curated 约 703 / V5 Full 约 1471（base + 角色段合计），够用就好，别刻意写满。',
+                '- 多角色（最多 22 个）：用 | 分段 ——「人数与场景 | 角色1 | 角色2」。人数 tag（2girls/1boy）只写在第一段；每个角色段开头写 girl/boy/other（不带数字），只写这个角色本人。',
+                positionLine || '- 定位可选：段首写 @左上/上/右上/左/中/右/左下/下/右下，或 @0.3,0.7（0~1 归一化坐标）；V5 定位自由。',
+                '- 互动动作标明主被动：主动方 source#hug、被动方 target#hug、互相 mutual#hug（该语法不总可靠，再用一句自然语言补清楚谁对谁做了什么）。',
+                '- 自然语言理解明显更强：姿势/互动可以用一句英文自然语言描述，比堆 tag 更准；部位与状态仍要用标准 tag 兜底。',
+                '- nsfw 比 V4.5 好使，写清楚即可，不要靠重复堆词。',
+                '- 画面里要写字：提示词里加 text, english text，并在 base 段的**最末尾**写 `Text: 内容`（多段之间空一行；Text: 之后不要再写别的 tag，否则会画进图里）。V5 能渲染英文/日文/中文，文字额度是独立的一份（Curated ≈374、Full ≈750，含空格与换行，官方模型页写作 token、文字渲染页写作字符，按更保守的字符理解）；提示词里用自然语言说明文字颜色/位置会更准（如 speech bubble 已足够则不必）。'
+            ].join('\n');
+        }
+        if (name.startsWith('nai-diffusion-4')) {
+            return [
+                '<模型约束 · NovelAI V4.5>',
+                '- 预算：base + 所有角色段**合计约 512 个 T5 token**，超了会被截断（画面直接跑偏），写完自查。',
+                '- **不要写中文与 emoji**：V4.5 用 T5 词表，非拉丁字符基本不支持，会白占额度或直接丢字；全部用英文 tag。',
+                '- 多角色（最多 6 个）：用 | 分段 ——「人数与场景 | 角色1 | 角色2」。人数 tag（2girls/1boy）只写在第一段；每个角色段开头写 girl/boy/other（不带数字），只写这个角色本人（这一段是防串味的关键）。',
+                positionLine || '- 定位可选：段首写 @左上/上/右上/左/中/右/左下/下/右下（V4/V4.5 是 5×5 网格，只能落在格点上）或 @0.1,0.5。',
+                '- 互动动作标明主被动：主动方 source#hug、被动方 target#hug、互相 mutual#hug（不总可靠，再用自然语言补一句）。',
+                '- 自然语言理解弱：姿势/互动**必须落到具体 tag**（谁的手放在哪、什么姿势、镜头到哪）；nsfw 也要显式写部位与状态 tag，别用含蓄说法。',
+                '- 同一个角色只写一套互不矛盾的姿势，别把 standing / sitting 这类冲突 tag 写在一起。',
+                '- 画面里要写字（可选能力）：加 text, english text 并在 base 段最末尾写 `Text: 内容`；**V4.5 只认英文、且 ≤118 个字符**（含空格换行），中日文一定写不出来，别浪费额度。不需要文字时在提示词里写 no text 更稳（质量标签本身也带 no text）。'
+            ].join('\n');
+        }
+        if (name.startsWith('nai-diffusion-3') || name.startsWith('nai-diffusion-furry-3')) {
+            return [
+                '<模型约束 · NovelAI V3>',
+                '- 没有角色分栏：整段平铺即可，**不要用 | 分段**；越靠前的 tag 权重越高，把主体、动作、镜头放前面。',
+                '- 不支持画面文字：需要干净画面时写 no text。'
+            ].join('\n');
+        }
+        return '';
+    };
+
+    const buildAutoImageGenPrompt = (options) => {
+        // 兼容旧签名：buildAutoImageGenPrompt(3)
+        const { count: imageGenCount, model = '', provider = '' } = typeof options === 'object' && options !== null
+            ? options
+            : { count: options };
+        const modelRules = buildImageModelPromptRules({ model, provider });
+        return `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
 围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。所有Tag必须使用英文并以英文逗号分隔，禁止中文Tag；提示词必须详尽、细致且可直接绘制，不得使用笼统省略的Tag或脱离场景拼凑通用画面。
 强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。
 注意：如为nsfw场景，生成的提示词必须带上 nsfw 标签；如果是同人/已有作品角色，角色名仍必须放在最前面，nsfw 紧跟其后。
-
+${modelRules ? `\n${modelRules}\n` : ''}
 ### 提示词生成指导
 先结合当前正文还原画面，再逐项检查人物数量与身份、固定外貌、当下服装、姿势、动作细节、表情与视线、人物/物品/环境交互、镜头构图、地点背景、时间光线及剧情状态；即使画面简单，也不得省略决定人物形象、动作、构图和场景的必要信息。
 人物细节、姿势、动作、交互和衣物按下方角色结构组织；镜头必须写明观察方向、取景范围与视觉焦点【如：从下往上的下半身、从上往下的上半身、lower_body,between_legs,between_breasts,pantyshot,looking_at_viewer】，并写明地点【如：diningroom,gym,bedroom,indoors,home,beach】、时间【morning,noon,night】及对应光线。
@@ -503,6 +564,7 @@ image###英文Tag###
 </Tag_智能调整>
 
 特别提示：出现user或主角参与时，禁止出现主角的脸部和头部；必须使用第一视角(POV）相关提示词，并作为Character Prompt添加。禁止出现用户/主角名字（包括中文、英文、拼音和{{user}}）；同人角色本人的官方角色名仍按上方规则放在最前面。\n</auto_image_gen>`;
+    };
 
     const prompts = Object.freeze({
         buildActiveToolSystemPrompt,
@@ -519,6 +581,7 @@ image###英文Tag###
         buildAnalysisTagInstruction,
         buildOpeningAnalysisContent,
         buildNextResponsePrompt,
+        buildImageModelPromptRules,
         buildUiTemplateAnalysisSystemPrompt,
         buildUserInfoPrompt,
         replyToolInstruction,

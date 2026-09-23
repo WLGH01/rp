@@ -4449,6 +4449,19 @@ let removedProviderConfigCleared = false;
             return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
         };
 
+        // 「附加正面提示词」是**四条生图链路共用**的一项（画师串之后的通用正向补充）。
+        // SD / ComfyUI / 官方 API 都会把它当成前缀拼进去；网关（Nai2API）没有单独的 prefix 参数，
+        // 它是用 `artist + tag` 拼提示词的，所以这里把它并进 artist —— 两条 NAI 链路最终
+        // 得到的提示词结构才一致：画师串 → 附加前缀 → 角色 tag。
+        // （第 82 条：以前这个输入框只在 SD 面板里显示，官方/网关的用户既看不到也改不了，
+        //   于是「同一个 tag 在网关与官方出的提示词不一样」。）
+        const imageArtistsWithPrefix = () => {
+            const artists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
+            const prefix = String(settings.sdPromptPrefix || '').trim();
+            if (!prefix) return artists;
+            return artists ? `${artists}, ${prefix}` : prefix;
+        };
+
         // ===== 官方 API 的并发闸门 =====
         // 官方账号侧是「全局并发 1」：同一账号同一时刻只允许一张在跑。本站每张图都是一个
         // 独立任务，一次对话出 2 张 = 2 个任务同时发 → 第二张必然 429。
@@ -4994,7 +5007,6 @@ let removedProviderConfigCleared = false;
                 if (!regex) return [];
             }
 
-            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
             // 提示文案要能认出「自定义预设」：内置风格的 label 在 imageStyleOptions 里，
             // 自定义预设的 label 在带预设的那一份列表里，两边都查一遍。
             const styleName = imageStyleOptionsWithPresets.value.find(option => option.value === settings.imageStyle)?.label
@@ -5002,7 +5014,8 @@ let removedProviderConfigCleared = false;
             const modelName = getImageModelName(settings.imageModel);
 
             // 动态替换 URL 中的 model、artist 和 size 参数
-            const encodedTargetArtists = encodeURIComponent(targetArtists);
+            // artist 用「画师串 + 附加前缀」：网关那边没有独立的前缀参数（见 imageArtistsWithPrefix）。
+            const encodedTargetArtists = encodeURIComponent(imageArtistsWithPrefix());
             const oldReplacement = regex.replacement;
             let newReplacement = oldReplacement.replace(/artist=[\s\S]*?(&size=)/, 'artist=' + encodedTargetArtists + '$1');
             if (newReplacement === oldReplacement) {
@@ -9598,9 +9611,8 @@ let removedProviderConfigCleared = false;
 
             // 1. NAI画图正则 (统一版本)
             const imageGenRegexName = 'NAI画图正则';
-            const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
 
-            const encodedTargetArtists = encodeURIComponent(targetArtists);
+            const encodedTargetArtists = encodeURIComponent(imageArtistsWithPrefix());
             // SD 的实际像素也要进 URL：卡片靠 w/h 还原宽高比，切到自定义分辨率后比例才会跟着变。
             const sdSize = getSdSize();
             // 两种方式的差别只在于「URL 携带什么参数」：
@@ -9637,12 +9649,21 @@ let removedProviderConfigCleared = false;
             regexScripts.value.unshift(imageGenRegexContent);
 
             // 2. 自动生图世界书
+            // 模型相关的硬约束（token 预算 / 多角色写法 / 画面文字）随**当前生图模型**走：
+            // 网关用 imageModel，官方 API 用 naiOfficialModel，切模型就重建这一条（见下方 watch）。
             const autoImageGenWIName = '自动生图';
             const imageGenCount = Math.min(8, Math.max(2, Number(settings.imageGenCount) || 2));
+            const autoImageGenModel = isNaiOfficialProvider.value
+                ? String(settings.naiOfficialModel || '')
+                : String(settings.imageModel || '');
             const autoImageGenWIContent = {
                 comment: autoImageGenWIName,
                 keys: [],
-                content: BUILTIN_PROMPTS.buildAutoImageGenPrompt(imageGenCount),
+                content: BUILTIN_PROMPTS.buildAutoImageGenPrompt({
+                    count: imageGenCount,
+                    provider: settings.imageProvider,
+                    model: autoImageGenModel
+                }),
                 constant: true,
                 enabled: false, // Default closed
                 scope: 'global',
@@ -9832,6 +9853,9 @@ let removedProviderConfigCleared = false;
             // 切换生图方式或相关参数时重建正则，保证内嵌 URL 与当前方式一致。
             settings.imageProvider,
             settings.imageModel,
+            // 官方 API 的模型换了 → 「自动生图」世界书也要跟着换（V4.5 的 512 T5 token、
+            // 5×5 定位与「只能写英文文字」跟 V5 的 703/1471、22 角色、多语言完全不同）。
+            settings.naiOfficialModel,
             settings.imageStyle,
             settings.customImageArtists,
             settings.imageSize,
@@ -9849,7 +9873,10 @@ let removedProviderConfigCleared = false;
             // SD 自定义分辨率变更也要重建正则，URL 里的 w/h 才会跟着更新。
             settings.sdCustomSizeEnabled,
             settings.sdCustomWidth,
-            settings.sdCustomHeight
+            settings.sdCustomHeight,
+            // 「附加正面提示词」会并进网关 URL 的 artist 参数（见 imageArtistsWithPrefix），
+            // 改它必须重建正则，否则老 URL 里还是旧前缀。
+            settings.sdPromptPrefix
         ], () => {
             enforceSpecialRules();
             if (isAutoImageGenEnabled.value) {
