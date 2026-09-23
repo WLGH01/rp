@@ -1719,4 +1719,25 @@ assertTrue('附加前缀输入框在四种方式共用区（不在 SD 专属块�
 assertTrue('SD 专属块里不再有重复的前缀输入框',
     (indexSource.match(/v-model="settings\.sdPromptPrefix"/g) || []).length === 1);
 
+// 22e. 提示词文本归一化（第 83 条）：换行 / 重复逗号 / 全角逗号
+const normalizePrompt = imageUtils.normalizePromptText;
+assertEqual('真换行 → 空格', normalizePrompt('a::,\r\n20::b::, c'), 'a::, 20::b::, c');
+assertEqual('字面量 \\n（两字符）→ 空格', normalizePrompt('a::, \\n20::b::'), 'a::, 20::b::');
+assertEqual('连续逗号合并（画师串自带的 ::,,）', normalizePrompt('masterpiece::,, very aesthetic'), 'masterpiece::, very aesthetic');
+assertEqual('join 造成的 “no text, , 1girl” 被吃掉', normalizePrompt('no text, , 1girl'), 'no text, 1girl');
+assertEqual('全角逗号归一化', normalizePrompt('masterpiece，best quality'), 'masterpiece, best quality');
+assertEqual('首尾逗号与空白去掉', normalizePrompt('  , masterpiece, best quality, , '), 'masterpiece, best quality');
+assertEqual('多余空格压成一个', normalizePrompt('a,    b'), 'a, b');
+assertEqual('空输入安全', normalizePrompt(''), '');
+assertEqual('null 安全', normalizePrompt(null), '');
+// 真实场景：内置 r18 画师串（带 CRLF 与 ::,,）+ 尾逗号前缀 + tag
+const dirtyPrompt = 'masterpiece::,\r\n20::best quality::,, very aesthetic, masterpiece, no text,';
+assertEqual('内置画师串那种脏文本被整段理干净',
+    normalizePrompt(`${dirtyPrompt}, 1girl, solo`), 'masterpiece::, 20::best quality::, very aesthetic, masterpiece, no text, 1girl, solo');
+assertTrue('四条链路都在拼装处归一化',
+    (appJs.match(/imageUtils\.normalizePromptText\(/g) || []).length >= 4);
+assertTrue('官方载荷内部也归一化（多角色解析跑在干净文本上）',
+    /parseNaiMultiCharacterPrompt\(normalizePromptText\(prompt\), \{ grid \}\)/.test(
+        readFileSync(join(root, 'assets/js/core-utils.js'), 'utf8')));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

@@ -2493,6 +2493,34 @@ window.RPHubUtils = {
         return { base, chars, hasPositions: chars.some(item => !!item.centers) };
     };
 
+    // ===== 提示词文本归一化（第 83 条）=====
+    //
+    // 画师串/附加前缀是**用户手写或从别处粘贴**的文本，最常见的三种脏东西：
+    //   1. 换行：内置画师串本身就带 CRLF（一行一个权重组，这是给眼睛看的排版），
+    //      而粘贴进来的副本常常把换行写成两个字面字符 `\n`；
+    //   2. 逗号重复：`::,,`（画师串自带的）或前缀末尾带逗号，再和 `join(', ')` 拼一次，
+    //      就变成界面里看到的那种 `no text, , 1girl`；
+    //   3. 全角逗号 `，`（从中文排版里粘过来的）。
+    //
+    // 这些在出图时都只是分隔符噪音，但**两条链路表现不一致**：官方 API 会走
+    // `.replace(/\s*,\s*/g, ', ')` 把换行吃掉、把 `,,` 变成 `, ,`；网关是原样转发，
+    // 于是同一个 tag 在两边生成出来的提示词完全不同（用户实测对比过）。
+    // 所以在**拼装处**统一归一化：换行（含字面量转义）→ 空格，逗号两侧统一成一个空格，
+    // 连续逗号合并，首尾逗号去掉。
+    const normalizePromptText = (text) => {
+        let out = String(text ?? '');
+        if (!out) return '';
+        out = out
+            .replace(/\\[nrt]/g, ' ')          // 字面量的 \n \r \t（两字符）→ 空格
+            .replace(/[\r\n\t]+/g, ' ')        // 真换行/制表 → 空格
+            .replace(/[，､]/g, ',')            // 全角逗号 → 半角
+            .replace(/\s*,\s*/g, ', ')         // 逗号两侧统一成一个空格
+            .replace(/(?:,\s*){2,}/g, ', ')    // 连续逗号合并（`::,,` / `no text, ,` → 一个逗号）
+            .replace(/\s{2,}/g, ' ')           // 多余空格
+            .replace(/^[\s,]+|[\s,]+$/g, '');  // 首尾逗号与空白
+        return out;
+    };
+
     // 官方 API 的载荷构建。
     // prompt 允许带多角色写法（`|` 分隔、段首可带 `@位置`）：
     //   - V4 / V5：解析成 v4_prompt.caption.{base_caption, char_captions}（官方推荐的写法，
@@ -2556,7 +2584,7 @@ window.RPHubUtils = {
         if (model.startsWith('nai-diffusion-4') || model.startsWith('nai-diffusion-5')) {
             // V4 / V4.5 的定位是 5×5 网格（官方文档明确）；V5 重做过定位，坐标不吸附。
             const grid = model.startsWith('nai-diffusion-4');
-            const multi = parseNaiMultiCharacterPrompt(prompt, { grid });
+            const multi = parseNaiMultiCharacterPrompt(normalizePromptText(prompt), { grid });
             const charCaptions = multi.chars.map(item => ({
                 char_caption: item.caption,
                 centers: item.centers || [{ x: 0.5, y: 0.5 }]
@@ -2983,6 +3011,8 @@ window.RPHubUtils = {
         naiOfficialUcPresetIds,
         resolveNaiOfficialUcPresetId,
         buildNaiOfficialPayload,
+        // 提示词文本归一化（换行 / 重复逗号 / 全角逗号）
+        normalizePromptText,
         // 多角色提示词（V4+）：解析 + 位置吸附
         NAI_CHAR_POSITIONS,
         snapNaiCharPosition,
@@ -3035,6 +3065,7 @@ window.RPHubUtils = {
         IMAGE_CACHE_SIZE_PARAMS,
         normalizeImageCacheFingerprint,
         hashImageCacheFingerprint,
+        normalizePromptText,
         resolveNaiNegativePrompt,
         resolveImageCacheFingerprint,
         isCachedImageJobOutdated,

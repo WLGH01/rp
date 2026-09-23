@@ -3435,7 +3435,8 @@ let removedProviderConfigCleared = false;
             const loras = buildSdLoraTags();
             if (loras) parts.push(loras);
             if (tags) parts.push(tags);
-            return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
+            // 统一归一化：换行/重复逗号/全角逗号（第 83 条），四条链路口径一致。
+            return imageUtils.normalizePromptText(parts.join(', '));
         };
 
         // 负面提示词：沿用 NovelAI 那套通用负面词，可被用户覆盖。
@@ -3958,7 +3959,7 @@ let removedProviderConfigCleared = false;
             const prefix = String(settings.sdPromptPrefix || '').trim();
             if (prefix) parts.push(prefix);
             if (tags) parts.push(tags);
-            return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
+            return imageUtils.normalizePromptText(parts.join(', '));
         };
 
         // ComfyUI 的 /prompt 提交：{ prompt, client_id }。
@@ -4446,7 +4447,8 @@ let removedProviderConfigCleared = false;
             const prefix = String(settings.sdPromptPrefix || '').trim();
             if (prefix) parts.push(prefix);
             if (tags) parts.push(tags);
-            return parts.join(', ').replace(/\s*,\s*/g, ', ').trim();
+            // 与 SD / ComfyUI / 网关同口径：换行与重复逗号在这里就清掉（第 83 条）。
+            return imageUtils.normalizePromptText(parts.join(', '));
         };
 
         // 「附加正面提示词」是**四条生图链路共用**的一项（画师串之后的通用正向补充）。
@@ -4458,8 +4460,10 @@ let removedProviderConfigCleared = false;
         const imageArtistsWithPrefix = () => {
             const artists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists, settings.imageStylePresets);
             const prefix = String(settings.sdPromptPrefix || '').trim();
-            if (!prefix) return artists;
-            return artists ? `${artists}, ${prefix}` : prefix;
+            // 归一化在**拼装处**做：换行 / 重复逗号 / 全角逗号统一清掉，
+            // 否则网关（原样转发）与官方（走 \s*,\s* 清理）拿到的文本不一样（第 83 条）。
+            const combined = prefix ? (artists ? `${artists}, ${prefix}` : prefix) : artists;
+            return imageUtils.normalizePromptText(combined);
         };
 
         // ===== 官方 API 的并发闸门 =====
