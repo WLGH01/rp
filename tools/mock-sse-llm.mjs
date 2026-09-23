@@ -9,6 +9,11 @@
 //      curl -N -X POST http://127.0.0.1:8801/v1/chat/completions -d '{"stream":true}'
 //
 // 用法: node tools/mock-sse-llm.mjs [port]    默认 8801
+//
+// 附加用途（第 81 条）：想在**流式**过程中验证「自动生图」的接线（比如卡片会不会因为
+// 消息被反复重渲染而被顶成占位卡），用 MOCK_SSE_IMAGE_TAG 让吐出的正文末尾带一个生图 tag：
+//   MOCK_SSE_IMAGE_TAG='1girl, red hair, solo' node tools/mock-sse-llm.mjs
+// tag 会被切成几片吐出来（跨片拼接也能被正则正确识别）。
 import http from 'node:http';
 
 const port = Number(process.argv[2]) || 8801;
@@ -16,7 +21,9 @@ const port = Number(process.argv[2]) || 8801;
 // 刻意重复到 40+ 片、每片 200ms：整段约 9 秒，采样出来的增长曲线不会有歧义。
 const SENTENCE = '她抬起头看了你一眼，把杯子往桌上轻轻一放，说：“哟，人都齐了吧。”'
     + '说完也不等谁接话，自己先抿了一口，环视一圈，目光在每个人脸上都停了一瞬。';
-const TEXT = SENTENCE.repeat(4);
+// 末尾追加一个生图 tag（默认不加，保持「只验证流式」这个原用途）。
+const IMAGE_TAG = String(process.env.MOCK_SSE_IMAGE_TAG || '').trim();
+const TEXT = SENTENCE.repeat(4) + (IMAGE_TAG ? `\n\nimage###${IMAGE_TAG}###` : '');
 const CHUNK_MS = 200;
 
 const cors = {

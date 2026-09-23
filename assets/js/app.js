@@ -4809,16 +4809,22 @@ let removedProviderConfigCleared = false;
                 return Promise.resolve(cachedJob);
             }
 
-            // 缓存里没有这张图：只有「本会话新回复里出现过的 tag」才自动出图。
-            // 历史消息里的图（旧条目被挤掉 / 当年没归档 / 归档被清理）**不自动跑**——
-            // 花额度且画面会变，用户明确要求改成「留个框自己点」。见 liveImageTagKeys。
+            // 缓存里没有这张图。三种情况要分开处理：
+            //   ① 这张图**正在跑**（同一 tag 有在途任务）→ 把新卡片接上去继续显示进度。
+            //      流式输出时消息会被反复重渲染（v-html 整段替换 → 卡片节点是崭新的），
+            //      若这里直接判成「不是本会话新图」而渲染占位卡，就会把正在生成的那张顶掉，
+            //      现象是「新会话的图也不生了」（实测踩到，第 81 条）。
+            //   ② 本会话新回复里出现过的 tag → 自动出图（自动生图的本意）。
+            //   ③ 其余（历史消息里缓存缺失的图）→ 只留占位框，等用户点：不花额度、不改画面。
+            const inFlightTask = tagKey ? pendingImageTasksByTag.get(tagKey) : null;
             const isLiveImage = !!tagKey && liveImageTagKeys.has(tagKey) && !attemptedImageTagKeys.has(tagKey);
-            if (!options.fresh && !isLiveImage) {
+            if (!options.fresh && !inFlightTask && !isLiveImage) {
                 // attempted=true 说明是本会话新图但那次生成没成功（失败/取消），文案区分开。
                 renderUncachedImageCard(card, requestUrl, { attempted: !!tagKey && attemptedImageTagKeys.has(tagKey) });
                 return Promise.resolve({ status: 'uncached' });
             }
-            if (tagKey) attemptedImageTagKeys.add(tagKey);
+            // 只是「接上在途任务」不算一次新尝试，只有真去起任务才记 attempted。
+            if (tagKey && !inFlightTask) attemptedImageTagKeys.add(tagKey);
 
             // 用户点了「生成这张图」：把占位层收掉，回到正常的出图流程。
             card.classList.remove('is-image-uncached');

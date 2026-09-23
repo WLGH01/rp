@@ -1595,7 +1595,16 @@ assertTrue('新卡开场白算新图', /markLiveImageTagsByText\(char\.first_mes
 const markLiveCalls = (appJs.match(/markLiveImageTagsByText\(/g) || []).length;
 assertEqual('登记入口只有三处（流式 / 非流式 / 开场白），历史加载那条路不许登记', markLiveCalls, 3);
 assertTrue('缓存没命中且不是本会话新图 → 走占位卡',
-    /const isLiveImage[\s\S]{0,200}if \(!options\.fresh && !isLiveImage\) \{[\s\S]{0,300}renderUncachedImageCard/.test(appJs));
+    /const isLiveImage[\s\S]{0,200}if \(!options\.fresh && !isLiveImage\) \{[\s\S]{0,300}renderUncachedImageCard/.test(appJs)
+    || /const inFlightTask[\s\S]{0,400}if \(!options\.fresh && !inFlightTask && !isLiveImage\) \{[\s\S]{0,300}renderUncachedImageCard/.test(appJs));
+// 第 81 条：流式期间消息会被反复重渲染（v-html 整段替换 → 卡片节点是崭新的），
+// 新节点若只按「这个 tag 已经尝试过」来判，就会把**正在生成**的那张顶成占位卡 ——
+// 现象正是「新会话的图也不生了」。所以必须先把在途任务接过来。
+assertTrue('在途任务要被接手，而不是判成占位卡',
+    /const inFlightTask = tagKey \? pendingImageTasksByTag\.get\(tagKey\) : null;/.test(appJs)
+    && /if \(!options\.fresh && !inFlightTask && !isLiveImage\)/.test(appJs));
+assertTrue('接上在途任务不算「新一次尝试」',
+    /if \(tagKey && !inFlightTask\) attemptedImageTagKeys\.add\(tagKey\)/.test(appJs));
 assertTrue('占位卡由 renderUncachedImageCard 渲染', appJs.includes('const renderUncachedImageCard'));
 assertTrue('占位卡给出「生成这张图」按钮', appJs.includes('generated-image-generate'));
 assertTrue('占位卡文案区分「历史图缺缓存」与「本会话新图生成没成功」',
