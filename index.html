@@ -3286,6 +3286,42 @@
                                 </div>
                             </div>
 
+                            <!-- 历史图缓存：条数上限（第 79 条） -->
+                            <div class="pt-6 border-t border-gray-100 mt-6">
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+                                    <div>
+                                        <h4 class="settings-section-heading !mb-0">
+                                            <svg class="w-4 h-4 mr-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                                </path>
+                                            </svg>
+                                            历史图缓存
+                                        </h4>
+                                        <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                            每张生成过的图在本地只留一条记录（提示词 → 已归档图片的短地址，一条几百字节）。
+                                            它是历史图<span class="font-bold text-gray-600">唯一的凭证</span>：
+                                            记录被淘汰之后，那张图就只能重新生成 —— 既花额度，画面也会变（种子不同）。
+                                            所以上限给得很宽，默认 2 万条（约 5–6MB）。
+                                        </p>
+                                    </div>
+                                    <div class="flex items-center gap-3 flex-shrink-0">
+                                        <span class="text-xs text-gray-400 whitespace-nowrap">当前已存</span>
+                                        <span class="text-sm font-bold text-gray-600 tabular-nums">{{ imageCacheEntryCount }}</span>
+                                        <span class="text-xs text-gray-400">条</span>
+                                    </div>
+                                </div>
+                                <div class="generation-setting-card">
+                                    <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">保留条数上限</label>
+                                    <input v-model.number="settings.imageCacheMaxEntries" type="number" min="100" max="200000" step="1000"
+                                        class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                    <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                        100 ~ 200000。改小之后，多出来的记录会在下一次保存时按「最久没用过」的顺序淘汰，
+                                        被淘汰的历史图将不再自动显示，只留一个「生成这张图」的框由你手动补。
+                                    </p>
+                                </div>
+                            </div>
+
                             <!-- Cross-Device Sync -->
                             <div class="pt-6 border-t border-gray-100 mt-6">
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">

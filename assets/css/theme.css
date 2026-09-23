@@ -515,3 +515,23 @@
     color: var(--night-text);
 }
 :root[data-app-theme="dark"] .generation-setting-card :is(input, textarea)::placeholder { color: var(--night-muted); }
+
+/* 「历史图没有缓存」的占位卡：深色下虚线框与文案也要能看清。 */
+:root[data-app-theme="dark"] .generated-image-card.is-image-uncached {
+    border-color: var(--night-border) !important;
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(148, 163, 184, 0.12),
+        rgba(148, 163, 184, 0.12) 10px,
+        transparent 10px,
+        transparent 20px
+    ) !important;
+}
+:root[data-app-theme="dark"] .generated-image-uncached-text { color: var(--night-muted); }
+:root[data-app-theme="dark"] .generated-image-generate {
+    background: rgba(20, 184, 166, 0.16);
+    border-color: rgba(45, 212, 191, 0.45);
+    color: #5eead4;
+}
+:root[data-app-theme="dark"] .generated-image-generate:hover { background: rgba(20, 184, 166, 0.28); }
+

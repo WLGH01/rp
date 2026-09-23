@@ -1853,6 +1853,82 @@
             color: #f59e0b;
         }
 
+        /* 「历史图没有缓存」占位卡（第 79 条）：
+           不再替用户自动重跑（花额度 + 画面会变），只留一个框和一个明确的按钮。
+           图片本体不在，所以框里画一段虚线 + 文案 + 「生成这张图」。 */
+        .generated-image-card.is-image-uncached {
+            min-height: 220px;
+            border-style: dashed !important;
+            border-color: rgba(148, 163, 184, 0.55) !important;
+            background: repeating-linear-gradient(
+                45deg,
+                rgba(148, 163, 184, 0.06),
+                rgba(148, 163, 184, 0.06) 10px,
+                transparent 10px,
+                transparent 20px
+            ) !important;
+        }
+
+        .generated-image-card.is-image-uncached img {
+            visibility: hidden;
+        }
+
+        .generated-image-uncached {
+            position: absolute;
+            inset: 0;
+            z-index: 3;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.7rem;
+            padding: 1rem;
+            text-align: center;
+            pointer-events: none;
+        }
+
+        .generated-image-uncached-text {
+            color: #64748b;
+            font-size: 0.8125rem;
+            font-weight: 600;
+            line-height: 1.5;
+        }
+
+        .generated-image-uncached-text small {
+            font-size: 0.6875rem;
+            font-weight: 500;
+            opacity: 0.75;
+        }
+
+        .generated-image-generate {
+            margin: 0;
+            padding: 0.4rem 1rem !important;
+            border: 1px solid #99f6e4;
+            border-radius: 999px;
+            background: #f0fdfa;
+            color: #0f766e;
+            font-size: 0.75rem;
+            font-weight: 700;
+            line-height: 1.5;
+            cursor: pointer;
+            pointer-events: auto;
+            transition: background 160ms ease, border-color 160ms ease;
+        }
+
+        .generated-image-generate:hover {
+            background: #ccfbf1;
+            border-color: #5eead4;
+        }
+
+        .generated-image-generate:disabled {
+            cursor: default;
+            opacity: 0.6;
+        }
+
+        .generated-image-card.is-image-uncached .generated-image-reroll {
+            color: #94a3b8;
+        }
+
         .generated-image-progress {
             position: absolute;
             inset: 0;

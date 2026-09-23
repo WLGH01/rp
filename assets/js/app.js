@@ -740,6 +740,12 @@ const app = createApp({
             fastModel: DEFAULT_API_CONFIG.fastModel,
             visionModel: '',
 
+            // ===== 历史图缓存（生图结果的「唯一凭证」）=====
+            // 缓存条目本身很小（参数指纹只存 h1: 摘要），但它是历史图唯一的记录：
+            // 条目一旦被淘汰，那张图就只能重新生成（花额度、画面还会变）。
+            // 因此上限给得很宽，并且做成可调：留多少条历史图由用户自己定。
+            imageCacheMaxEntries: 20000,
+
             // ===== TTS 语音 =====
             // 全部字段的默认值集中在 tts-services.js 的 DEFAULTS 里（与三种服务各自的
             // 请求参数同名对应），这里展开进来，避免两边各写一份默认值而漂移。
@@ -2054,6 +2060,10 @@ let removedProviderConfigCleared = false;
                         console.error('Failed to persist image endpoint profiles', error);
                     }
                 }
+                // 历史图缓存条数上限：老存档没有这个键，默认 2 万条。
+                // 范围收在 100 ~ 200000（下界保证还能用，上界避免手滑输入把快照顶爆）。
+                settings.imageCacheMaxEntries = Math.max(100, Math.min(200000,
+                    Math.round(Number(settings.imageCacheMaxEntries) || 20000)));
                 // 加载已完成生图缓存，避免切换生图节点后对话中的历史图片全部重刷
                 try {
                     const savedImageCache = await getStoredValue('generated_images_cache');
@@ -2072,6 +2082,7 @@ let removedProviderConfigCleared = false;
                             }
                             completedImageJobsByTag.set(k, entry);
                         });
+                        imageCacheEntryCount.value = completedImageJobsByTag.size;
                         if (pruned) persistCompletedImageJob();
                     }
                 } catch (e) {
@@ -3072,6 +3083,31 @@ let removedProviderConfigCleared = false;
         const completedImageJobsByTag = new Map();
         const normalizeImageTagKey = (tag) => String(tag || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
+        // ===== 「哪些图允许自动生成」 =====
+        //
+        // 自动生图的本意是「AI 新写出来的插图自动出图」，而不是「把历史上缺图的都补一遍」。
+        // 历史消息里的图一旦缓存里没有（早年条目被挤掉、图没归档过、归档被清理…），
+        // 自动重跑既花钱又会让画面变样（种子变了），用户明确要求：**不要自动生成**。
+        //
+        // 判定办法：只有**本会话新产生的正文**（新回复的流式内容、新卡的开场白）里出现过的
+        // tag 才进 liveImageTagKeys；从 IndexedDB 读出来的历史消息从不进这个集合。
+        // 再加一层 attemptedImageTagKeys：同一张图本会话只自动跑一次，失败了也不偷偷重试。
+        const liveImageTagKeys = new Set();
+        const attemptedImageTagKeys = new Set();
+        // 设置页「历史图缓存」里显示的条数：Map 不是响应式的，所以单独记一个数字。
+        const imageCacheEntryCount = ref(0);
+        const markLiveImageTagsByText = (text) => {
+            const source = String(text || '');
+            if (!source.includes('image###')) return;
+            const regex = getImageTagRegex();
+            let match;
+            while ((match = regex.exec(source)) !== null) {
+                const key = normalizeImageTagKey(match[1]);
+                if (key) liveImageTagKeys.add(key);
+            }
+        };
+
+
         let imageCacheSaveTimer = null;
         const persistCompletedImageJob = () => {
             clearTimeout(imageCacheSaveTimer);
@@ -3081,12 +3117,15 @@ let removedProviderConfigCleared = false;
                     // 一旦丢掉，重新进入那个会话就会整片重跑（官方 API 一张图一次消耗）。
                     // 只按「条数 + 字节」两个宽松上限淘汰，且优先丢久未用过的。
                     const { entries, dropped } = imageUtils.selectImageCacheEntriesForPersist(
-                        [...completedImageJobsByTag.entries()]
+                        [...completedImageJobsByTag.entries()],
+                        // 条数上限由设置页决定（默认 2 万条）；字节上限仍是防膨胀护栏。
+                        { maxEntries: settings.imageCacheMaxEntries }
                     );
                     if (dropped > 0) {
                         console.warn(`生图缓存超过上限，已淘汰 ${dropped} 条最久未使用的记录（历史图会按当前参数重出）。`);
                     }
                     await setStoredValue('generated_images_cache', Object.fromEntries(entries));
+                    imageCacheEntryCount.value = entries.length;
                 } catch (e) {
                     console.warn('保存生图缓存失败:', e);
                 }
@@ -4705,6 +4744,32 @@ let removedProviderConfigCleared = false;
             }
         };
 
+        // 「这张图没有缓存，先不自动生成」的占位卡：
+        // 用户看到的是一个框 + 一个明确的按钮，而不是一个悄悄开始的生成任务。
+        const renderUncachedImageCard = (card, requestUrl) => {
+            card.dataset.imageRequest = requestUrl;
+            card.dataset.imageJobState = 'uncached';
+            card.classList.remove('is-generating', 'is-waiting', 'is-generation-error');
+            card.classList.add('is-image-uncached');
+            markGeneratedImageOutdated(card, false);
+            // 转圈进度层在这里没有意义（并没有任务在跑），收掉它。
+            card.querySelector('.generated-image-progress')?.remove();
+            const image = card.querySelector('img');
+            if (image) {
+                image.removeAttribute('src');
+                image.style.height = '100%';
+            }
+            if (!card.querySelector('.generated-image-uncached')) {
+                const box = document.createElement('div');
+                box.className = 'generated-image-uncached';
+                box.innerHTML = '<span class="generated-image-uncached-text">历史图未缓存<br><small>不会自动生成</small></span>'
+                    + '<button type="button" class="generated-image-generate">生成这张图</button>';
+                card.appendChild(box);
+            }
+            // 框按当前 URL 的尺寸立起来，免得占位块高矮乱跳。
+            applyGeneratedImageCardAspect(card, { requestUrl, job: null });
+        };
+
         const loadGeneratedImageCard = (card, requestUrl = card?.dataset.imageRequest, options = {}) => {
             if (!card || !requestUrl) return Promise.resolve({ status: 'failed' });
 
@@ -4740,6 +4805,20 @@ let removedProviderConfigCleared = false;
                 upgradeLegacyCachedImage(tagKey, cachedJob, card);
                 return Promise.resolve(cachedJob);
             }
+
+            // 缓存里没有这张图：只有「本会话新回复里出现过的 tag」才自动出图。
+            // 历史消息里的图（旧条目被挤掉 / 当年没归档 / 归档被清理）**不自动跑**——
+            // 花额度且画面会变，用户明确要求改成「留个框自己点」。见 liveImageTagKeys。
+            const isLiveImage = !!tagKey && liveImageTagKeys.has(tagKey) && !attemptedImageTagKeys.has(tagKey);
+            if (!options.fresh && !isLiveImage) {
+                renderUncachedImageCard(card, requestUrl);
+                return Promise.resolve({ status: 'uncached' });
+            }
+            if (tagKey) attemptedImageTagKeys.add(tagKey);
+
+            // 用户点了「生成这张图」：把占位层收掉，回到正常的出图流程。
+            card.classList.remove('is-image-uncached');
+            card.querySelector('.generated-image-uncached')?.remove();
 
             ensureGeneratedImageProgressUi(card);
             // 这张卡马上要（重新）出图：先摘掉上一轮的「按旧参数出的」提示。
@@ -4788,6 +4867,30 @@ let removedProviderConfigCleared = false;
         });
 
         const handleGeneratedImageReroll = async (event, messageIndex) => {
+            // 占位卡上的「生成这张图」：按**原 tag + 当前参数**出图（不改写消息内容）。
+            // 与 ↻ 的区别：↻ 会换 tag（重出一张不一样的），这里只是把缺的那张补出来。
+            const generateButton = event.target.closest('.generated-image-generate');
+            if (generateButton) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (isConversationBusy.value) {
+                    showToast('请等待当前回复完成后再生成图片', 'warning');
+                    return;
+                }
+                const card = generateButton.closest('.generated-image-card');
+                const requestUrl = card?.dataset.imageRequest;
+                if (!card || !requestUrl || card.classList.contains('is-rerolling')) return;
+                card.classList.add('is-rerolling');
+                generateButton.disabled = true;
+                try {
+                    const job = await loadGeneratedImageCard(card, requestUrl, { fresh: true });
+                    if (job?.status === 'done') showToast('已生成图片', 'success');
+                } finally {
+                    card.classList.remove('is-rerolling');
+                    generateButton.disabled = false;
+                }
+                return;
+            }
             // 取消生成：按钮在卡片进度层内，同样走这个委托入口。
             const cancelButton = event.target.closest('.generated-image-cancel');
             if (cancelButton) {
@@ -7526,20 +7629,26 @@ let removedProviderConfigCleared = false;
                     else continuationContentStarted = true;
                 }
                 if (isContinuation) activeToolContinuationHasResponse.value = true;
+                // 本轮新写的正文里出现的图 tag → 允许自动出图（历史消息不会走到这里）。
+                if (field === 'content') markLiveImageTagsByText(message.content);
             };
 
-            const createAssistantMessage = (content = '', reasoning = '') => reactive({
-                role: 'assistant',
-                name: currentCharacter.value.name,
-                content: content || '',
-                reasoning: reasoning || '',
-                id: generateUUID(),
-                shouldAnimate: true,
-                isCotOpen: false,
-                isReasoningOpen: true,
-                isReasoningUserToggled: false,
-                isReasoningAutoCollapsed: false
-            });
+            const createAssistantMessage = (content = '', reasoning = '') => {
+                // 非流式回复一次到齐，也要在这里认下这一轮的图 tag（流式走 appendAssistantText）。
+                if (content) markLiveImageTagsByText(content);
+                return reactive({
+                    role: 'assistant',
+                    name: currentCharacter.value.name,
+                    content: content || '',
+                    reasoning: reasoning || '',
+                    id: generateUUID(),
+                    shouldAnimate: true,
+                    isCotOpen: false,
+                    isReasoningOpen: true,
+                    isReasoningUserToggled: false,
+                    isReasoningAutoCollapsed: false
+                });
+            };
 
             const ensureAssistantMessage = (content = '', reasoning = '') => {
                 if (assistantMessage) return assistantMessage;
@@ -9740,6 +9849,12 @@ let removedProviderConfigCleared = false;
             fetchQuota();
         });
 
+        // 改了「历史图缓存保留条数」立刻按新上限整理一次：
+        // 调小就会按「最久没用过」淘汰，调大则什么都不做（后面新生成的会陆续补进来）。
+        watch(() => settings.imageCacheMaxEntries, () => {
+            persistCompletedImageJob();
+        });
+
         const prepareLoadedChatHistoryForDisplay = (messages = []) => messages
             .filter(msg => msg !== null && msg !== undefined)
             .map(msg => {
@@ -9764,11 +9879,17 @@ let removedProviderConfigCleared = false;
                 return msg;
             });
 
-        const createInitialChatHistory = (char) => char?.first_mes ? [{
-            role: 'assistant',
-            name: char.name,
-            content: char.first_mes
-        }] : [];
+        // 没有存档的自建开场白：它是「这张卡第一次登场」，里面的图 tag 按新图处理（允许自动出图）。
+        // 从存储里读出来的历史消息则一律不认，见 liveImageTagKeys。
+        const createInitialChatHistory = (char) => {
+            if (!char?.first_mes) return [];
+            markLiveImageTagsByText(char.first_mes);
+            return [{
+                role: 'assistant',
+                name: char.name,
+                content: char.first_mes
+            }];
+        };
 
         const getStoredChatHistoryWithRetry = async (id) => {
             let lastError = null;
@@ -11411,6 +11532,8 @@ let removedProviderConfigCleared = false;
             getUncachedInputTokens, formatTokenCount, formatTokenAggregate, formatTokenUsageTime, getTokenUsageTypeLabel, clearTokenUsageHistory,
             storageStats, refreshStorageStats, cleanupUnusedStorage, formatStorageSize,
             avatarShrink, shrinkAvatars,
+            // 历史图缓存条数（设置页「高级设置 → 历史图缓存」显示用）
+            imageCacheEntryCount,
             syncState, initSync, refreshSyncStatus, syncNow, syncPull, syncPush, syncPushForce,
             showCharacterExportModal, openCharacterExportModal, confirmCharacterExport, // Character Export Modal
             updateModalRef, latestUpdateConfig,

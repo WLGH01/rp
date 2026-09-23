@@ -1551,4 +1551,59 @@ assertTrue('同 tag 在途任务去重（首屏重复生图的防线）', appJs.
 assertTrue('去重表在任务结算后释放', /releasePendingTag[\s\S]{0,200}pendingImageTasksByTag\.delete\(requestTagKey\)/.test(appJs));
 assertTrue('去重不是无条件的：点 ↻ 走 fresh 仍会真重出', /if \(!fresh && requestTagKey\) \{\s*\n\s*const inFlight/.test(appJs));
 
+// --- 21. 历史图：条数上限可调 + 缺图不再自动生成 ---
+//
+// 第 79 条的后续：上限从写死的 100 改成「可调、默认 2 万」；
+// 并且历史消息里缓存缺失的图**不再自动重跑**（花额度 + 画面会变），
+// 改成占位卡 + 一个「生成这张图」的按钮由用户自己点。只有本会话新回复里
+// 出现的图 tag 才允许自动出图。
+section('21) 历史图缓存：条数上限可调（默认 2 万）+ 缺图不自动生成');
+
+// 21a. 上限默认值与可调
+assertEqual('缓存条数上限默认 2 万', imageUtils.IMAGE_CACHE_LIMITS.maxEntries, 20000);
+assertEqual('字节上限仍是防膨胀护栏', imageUtils.IMAGE_CACHE_LIMITS.maxBytes, 12 * 1024 * 1024);
+const twentyThousand = [];
+for (let index = 0; index < 20000; index += 1) {
+    twentyThousand.push([`t-${index}`, { status: 'done', resolvedUrl: `/images/2026-09-19/f${index}.png`, lastUsedAt: index }]);
+}
+const keptAll = imageUtils.selectImageCacheEntriesForPersist(twentyThousand, { maxEntries: 20000 });
+assertEqual('2 万条上限下 2 万条一条不少', keptAll.entries.length, 20000);
+assertEqual('没有淘汰', keptAll.dropped, 0);
+const keptTiny = imageUtils.selectImageCacheEntriesForPersist(twentyThousand, { maxEntries: 100 });
+assertEqual('上限调小到 100 → 只留 100 条', keptTiny.entries.length, 100);
+assertEqual('被淘汰数如实汇报', keptTiny.dropped, 19900);
+assertTrue('留下的是 lastUsedAt 最大的那批', keptTiny.entries.every(([, entry]) => Number(entry.lastUsedAt) >= 19900));
+
+// 21b. 设置项接线
+assertTrue('settings 里有 imageCacheMaxEntries 且默认 2 万',
+    /imageCacheMaxEntries: 20000/.test(appJs));
+assertTrue('老存档缺这个键时用 2 万兜底并夹范围',
+    /settings\.imageCacheMaxEntries = Math\.max\(100, Math\.min\(200000,/.test(appJs));
+assertTrue('落盘时把上限传给 selectImageCacheEntriesForPersist',
+    /\{ maxEntries: settings\.imageCacheMaxEntries \}/.test(appJs));
+assertTrue('改上限立即按新上限整理一次', /watch\(\(\) => settings\.imageCacheMaxEntries/.test(appJs));
+assertTrue('设置页显示当前条数', appJs.includes('imageCacheEntryCount') && indexSource.includes('imageCacheEntryCount'));
+assertTrue('控件在高级设置里（跨设备同步之前）',
+    /历史图缓存[\s\S]{0,3000}settings\.imageCacheMaxEntries[\s\S]{0,3000}Cross-Device Sync/.test(indexSource));
+
+// 21c. 「哪些图允许自动生成」的判定
+assertTrue('只有本会话新回复里出现过的 tag 才自动出图', appJs.includes('liveImageTagKeys'));
+assertTrue('同一张图本会话只自动跑一次', appJs.includes('attemptedImageTagKeys'));
+assertTrue('流式增量里登记新 tag', /if \(field === 'content'\) markLiveImageTagsByText\(message\.content\)/.test(appJs));
+assertTrue('非流式一次到齐也登记', /if \(content\) markLiveImageTagsByText\(content\)/.test(appJs));
+assertTrue('新卡开场白算新图', /markLiveImageTagsByText\(char\.first_mes\)/.test(appJs));
+const markLiveCalls = (appJs.match(/markLiveImageTagsByText\(/g) || []).length;
+assertEqual('登记入口只有三处（流式 / 非流式 / 开场白），历史加载那条路不许登记', markLiveCalls, 3);
+assertTrue('缓存没命中且不是本会话新图 → 走占位卡',
+    /const isLiveImage[\s\S]{0,200}if \(!options\.fresh && !isLiveImage\) \{\s*\n\s*renderUncachedImageCard/.test(appJs));
+assertTrue('占位卡由 renderUncachedImageCard 渲染', appJs.includes('const renderUncachedImageCard'));
+assertTrue('占位卡给出「生成这张图」按钮', appJs.includes('generated-image-generate'));
+assertTrue('点它走 fresh 出图（按原 tag，不改写消息）',
+    /generated-image-generate'\)[\s\S]{0,700}loadGeneratedImageCard\(card, requestUrl, \{ fresh: true \}\)/.test(appJs));
+assertTrue('出图前把占位层收掉', /card\.classList\.remove\('is-image-uncached'\)/.test(appJs));
+const stylesSource = readFileSync(join(root, 'assets/css/styles.css'), 'utf8');
+assertTrue('占位卡有独立样式', stylesSource.includes('.generated-image-card.is-image-uncached'));
+assertTrue('占位卡样式覆盖深色模式',
+    readFileSync(join(root, 'assets/css/theme.css'), 'utf8').includes('.generated-image-generate'));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

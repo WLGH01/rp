@@ -28,7 +28,7 @@
 - 镜像 ghcr.io/wlgh01/rp:latest 由 GitHub Actions 在推送 main 时自动构建（linux/amd64 + linux/arm64）。
 - 更新方式：在 Unraid 的 Docker 页面点「Update」（或在终端执行 脚本 rebuild_container my-RP-Hub.xml），
   Unraid 会拉取新镜像并按本模板重建容器；/data 是挂载目录，重建不影响数据。
-- 如需本地构建：cd /mnt/user/appdata/rp-hub/src && docker build -f docker/Dockerfile -t ghcr.io/wlgh01/rp:latest .
+- 如需本地构建：进入 /mnt/user/appdata/rp-hub/src 后执行 docker build -f docker/Dockerfile -t ghcr.io/wlgh01/rp:latest .
 
 【重要：不要再挂 /usr/share/nginx/html】
 - 镜像内已经烘焙了一份站点文件；这里**刻意不挂载 Web Root**。
