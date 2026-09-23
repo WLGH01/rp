@@ -46,5 +46,5 @@ services:
 | 容器内路径 | 模式 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `/data` | rw | 是 | 数据目录：同步数据 `state.json`、备份 `backups/`，以及图片归档 `images/`（由站点以 `/images/` 提供）。容器删除重建后数据仍在这里，**不要删** |
-| `/usr/share/nginx/html` | ro | 否 | 站点根目录。镜像内已烘焙一份，挂载后以挂载内容为准 |
-| `/etc/nginx/conf.d/default.conf` | ro | 否 | nginx 配置（`/api` 反代到容器内同步服务，`/llm/`、`/sd/` 为待修改的反代示例，并屏蔽 `tools/`、`sync-server/`）。挂载后以挂载内容为准 |
+| `/usr/share/nginx/html` | ro | **否（建议不挂）** | 站点根目录。镜像内已烘焙一份；**挂载会盖住镜像里的文件**，于是「拉了新镜像页面还是老版本」。要更新前端请重新构建镜像，不要用挂载覆盖 |
+| `/etc/nginx/conf.d/default.conf` | ro | 否 | nginx 配置（`/api` 反代到容器内同步服务，`/llm/`、`/sd/`、`/mimo/` 为反代示例，并屏蔽 `tools/`、`sync-server/`）。挂载后以挂载内容为准 |

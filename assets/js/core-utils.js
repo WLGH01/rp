@@ -1628,6 +1628,28 @@ window.RPHubUtils = {
         return normalizeImageCacheFingerprint(parts);
     };
 
+    // 卡片提示用的指纹摘要：**存进缓存条目的只是一段短哈希**，不是整份指纹 JSON。
+    //
+    // 起因（第 79 条）：缓存条目里那条完整指纹（provider + baseUrl + 约 45 个生图预设字段）
+    // 单条约 1.4KB，比条目本体（一个短地址 ~200B）大六七倍。条目数一多，光指纹就能把
+    // IndexedDB 与同步快照顶起来，于是当初只能给缓存条目数上限（100 条）——而 100 条
+    // 一旦被写满，早先的图就「从缓存里消失」，重新进那个会话就整片重跑（真金白银的 Anlas）。
+    // 换成摘要后条目只有几百字节，几千条也不过几百 KB，才撑得起「历史图全部留住」。
+    //
+    // 摘要只用于**相等比较**，不参与任何出图计算，因此哈希碰撞风险可以忽略。
+    const IMAGE_FINGERPRINT_HASH_PREFIX = 'h1:';
+    const hashImageCacheFingerprint = (fingerprint) => {
+        // 先归一化再哈希：与 isCachedImageJobOutdated 的比较口径保持一致，
+        // 这样「键顺序不同 / 带旧尺寸字段」的老指纹算出来的摘要也相同。
+        const text = normalizeImageCacheFingerprint(fingerprint);
+        let hash = 0x811c9dc5; // FNV-1a 32bit
+        for (let index = 0; index < text.length; index += 1) {
+            hash ^= text.charCodeAt(index);
+            hash = Math.imul(hash, 0x01000193) >>> 0;
+        }
+        return `${IMAGE_FINGERPRINT_HASH_PREFIX}${hash.toString(36)}`;
+    };
+
     // 缓存条目跟**当前设置**相比，是不是「换过参数了」。
     //
     // 这个判定**不再**决定要不要重跑（第 53 条）：历史图是快照，改设置只影响之后新生成的图
@@ -1639,8 +1661,78 @@ window.RPHubUtils = {
         // 没有条目 = 本来就没有图可显示，谈不上「按旧参数出的」。
         if (!entry) return false;
         if (!entry.imageFingerprint) return false;
-        return normalizeImageCacheFingerprint(entry.imageFingerprint)
+        const stored = String(entry.imageFingerprint);
+        // 新条目存的是摘要；老条目（升级前）存的是整份指纹 JSON，两条路都要能比。
+        if (stored.startsWith(IMAGE_FINGERPRINT_HASH_PREFIX)) {
+            return stored !== hashImageCacheFingerprint(fingerprint);
+        }
+        return normalizeImageCacheFingerprint(stored)
             !== normalizeImageCacheFingerprint(fingerprint);
+    };
+
+    // ===== 生图缓存的持久化策略（第 79 条） =====
+    //
+    // 规则很简单：**能显示的历史图一条都不许悄悄丢**。
+    // 曾经这里是 `slice(-100)`——只留最近生成的 100 条。用户实测：对话里有 677 个图 tag，
+    // 缓存里只剩 100 条，于是切到早先的角色卡（或任何一次刷新 / 同步拉取之后）那一片图
+    // 全部重新生成。官方 API 一张图就是一次消耗，这是实打实的钱。
+    //
+    // 现在的取舍：条目本体只有几百字节（指纹已改存摘要），几千条也就几百 KB，
+    // 因此上限给得很宽松；真正触顶时按「最近用过」淘汰（lastUsedAt，命中缓存时会刷新），
+    // 让久未露面的图先走。大块 base64 的老条目（还没归档、本机独有）排在最后保命，
+    // 只有连它们都放不下时才会被丢。
+    const IMAGE_CACHE_LIMITS = Object.freeze({
+        // 条数上限：按每条 ~300B 估，5000 条约 1.5MB。
+        maxEntries: 5000,
+        // 序列化后的字节上限（含 base64 老条目）：给同步快照留足余量，别把 413 顶回来。
+        maxBytes: 4 * 1024 * 1024
+    });
+
+    /**
+     * 从完整缓存里挑出「该落盘/该进快照」的那部分。
+     * @param {Array<[string, object]>|Record<string, object>} entries Map 的 entries() 或普通对象
+     * @returns {{ entries: Array<[string, object]>, dropped: number, bytes: number }}
+     */
+    const selectImageCacheEntriesForPersist = (entries, limits = {}) => {
+        const { maxEntries, maxBytes } = { ...IMAGE_CACHE_LIMITS, ...limits };
+        const source = Array.isArray(entries)
+            ? entries
+            : Object.entries(entries && typeof entries === 'object' ? entries : {});
+        const list = source
+            .filter(([, entry]) => entry && typeof entry === 'object')
+            .map(([tag, entry], index) => {
+                let size = 0;
+                try { size = JSON.stringify(entry).length; } catch { size = 0; }
+                return {
+                    tag,
+                    entry,
+                    index,
+                    size,
+                    used: Number(entry.lastUsedAt) || 0,
+                    // 还没归档的 base64 条目既大又只在本机有效：要丢的时候最后才轮到它们。
+                    bulky: typeof entry.imageUrl === 'string' && entry.imageUrl.startsWith('data:')
+                };
+            });
+
+        // 排序即优先级：最近用过的在前；都没用过时，先丢 base64（大块）。
+        const ranked = [...list].sort((a, b) => {
+            if (a.used !== b.used) return b.used - a.used;
+            if (a.bulky !== b.bulky) return a.bulky ? 1 : -1;
+            return a.index - b.index;
+        });
+
+        const kept = [];
+        let bytes = 0;
+        for (const item of ranked) {
+            if (kept.length >= maxEntries) break;
+            // 至少留一条：否则极端小的 maxBytes 会把缓存清空（与备份轮换同一原则）。
+            if (kept.length > 0 && bytes + item.size > maxBytes) break;
+            kept.push(item);
+            bytes += item.size;
+        }
+        // 落盘顺序回到原来的插入顺序，避免每次保存都把整份对象顺序洗一遍。
+        kept.sort((a, b) => a.index - b.index);
+        return { entries: kept.map(item => [item.tag, item.entry]), dropped: ranked.length - kept.length, bytes };
     };
 
 
@@ -2856,9 +2948,12 @@ window.RPHubUtils = {
         IMAGE_CACHE_SIZE_FIELDS,
         IMAGE_CACHE_SIZE_PARAMS,
         normalizeImageCacheFingerprint,
+        hashImageCacheFingerprint,
         resolveNaiNegativePrompt,
         resolveImageCacheFingerprint,
         isCachedImageJobOutdated,
+        IMAGE_CACHE_LIMITS,
+        selectImageCacheEntriesForPersist,
         applyNaiGatewayUrlParams,
         normalizeSdDimension,
         resolveSdSize,

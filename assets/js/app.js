@@ -3077,7 +3077,15 @@ let removedProviderConfigCleared = false;
             clearTimeout(imageCacheSaveTimer);
             imageCacheSaveTimer = setTimeout(async () => {
                 try {
-                    const entries = [...completedImageJobsByTag.entries()].slice(-100);
+                    // 这里**不能**再按条数截断（第 79 条）：截断掉的那些条目是历史图唯一的凭证，
+                    // 一旦丢掉，重新进入那个会话就会整片重跑（官方 API 一张图一次消耗）。
+                    // 只按「条数 + 字节」两个宽松上限淘汰，且优先丢久未用过的。
+                    const { entries, dropped } = imageUtils.selectImageCacheEntriesForPersist(
+                        [...completedImageJobsByTag.entries()]
+                    );
+                    if (dropped > 0) {
+                        console.warn(`生图缓存超过上限，已淘汰 ${dropped} 条最久未使用的记录（历史图会按当前参数重出）。`);
+                    }
                     await setStoredValue('generated_images_cache', Object.fromEntries(entries));
                 } catch (e) {
                     console.warn('保存生图缓存失败:', e);
@@ -3110,13 +3118,17 @@ let removedProviderConfigCleared = false;
             if (!tags) return;
             const resolvedUrl = resolveGeneratedImageUrl(job, task);
             if (!resolvedUrl) return;
-            const entry = { ...job, sizeLabel: request.searchParams.get('size') || '' };
+            const entry = { ...job, sizeLabel: request.searchParams.get('size') || '', lastUsedAt: Date.now() };
             // 记下「这张图是在什么参数下生成的」：改了负面/风格/模型后再渲染同一条消息，
             // 就不能再拿这张旧图顶上（否则表现为「参数改了却没生效」）。
-            entry.imageFingerprint = imageUtils.resolveImageCacheFingerprint({
-                settings,
-                requestUrl: request?.href || ''
-            });
+            // 存的是**摘要**（几百字节级）而不是整份指纹 JSON：指纹比条目本体大六七倍，
+            // 存全量会把缓存撑到只能靠「只留 100 条」压体积（第 79 条）。
+            entry.imageFingerprint = imageUtils.hashImageCacheFingerprint(
+                imageUtils.resolveImageCacheFingerprint({
+                    settings,
+                    requestUrl: request?.href || ''
+                })
+            );
             // SD 的 imageUrl 本身就是 base64 data URL，resolvedUrl 与它完全一致，
             // 再存一遍等于把几十 MB 的图片在缓存里翻倍（同步体积就是这么被顶爆的）。
             if (resolvedUrl !== job.imageUrl) entry.resolvedUrl = resolvedUrl;
@@ -4537,13 +4549,29 @@ let removedProviderConfigCleared = false;
             return naiOfficialUtils.describeNaiOfficialAccount(naiOfficialAccount.data);
         });
 
+        // 「同一段提示词正在生成」的去重表：key 是规范化后的 prompt tag。
+        //
+        // 为什么要按 tag 去重，而不是只按请求 URL（generatedImageTasks 那一层）：
+        // 卡片 HTML 里的 data-image-request 是**渲染那一刻的设置**拼出来的。启动时设置还没
+        // 落定、或用户中途改了比例/预设时，同一条消息会先后渲染出两个 URL，于是同一个 tag
+        // 被当成两个任务并发跑——实测首屏 2 张图发了 3 次请求（白烧一次额度）。
+        // tag 一样就说明「要的是同一张图」，直接挂到在途任务上，等它出图后一起回显。
+        const pendingImageTasksByTag = new Map();
+
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
             const request = new URL(requestUrl, window.location.href);
             const token = request.searchParams.get('token') || settings.imageGenKey.trim();
             request.searchParams.set('token', token);
             const key = fresh ? `${request.href}#${Date.now()}-${Math.random()}` : request.href;
             if (generatedImageTasks.has(key)) return generatedImageTasks.get(key);
-            const task = { key, requestUrl: request.href, baseUrl: request.origin, token, cards: new Set(), job: null };
+            const requestTagKey = normalizeImageTagKey(request.searchParams.get('tag') || '');
+            // 命中「同一段提示词正在跑」：复用那个任务（fresh 手点重出不受影响）。
+            if (!fresh && requestTagKey) {
+                const inFlight = pendingImageTasksByTag.get(requestTagKey);
+                if (inFlight) return inFlight;
+            }
+            const task = { key, requestUrl: request.href, baseUrl: request.origin, token, cards: new Set(), job: null, tagKey: requestTagKey };
+
             const publish = (job) => {
                 task.job = job;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
@@ -4646,6 +4674,14 @@ let removedProviderConfigCleared = false;
                 return job;
             });
             generatedImageTasks.set(key, task);
+            // 登记「这段提示词正在跑」，跑完（无论成败）就摘掉，避免把失败也一直钉在表里。
+            if (!fresh && requestTagKey) {
+                pendingImageTasksByTag.set(requestTagKey, task);
+                const releasePendingTag = () => {
+                    if (pendingImageTasksByTag.get(requestTagKey) === task) pendingImageTasksByTag.delete(requestTagKey);
+                };
+                task.promise.then(releasePendingTag, releasePendingTag);
+            }
             return task;
         };
 
@@ -4688,6 +4724,13 @@ let removedProviderConfigCleared = false;
                     requestUrl: requestUrl || ''
                 }));
                 markGeneratedImageOutdated(card, outdated);
+                // 记一次「这条缓存还在被用」：淘汰时按它排优先级，久未露面的图才先走。
+                // 一小时内的重复命中不重写（否则每渲染一条消息都要落一次盘）。
+                const now = Date.now();
+                if (!cachedJob.lastUsedAt || now - cachedJob.lastUsedAt > 3600000) {
+                    cachedJob.lastUsedAt = now;
+                    persistCompletedImageJob();
+                }
                 card.dataset.imageRequest = requestUrl;
                 card.dataset.imageJobState = cachedJob.status;
                 // 宽高比取自缓存里记下的真实尺寸，而不是当前地址的 URL 参数。

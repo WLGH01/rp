@@ -1470,4 +1470,85 @@ assertTrue('数量下拉下方有说明文字',
 assertTrue('说明了不随生图预设切换而改变', indexSource.includes('不随「生图预设配置」的切换而改变'));
 assertTrue('说明了可点 ↻ 重出失败的图', /期望生图数量[\s\S]{0,1600}点 ↻ 重出/.test(indexSource));
 
+// --- 20. 生图缓存的持久化策略：历史图一条都不许悄悄丢 ---
+//
+// 第 79 条：这里以前是 `slice(-100)`，只把最近生成的 100 条落盘。
+// 用户实测：对话里有 677 个图 tag、缓存里只剩 100 条 —— 切到早先的角色卡
+// （或任何一次刷新 / 同步拉取之后）那一片图全部重新生成，官方 API 一张图一次消耗。
+section('20) 生图缓存持久化：不再按 100 条截断，改按条数 + 字节双上限淘汰');
+
+// 20a. 指纹改存摘要：条目体积从 ~1.4KB 降到几百字节，几千条也放得下
+const fpSample = imageUtils.resolveImageCacheFingerprint({
+    settings: { imageProvider: 'novelai', imageGenBaseUrl: 'http://x', imageStyle: 'r18' },
+    requestUrl: 'http://x/generate?tag=a&steps=28&sampler=k_euler&size=竖图&w=832&h=1216'
+});
+const hashSample = imageUtils.hashImageCacheFingerprint(fpSample);
+assertTrue('指纹摘要带版本前缀', hashSample.startsWith('h1:'));
+assertEqual('同一份指纹 → 同一段摘要', hashSample, imageUtils.hashImageCacheFingerprint(fpSample));
+assertTrue('摘要比整份指纹短得多', hashSample.length < fpSample.length / 4);
+const fpOther = imageUtils.resolveImageCacheFingerprint({
+    settings: { imageProvider: 'novelai', imageGenBaseUrl: 'http://x', imageStyle: 'r18' },
+    requestUrl: 'http://x/generate?tag=a&steps=40&sampler=k_euler'
+});
+assertTrue('参数不同 → 摘要不同', hashSample !== imageUtils.hashImageCacheFingerprint(fpOther));
+assertEqual('摘要条目：参数没变 → 不算过期',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: hashSample }, fpSample), false);
+assertEqual('摘要条目：参数变了 → 提示「按旧参数出的」',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: hashSample }, fpOther), true);
+assertEqual('老条目（整份指纹 JSON）与摘要条目可以混存',
+    imageUtils.isCachedImageJobOutdated({ imageFingerprint: fpOther }, fpSample), true);
+
+// 20b. 核心回归：条目数超过旧的 100 条上限时，一条都不许丢
+const manyEntries = [];
+for (let index = 0; index < 377; index += 1) {
+    manyEntries.push([`tag-${index}`, { status: 'done', resolvedUrl: `/images/2026-09-19/f${index}.png`, lastUsedAt: 1000 + index }]);
+}
+const persistedAll = imageUtils.selectImageCacheEntriesForPersist(manyEntries);
+assertEqual('377 条全部落盘（旧的 slice(-100) 会丢 277 条）', persistedAll.entries.length, 377);
+assertEqual('没有条目被淘汰', persistedAll.dropped, 0);
+assertEqual('落盘顺序保持原插入顺序', persistedAll.entries[0][0], 'tag-0');
+assertEqual('最后一条也在', persistedAll.entries[376][0], 'tag-376');
+
+// 20c. 真的超上限时：淘汰最久没用过的，最近用过的必须留下
+const lruEntries = [
+    ['old-unused', { status: 'done', resolvedUrl: '/images/a.png' }],
+    ['recently-used', { status: 'done', resolvedUrl: '/images/b.png', lastUsedAt: Date.now() }],
+    ['middle', { status: 'done', resolvedUrl: '/images/c.png', lastUsedAt: 5000 }]
+];
+const lruKept = imageUtils.selectImageCacheEntriesForPersist(lruEntries, { maxEntries: 2, maxBytes: 1e9 });
+assertEqual('按条数上限裁到 2 条', lruKept.entries.length, 2);
+assertEqual('最近用过的留下', lruKept.entries.some(([tag]) => tag === 'recently-used'), true);
+assertEqual('久未用过的先走', lruKept.entries.some(([tag]) => tag === 'old-unused'), false);
+assertEqual('被淘汰数如实汇报', lruKept.dropped, 1);
+
+// 20d. 字节上限：先丢大块 base64（本机独有但最占体积），短地址条目优先保住
+const byteEntries = [
+    ['archived-small', { status: 'done', resolvedUrl: '/images/2026-09-19/a.png' }],
+    ['local-big', { status: 'done', directImage: true, imageUrl: `data:image/png;base64,${'A'.repeat(4000)}` }]
+];
+const byteKept = imageUtils.selectImageCacheEntriesForPersist(byteEntries, { maxEntries: 10, maxBytes: 600 });
+assertEqual('短地址条目保住', byteKept.entries.some(([tag]) => tag === 'archived-small'), true);
+assertEqual('大块 base64 被让出', byteKept.entries.some(([tag]) => tag === 'local-big'), false);
+const onlyBig = imageUtils.selectImageCacheEntriesForPersist(
+    [['local-big', { status: 'done', imageUrl: `data:image/png;base64,${'A'.repeat(4000)}` }]],
+    { maxEntries: 10, maxBytes: 10 }
+);
+assertEqual('极端上限下也至少留一条（不清空缓存）', onlyBig.entries.length, 1);
+
+// 20e. 坏输入不炸
+assertEqual('空表安全', imageUtils.selectImageCacheEntriesForPersist([]).entries, []);
+assertEqual('null 安全', imageUtils.selectImageCacheEntriesForPersist(null).entries, []);
+assertEqual('普通对象也可入参', imageUtils.selectImageCacheEntriesForPersist({ t: { status: 'done', resolvedUrl: '/images/a.png' } }).entries.length, 1);
+assertEqual('非对象条目被过滤', imageUtils.selectImageCacheEntriesForPersist([['bad', null]]).entries.length, 0);
+
+// 20f. 接线：页面必须用新策略，不能又退回「只留 100 条」
+assertTrue('app.js 不再按 100 条截断生图缓存', !appJs.includes('completedImageJobsByTag.entries()].slice(-100)'));
+assertTrue('app.js 改用 selectImageCacheEntriesForPersist', appJs.includes('imageUtils.selectImageCacheEntriesForPersist('));
+assertTrue('缓存写入时记 lastUsedAt（淘汰要按它排优先级）', /const entry = \{ \.\.\.job, sizeLabel[\s\S]{0,120}lastUsedAt: Date\.now\(\)/.test(appJs));
+assertTrue('命中缓存时刷新 lastUsedAt', /cachedJob\.lastUsedAt = now[\s\S]{0,120}persistCompletedImageJob\(\)/.test(appJs));
+assertTrue('指纹按摘要存', appJs.includes('entry.imageFingerprint = imageUtils.hashImageCacheFingerprint('));
+assertTrue('同 tag 在途任务去重（首屏重复生图的防线）', appJs.includes('pendingImageTasksByTag'));
+assertTrue('去重表在任务结算后释放', /releasePendingTag[\s\S]{0,200}pendingImageTasksByTag\.delete\(requestTagKey\)/.test(appJs));
+assertTrue('去重不是无条件的：点 ↻ 走 fresh 仍会真重出', /if \(!fresh && requestTagKey\) \{\s*\n\s*const inFlight/.test(appJs));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

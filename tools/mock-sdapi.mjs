@@ -12,6 +12,9 @@
 import http from 'node:http';
 
 const port = Number(process.argv[2]) || 8898;
+// 人为延迟（毫秒）：用来复现「生成还没回来时设置变了、同一条消息被渲染成第二个 URL」
+// 这类竞态。默认 0，不影响其它测试。
+const DELAY_MS = Math.max(0, Number(process.env.MOCK_SD_DELAY_MS) || 0);
 // 2x2 红色 PNG
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHgQCAZ3wXh8AAAAASUVORK5CYII=';
 
@@ -67,6 +70,7 @@ http.createServer(async (request, response) => {
             prompt: String(payload.prompt || '').slice(0, 200)
         });
         console.log(`txt2img ← ${payload.width}x${payload.height} sampler=${payload.sampler_name} steps=${payload.steps} vae=${payload.override_settings?.sd_vae ?? '(未指定)'}`);
+        if (DELAY_MS) await new Promise(resolve => setTimeout(resolve, DELAY_MS));
         json(response, 200, { images: [PNG], info: 'mock sdapi' });
         return;
     }
