@@ -3061,6 +3061,16 @@
                                                         </div>
                                                     </label>
                                                     <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
+                                                        <span class="flex flex-col">
+                                                            <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">显示语气词提示</span>
+                                                            <span class="text-[11px] text-gray-400 mt-0.5">开启后正文里会留下「（轻笑）」这类剧本提示；关闭不影响朗读</span>
+                                                        </span>
+                                                        <div class="relative inline-flex flex-none items-center">
+                                                            <input type="checkbox" v-model="settings.ttsSfxVisible" class="settings-toggle-input sr-only">
+                                                            <div class="settings-toggle settings-toggle--rose"></div>
+                                                        </div>
+                                                    </label>
+                                                    <label class="flex items-center justify-between gap-3 p-2.5 rounded-xl border-2 border-transparent hover:border-gray-100 hover:bg-gray-50 transition-all cursor-pointer group">
                                                         <span class="text-sm font-medium text-gray-600 group-hover:text-gray-900">只念引号里的台词</span>
                                                         <div class="relative inline-flex flex-none items-center">
                                                             <input type="checkbox" v-model="settings.ttsReadDialogueOnly" class="settings-toggle-input sr-only">

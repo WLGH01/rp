@@ -435,8 +435,8 @@ console.log('\n14) 源码级断言：开关两个方向都要同步世界书与�
     assertTrue('语气词正则排在朗读正则之后、清理之前',
         appSource.includes('upsertSystemRegex(voiceSfxRegexContent, voiceRegexName);')
         && appSource.includes('upsertSystemRegex(voiceCleanupRegexContent, voiceSfxRegexName, { forceEnabled: true });'));
-    assertTrue('语气词正则的开关也跟随世界书条目',
-        appSource.includes('if (sfxRegex) sfxRegex.enabled = !!voiceWI.enabled;'));
+    assertTrue('语气词正则的开关跟随世界书条目 + 显示开关（默认不显示）',
+        appSource.includes('if (sfxRegex) sfxRegex.enabled = !!voiceWI.enabled && settings.ttsSfxVisible === true;'));
     assertTrue('世界书提示词收到导演演绎列表',
         appSource.includes('mimoDirections: settings.ttsMimoDirections'));
     assertTrue('processRegex 里显式固定「朗读 → 语气词」的相对顺序',
@@ -739,7 +739,72 @@ console.log('\n22) MiniMax 世界书：语气词按模型分流 + 情绪粒度�
     assertTrue('MiMo 分支仍保留自己的语气词写法',
         mimo.includes('[[sfx:叹气]]') && !mimo.includes('(sighs)'));
     const novel = prompts.buildAutoVoicePrompt({ provider: 'novel' });
-    assertTrue('NovelAI 提示词不提语气词', !novel.includes('[[sfx:'));
+    assertTrue('NovelAI 提示词明确禁止语气词标记（写了只会留提示、不发声）',
+        novel.includes('不支持语气词标记') && novel.includes('请勿写 [[sfx:...]]'));
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n23) 世界书强约束：格式合同 / 无效写法清单 / 输出前自检');
+// ---------------------------------------------------------------------------
+{
+    // 强约束的动机：只给「正确示例」时，AI 仍会自造变体（缺角色名、单层方括号、漏闭合、
+    // 语气词写到引号外、标记进代码块），而每一种都会让那句台词**静默**退化成旁白——
+    // 用户看到的现象就是「语音没生效」，且没有任何报错可查。
+    for (const provider of ['minimax', 'mimo', 'novel', 'gpt-sovits']) {
+        const p = prompts.buildAutoVoicePrompt({ provider, minimaxInterjection: provider === 'minimax' });
+        assertTrue(`[${provider}] 有「格式合同 · 最高优先级」段`, p.includes('【格式合同 · 最高优先级】'));
+        assertTrue(`[${provider}] 声明优先于角色卡/预设/世界书`,
+            p.includes('优先于角色卡、预设、世界书'));
+        assertTrue(`[${provider}] 说明写错的后果（会被当作旁白）`,
+            p.includes('会被当作旁白') && p.includes('等于这一轮没开语音'));
+        assertTrue(`[${provider}] 有「无效写法」清单`, p.includes('【无效写法 · 系统一律不认】'));
+        assertTrue(`[${provider}] 有「输出前自检」段`, p.includes('【输出前自检】'));
+        assertTrue(`[${provider}] 自检点名「说话人的姓名」`, p.includes('说话人的姓名'));
+        assertTrue(`[${provider}] 明确角色名不是音色名、不是泛称`,
+            p.includes('不是音色名') && p.includes('这类泛称'));
+        assertTrue(`[${provider}] 列出「只有引号没有标记」`, p.includes('只有引号、没有标记'));
+        assertTrue(`[${provider}] 列出「少了角色名」`, p.includes('少了角色名'));
+        assertTrue(`[${provider}] 列出「单层方括号」`, p.includes('单层方括号'));
+        assertTrue(`[${provider}] 列出「漏了闭合标记」`, p.includes('漏了闭合标记'));
+        assertTrue(`[${provider}] 列出「自造标签」`, p.includes('自造标签'));
+        assertTrue(`[${provider}] 禁止把标记放进代码块`, p.includes('把标记放进代码块'));
+    }
+
+    // 语气词写错位置（引号外）只对「能收语气词」的两条链路提示
+    const mimo = prompts.buildAutoVoicePrompt({ provider: 'mimo' });
+    assertTrue('MiMo：无效清单点名「语气词写在引号外面」', mimo.includes('语气词写在引号外面'));
+    assertTrue('MiMo：正确示例里的语气词在引号内部',
+        mimo.includes('『……[[sfx:长叹一口气]]算了，先这样吧。』'));
+    assertTrue('MiMo：正确示例不再出现「引号外接语气词」的写法',
+        !mimo.includes(']][[sfx:长叹一口气]]『'));
+    assertTrue('MiMo：允许更具体的声音描述（官方能力）',
+        mimo.includes('寒冷导致的急促呼吸'));
+    assertTrue('MiMo：语气词改成「整句最多两三个」', mimo.includes('整句最多两三个'));
+
+    const mm28 = prompts.buildAutoVoicePrompt({
+        provider: 'minimax', minimaxModel: 'speech-2.8-hd', minimaxInterjection: true
+    });
+    assertTrue('MiniMax 2.8：无效清单点名「语气词写在引号外面」',
+        mm28.includes('语气词写在引号外面'));
+    assertTrue('MiniMax 2.8：正确示例的语气词在引号内部',
+        mm28.includes('『……算了，先这样吧。[[sfx:叹气]]』'));
+
+    const mm02 = prompts.buildAutoVoicePrompt({
+        provider: 'minimax', minimaxModel: 'speech-02-hd', minimaxInterjection: false
+    });
+    assertTrue('MiniMax 旧代：无效清单不出现语气词条目（该模型根本没这能力）',
+        !mm02.includes('语气词写在引号外面'));
+
+    // 「语气词不显示」是默认值，而它只是显示层开关：标记仍要能进合成链路
+    const mimoParts = tts.buildSpeechParts(
+        '[[voice:姜黎|疲惫]]『……[[sfx:长叹一口气]]算了。』[[/voice]]', mimoSettings, {});
+    assertEqual('默认不显示也不影响合成（引号内语气词照常进请求）',
+        mimoParts[0].text, '（疲惫）『……（长叹一口气）算了。』');
+    assertEqual('MiMo 侧纯身体动作标签被丢弃（官方明确无效）',
+        tts.translateSfx('a[[sfx:转身]]b', 'mimo'), 'ab');
+    assertEqual('MiMo 侧含发声的动作描述仍放行',
+        tts.translateSfx('a[[sfx:转身笑出声]]b', 'mimo'), 'a（转身笑出声）b');
+    assertEqual('语气词显示开关默认关闭', tts.DEFAULTS.ttsSfxVisible, false);
 }
 
 // ---------------------------------------------------------------------------

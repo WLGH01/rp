@@ -244,6 +244,10 @@
         ttsSplitByParagraph: false,
         ttsStripActions: true,
         ttsReadDialogueOnly: false,
+        // 语气词标记是否在正文里显示成剧本提示「（轻笑）」。
+        // 默认**关**：隐藏它完全不影响朗读（显示层与合成层分离——渲染后的 HTML 只是给人看的，
+        // 合成读的是消息原文），正文因此更干净；想看表演提示的人可以到「朗读行为」里打开。
+        ttsSfxVisible: false,
         // 角色名 → 音色 的绑定表（[{ name, voice }]）。没绑定的角色走上面的默认音色。
         ttsVoiceBindings: [],
         // --- MiniMax ---
@@ -485,10 +489,32 @@
     //   MiMo       → 翻成官方音频标签 `（叹气）`，原样进入合成文本（模型会把它演出来，不念字面）
     //   其他家（含 MiniMax 2.6/02）→ 直接丢弃：没有这个能力，留着只会被逐字念出来
     // options.minimaxModel 决定 MiniMax 走哪条分支——这就是「按模型白名单分流」的落点。
+    // MiMo 的音频标签内容官方是**自由描述**（合法示例包括「寒冷导致的急促呼吸」「提高音量喊话」），
+    // 因此不能像 MiniMax 那样查白名单——白名单会砍掉这些合理写法。
+    // 但官方同时明确「不能是身体动作（转身、坐下、挥手）」，所以这里只挡**整条就是纯动作**的情况：
+    // 精确命中才丢弃，`（转身笑出声）` 这种含发声的仍放行。
+    const MIMO_SFX_ACTION_WORDS = Object.freeze([
+        '转身', '转身离开', '坐下', '坐', '起身', '站起', '站起来', '站立', '挥手', '招手', '摆手',
+        '皱眉', '蹙眉', '点头', '摇头', '耸肩', '摊手', '叉腰', '抱臂', '鞠躬', '欠身', '伸手', '缩手',
+        '抬头', '低头', '仰头', '垂头', '闭眼', '睁眼', '眨眼', '看向', '望向', '盯着', '瞥了一眼',
+        '走近', '走过', '后退', '退后', '上前', '离开', '走出', '走进', '停下', '停住', '愣住', '怔住',
+        '攥紧', '握拳', '咬唇', '抚摸', '抱住', '拥抱', '亲吻', '沉默不语'
+    ]);
+
+    // 语气词 / 发声动作标记（`[[sfx:叹气]]`）按 provider 落地：
+    //   MiniMax 2.8 → 翻成官方英文语气词标签 `(sighs)`（**只有 2.8 支持**，见 MINIMAX_INTERJECTION_MODELS）
+    //   MiMo       → 翻成官方音频标签 `（叹气）`，原样进入合成文本（模型会把它演出来，不念字面）；
+    //                纯身体动作会被丢掉（官方明确这类内容无效）
+    //   其他家（含 MiniMax 2.6/02）→ 直接丢弃：没有这个能力，留着只会被逐字念出来
+    // options.minimaxModel 决定 MiniMax 走哪条分支——这就是「按模型白名单分流」的落点。
     const translateSfx = (raw, provider, options = {}) => {
         const text = String(raw ?? '');
         if (provider === 'mimo') {
-            return text.replace(SFX_PATTERN, (full, word) => `（${String(word).trim()}）`);
+            return text.replace(SFX_PATTERN, (full, word) => {
+                const tag = String(word || '').trim();
+                if (!tag || MIMO_SFX_ACTION_WORDS.includes(tag)) return '';
+                return `（${tag}）`;
+            });
         }
         if (provider === 'minimax') {
             if (!supportsMinimaxInterjection(options.minimaxModel)) return text.replace(SFX_PATTERN, '');
@@ -1303,6 +1329,7 @@
         MIMO_BUILTIN_VOICES,
         MIMO_FORMATS,
         MIMO_AUDIO_TAG_WORDS,
+        MIMO_SFX_ACTION_WORDS,
         MIMO_STYLE_TAGS,
         MIMO_STYLE_CHOICES,
         MIMO_VOICE_CLONE_MAX_BYTES,

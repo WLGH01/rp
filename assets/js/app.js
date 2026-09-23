@@ -9634,8 +9634,12 @@ let removedProviderConfigCleared = false;
             // 一旦关掉，开关关闭后历史消息里的 [[voice:..]] 就会原样漏到界面上。
             const renderRegex = regexScripts.value.find(r => r.name === voiceRegexName);
             if (renderRegex) renderRegex.enabled = !!voiceWI.enabled;
+            // 语气词提示是**可选显示**：默认关（ttsSfxVisible=false）。
+            // 关掉它不影响朗读——合成读的是消息原文，与渲染出的 HTML 无关；
+            // 而且关掉之后属性里会保留原始 `[[sfx:..]]` 标记（清理正则的保护分支管它），
+            // 点击单句朗读时再由合成层翻译，语义链路反而更纯。
             const sfxRegex = regexScripts.value.find(r => r.name === voiceSfxRegexName);
-            if (sfxRegex) sfxRegex.enabled = !!voiceWI.enabled;
+            if (sfxRegex) sfxRegex.enabled = !!voiceWI.enabled && settings.ttsSfxVisible === true;
         };
 
         // 开关同步：世界书条目是唯一真相，「语音朗读正则」永远跟着它。
@@ -9646,13 +9650,14 @@ let removedProviderConfigCleared = false;
             enforceVoiceRules();
         });
 
-        // 换 TTS 服务 / 改音色绑定 / 换 MiniMax 模型后，提示词与正则都要重建
+        // 换 TTS 服务 / 改音色绑定 / 换 MiniMax 模型 / 切换语气词提示后，提示词与正则都要重建
         // （提示词要按服务能力改写情绪/停顿/语气词的写法：MiniMax 只有 2.8 支持语气词标签），
         // 开关状态由 enforceVoiceRules 自动对齐。
         // MiMo 的导演演绎也要进依赖：提示词里会列出「哪些角色已有专属声线设定」。
         watch(() => [
             settings.ttsProvider,
             settings.ttsMinimaxModel,
+            settings.ttsSfxVisible,
             JSON.stringify(settings.ttsVoiceBindings || []),
             JSON.stringify(settings.ttsMimoDirections || [])
         ].join('\u0000'), () => {
