@@ -749,6 +749,7 @@ assertTrue('index.html 暴露多文件导入', /accept="\.json,application\/json
 //   - V5 用 params_version 4，V4/V4.5 用 3
 const naiOff = sandbox.window.RPHubNaiOfficialUtils;
 assertTrue('core-utils 导出 RPHubNaiOfficialUtils', Boolean(naiOff));
+const naiOffSource = readFileSync(join(root, 'assets/js/core-utils.js'), 'utf8');
 
 section('12) NovelAI 官方 API：provider 与常量');
 assertTrue('novelai-official 进入生图方式列表',
@@ -1031,18 +1032,25 @@ assertTrue('免费判定走纯函数（不在模板里重算）',
 // 归档 model 要区分官方 API
 assertTrue('归档 model 区分官方 API', /isNaiOfficialProvider\.value[\s\S]{0,120}naiOfficialModel/.test(appSource));
 
-section('12h) 官方 API：账户额度（订阅等级 / 试用张数 / 训练步数）');
+section('12h) 官方 API：账户额度（订阅等级 / 试用张数 / 训练步数 / V5 充能）');
 // 前提事实：官方公开 API 不返回 Anlas。断言我们确实没有去请求一个不存在的端点/字段，
 //（注释里出现「Anlas」是在说明这件事，所以只查是否真的去读了该字段或打了该路径）。
 assertTrue('app.js 没有请求 Anlas 端点',
     !/[`'"][^`'"]*\/anlas/i.test(appSource) && !/\.anlas\b/i.test(appSource));
 assertTrue('官方账户查询用 /user/subscription', appSource.includes('${baseUrl}/user/subscription'));
 assertTrue('官方账户查询用 /user/information', appSource.includes('${baseUrl}/user/information'));
+// V5 充能来自 subscription.usage：**不是**新端点，也没有编造字段。
+assertTrue('充能走的是既有 subscription 响应的 usage 字段',
+    appSource.includes('naiOfficialUtils.resolveNaiOfficialAccount({ subscription, information })')
+    && naiOffSource.includes('resolveNaiOfficialUsage(sub?.usage)'));
+assertTrue('充能没有额外发请求（仍是那两个端点）',
+    !/\/user\/(usage|battery|quota)/i.test(appSource));
 
 const acct = naiOff.resolveNaiOfficialAccount({
     subscription: {
         tier: 3, active: true, expiresAt: 1789000000000,
-        trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 }
+        trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 },
+        usage: { percent: 69, isNegative: false, timeUntilNextPercent: 7888 }
     },
     information: { trialImagesLeft: 27, trialActionsLeft: 100 }
 });
@@ -1052,6 +1060,79 @@ assertEqual('到期时间保留', acct.expiresAt, 1789000000000);
 assertEqual('试用剩余张数', acct.trialImagesLeft, 27);
 assertEqual('训练步数为两者之和', acct.trainingStepsLeft, 35);
 assertEqual('已购训练步数分开记', acct.purchasedTrainingSteps, 5);
+assertEqual('V5 充能挂在账户对象上', acct.usage?.percent, 69);
+
+// --- V5 充能条的口径（逐字对照官方前端）---
+assertEqual('充能百分比是「剩余」不是「已用」', naiOff.naiOfficialUsagePercent(acct.usage), 69);
+assertEqual('条宽取百分比', naiOff.naiOfficialUsageBarPercent(acct.usage), 69);
+assertEqual('回充速度 = 86400 / 每 1% 秒数（1 位小数）',
+    naiOff.naiOfficialUsageRefillRatePerDay(acct.usage), 11);
+assertEqual('可出图数 = 17.3 张 / %', naiOff.naiOfficialUsageImagesLeft(acct.usage), 1194);
+assertEqual('官方比例常量就是 17.3', naiOff.NAI_OFFICIAL_USAGE_IMAGES_PER_PERCENT, 17.3);
+assertEqual('69% 不是低位', naiOff.isNaiOfficialUsageLow(acct.usage), false);
+assertEqual('4.9% 算低位', naiOff.isNaiOfficialUsageLow({ percent: 4.9, isNegative: false }), true);
+assertEqual('5% 不算低位（边界）', naiOff.isNaiOfficialUsageLow({ percent: 5, isNegative: false }), false);
+assertEqual('isNegative 一定算低位', naiOff.isNaiOfficialUsageLow({ percent: 80, isNegative: true }), true);
+
+// 用尽：官方显示 0%
+assertEqual('用尽时条宽 0', naiOff.naiOfficialUsageBarPercent({ percent: 0, isNegative: true }), 0);
+assertEqual('用尽时秒数为 0 → 回充速度 0（不除零、不出 Infinity）',
+    naiOff.naiOfficialUsageRefillRatePerDay({ percent: 0, isNegative: true, timeUntilNextPercent: 0 }), 0);
+assertTrue('用尽文案含「已用尽」', /已用尽/.test(naiOff.describeNaiOfficialUsage({ percent: 0, isNegative: true })));
+
+// 奖励额度（官方发过 100% 奖励）：>100 合法，数字不封顶、条宽封顶
+const bonus = naiOff.resolveNaiOfficialUsage({ percent: 140, isNegative: false, timeUntilNextPercent: 0 });
+assertEqual('奖励额度数字保留 140', naiOff.naiOfficialUsagePercent(bonus), 140);
+assertEqual('奖励额度条宽封顶 100', naiOff.naiOfficialUsageBarPercent(bonus), 100);
+
+// 负数/坏数据不许把条画反
+assertEqual('负百分比的条宽夹到 0', naiOff.naiOfficialUsageBarPercent({ percent: -30, isNegative: false }), 0);
+assertEqual('负百分比的数字夹到 0', naiOff.naiOfficialUsagePercent({ percent: -30, isNegative: false }), 0);
+
+// 缺字段不崩、不编造
+assertEqual('无 usage → null', naiOff.resolveNaiOfficialUsage(undefined), null);
+assertEqual('percent 缺失 → null', naiOff.resolveNaiOfficialUsage({ isNegative: false }), null);
+assertEqual('usage=null 时文案为空串', naiOff.describeNaiOfficialUsage(null), '');
+assertEqual('usage=null 时条宽 0', naiOff.naiOfficialUsageBarPercent(null), 0);
+assertEqual('秒数缺失时只记 null（回充暂停/已满）',
+    naiOff.resolveNaiOfficialUsage({ percent: 50, isNegative: false }).secondsPerPercent, null);
+assertEqual('非 Opus 响应没有 usage 字段时整块为 null',
+    naiOff.resolveNaiOfficialAccount({ subscription: { tier: 1, active: true } }).usage, null);
+
+// 只有 V5 消耗充能（官方前端 opusUsageLimit 只对 nai-diffusion-5-* 为真）
+assertEqual('V5 Full 消耗充能', naiOff.isNaiOfficialUsageModel('nai-diffusion-5-full'), true);
+assertEqual('V5 Curated 消耗充能', naiOff.isNaiOfficialUsageModel('nai-diffusion-5-curated'), true);
+assertEqual('V4.5 不消耗充能', naiOff.isNaiOfficialUsageModel('nai-diffusion-4-5-full'), false);
+assertEqual('V4 不消耗充能', naiOff.isNaiOfficialUsageModel('nai-diffusion-4-full'), false);
+assertEqual('空模型不消耗充能', naiOff.isNaiOfficialUsageModel(''), false);
+
+// 界面接线：条宽只能用封顶后的值，且文案与提示都要接上
+assertTrue('index.html 暴露充能条', comfyIndexSource.includes('V5 充能（Opus 生成额度）'));
+assertTrue('index.html 的条宽用封顶值（naiOfficialUsageBarPercent）',
+    /:style="\{ width: Math\.min\(100, Math\.max\(0, naiOfficialUsageBarPercent\)\) \+ '%' \}"/.test(comfyIndexSource));
+assertTrue('index.html 没有直接把未封顶的百分比当宽度用',
+    !/:style="\{ width: naiOfficialUsagePercentLabel/.test(comfyIndexSource));
+assertTrue('没有 usage 时整块不渲染（v-if，不摆空条）',
+    /<div v-if="naiOfficialUsage" class="mt-3 pt-3 border-t border-gray-100">/.test(comfyIndexSource));
+assertTrue('用尽时给 Anlas 提醒', comfyIndexSource.includes('继续出图会消耗 Anlas'));
+assertTrue('回充速度写进界面', comfyIndexSource.includes('naiOfficialUsageRefillRate'));
+assertTrue('界面按「是否 V5」区分充能是否被消耗', comfyIndexSource.includes('naiOfficialUsageApplies'));
+// 用尽时不重复同一句提醒（条下面那句已经说过了）
+assertTrue('用尽时不重复提醒（hint 直接返回空串）',
+    /if \(usage\.isNegative\) return '';[\s\S]{0,120}V5 充能偏低/.test(appSource));
+assertTrue('用尽时不再叠一句「当前选的正是 V5」',
+    /v-if="!naiOfficialUsage\.isNegative && naiOfficialUsageApplies"/.test(comfyIndexSource));
+assertTrue('app.js 导出充能相关状态给模板',
+    ['naiOfficialUsage,', 'naiOfficialUsageBarPercent', 'naiOfficialUsagePercentLabel',
+        'naiOfficialUsageRefillRate', 'naiOfficialUsageLow', 'naiOfficialUsageApplies']
+        .every(name => appSource.includes(name)));
+assertTrue('充能提示是本地推导，不额外发请求',
+    /naiOfficialUsageHint = computed\(\(\) => \{/.test(appSource));
+// 对抗检查发现的真 bug：查询失败时界面一边报错、一边还画着上次的充能条（会误导成当前额度）。
+assertTrue('查询失败时清掉上一次的数据（不留旧充能条）',
+    /catch \(error\) \{[\s\S]{0,300}naiOfficialAccount\.data = null;/.test(appSource));
+assertTrue('充能只在本次查询成功时才取（loaded 且无 error）',
+    /naiOfficialUsage = computed\([\s\S]{0,160}naiOfficialAccount\.loaded && !naiOfficialAccount\.error/.test(appSource));
 
 assertEqual('免费试用档（tier 0）标签', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 0 } }).tierLabel, '免费试用（Paper）');
 assertEqual('Tablet 档', naiOff.resolveNaiOfficialAccount({ subscription: { tier: 1 } }).tierLabel, 'Tablet');

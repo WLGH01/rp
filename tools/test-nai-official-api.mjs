@@ -258,6 +258,59 @@ try {
     assertEqual('训练步数为固定+已购', account.trainingStepsLeft, 35);
     assertTrue('额度文案可直接展示', /Opus/.test(nai.describeNaiOfficialAccount(account)));
 
+    section('8b) V5 充能（Opus 生成额度）：从 /user/subscription 的 usage 取');
+    // 前提：官方在「Opus 且订阅生效」时会多带 usage{percent,isNegative,timeUntilNextPercent}。
+    // percent 是**剩余**百分比，timeUntilNextPercent 是「每回 1% 需要多少秒」。
+    assertEqual('充能百分比解析出来', account.usage?.percent, 69);
+    assertEqual('回充秒数解析出来', account.usage?.secondsPerPercent, 7888);
+    assertEqual('未透支', account.usage?.isNegative, false);
+    assertEqual('条宽用百分比（未封顶时就是原值）', nai.naiOfficialUsageBarPercent(account.usage), 69);
+    // 官方条上的换算：86400/7888 ≈ 10.95 → 保留 1 位小数
+    assertEqual('回充速度 = 86400 / 秒数', nai.naiOfficialUsageRefillRatePerDay(account.usage), 11);
+    // 官方「~N images」用的就是 17.3 张 / %
+    assertEqual('可出图数 ≈ 17.3 张 / %', nai.naiOfficialUsageImagesLeft(account.usage), 1194);
+    assertEqual('69% 不算低位', nai.isNaiOfficialUsageLow(account.usage), false);
+    assertTrue('额度文案里带上充能', /V5 充能 剩余 69%/.test(nai.describeNaiOfficialAccount(account)));
+
+    // 只有 V5 消耗这条充能：官方前端里 opusUsageLimit 只对 nai-diffusion-5-* 为真。
+    assertEqual('V5 消耗充能', nai.isNaiOfficialUsageModel('nai-diffusion-5-full'), true);
+    assertEqual('V5 Curated 同样消耗', nai.isNaiOfficialUsageModel('nai-diffusion-5-curated'), true);
+    assertEqual('V4.5 不消耗充能', nai.isNaiOfficialUsageModel('nai-diffusion-4-5-full'), false);
+    assertEqual('V4 不消耗充能', nai.isNaiOfficialUsageModel('nai-diffusion-4-full'), false);
+
+    // 用尽：官方把 isNegative 的条显示成 0%，但**数字口径**仍是「剩余 0%」
+    const emptyUsage = nai.resolveNaiOfficialUsage({ percent: 0, isNegative: true, timeUntilNextPercent: 0 });
+    assertEqual('用尽时条宽为 0', nai.naiOfficialUsageBarPercent(emptyUsage), 0);
+    assertEqual('用尽时算低位（会提醒）', nai.isNaiOfficialUsageLow(emptyUsage), true);
+    assertEqual('秒数为 0 时回充速度记 0（不除零）', nai.naiOfficialUsageRefillRatePerDay(emptyUsage), 0);
+    assertTrue('用尽文案点明会走 Anlas', /已用尽/.test(nai.describeNaiOfficialUsage(emptyUsage)));
+
+    // >100 是合法状态（官方发过 100% 奖励）：数字不封顶，条宽才封顶
+    const bonusUsage = nai.resolveNaiOfficialUsage({ percent: 140, isNegative: false, timeUntilNextPercent: 0 });
+    assertEqual('奖励额度：数字不封顶', nai.naiOfficialUsagePercent(bonusUsage), 140);
+    assertEqual('奖励额度：条宽封顶 100', nai.naiOfficialUsageBarPercent(bonusUsage), 100);
+
+    // 缺字段不能崩，也不能编造数字
+    assertEqual('无 usage 时为 null（不假装是 0）', nai.resolveNaiOfficialUsage(undefined), null);
+    assertEqual('percent 非数字时为 null', nai.resolveNaiOfficialUsage({ percent: 'x' }), null);
+    assertEqual('usage 为 null 时条宽 0', nai.naiOfficialUsageBarPercent(null), 0);
+    assertEqual('usage 为 null 时文案为空串', nai.describeNaiOfficialUsage(null), '');
+    assertEqual('usage 缺失不影响其他字段',
+        nai.resolveNaiOfficialAccount({ subscription: { tier: 3, active: true } }).usage, null);
+
+    // 切到「没有 usage」的账号（非 Opus / 未生效）：整条不显示，而不是显示 0%
+    await fetch(`${base}/__usage?mode=absent`);
+    const noUsage = await accountOf();
+    assertEqual('官方不返回 usage 时为 null', noUsage.usage, null);
+    assertTrue('此时额度文案里没有充能段', !/充能/.test(nai.describeNaiOfficialAccount(noUsage)));
+
+    // 切到用尽的账号：接口层也要能带出来
+    await fetch(`${base}/__usage?mode=empty`);
+    const emptyAcct = await accountOf();
+    assertEqual('用尽账号：isNegative 透传', emptyAcct.usage?.isNegative, true);
+    assertEqual('用尽账号：条宽 0', nai.naiOfficialUsageBarPercent(emptyAcct.usage), 0);
+    await fetch(`${base}/__usage?mode=normal`);
+
     // 无 token 时必须报错，不能静默返回空数据
     let noAuth = '';
     try { await accountOf(''); } catch (e) { noAuth = e.message; }

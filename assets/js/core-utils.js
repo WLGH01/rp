@@ -2972,13 +2972,96 @@ window.RPHubUtils = {
     // 官方订阅等级（来自官方库的 SubscriptionTier 枚举）：0=PAPER 是免费试用档。
     const NAI_OFFICIAL_TIER_LABELS = Object.freeze(['免费试用（Paper）', 'Tablet', 'Scroll', 'Opus']);
 
+    // ===== V5「充能条」（Opus 生成额度）=====
+    //
+    // 官方 /user/subscription 在「Opus 且订阅生效」时会多带一个 usage：
+    //   { percent, isNegative, timeUntilNextPercent }
+    // 三个字段的口径逐字对照官方前端（chunk 86321 / 266 / 5285）：
+    //   percent              剩余百分比 —— 官方条上的文案是「[0]% of Opus Generations
+    //                        remaining」，所以这是**剩余量**，不是已用量。
+    //   isNegative           透支/用尽标记，为真时官方把它显示成 0%。
+    //   timeUntilNextPercent 每回 1% 需要的**秒数**（不是「距离下次回充还有多少秒」）。
+    // 官方前端还给了两个派生量，这里照抄同一套算式，不自己发明数字：
+    //   回充速度 = 86400 / timeUntilNextPercent（%/天，保留 1 位小数）
+    //   可出图数 ≈ 17.3 张 / %（官方条上「~N images」用的就是这个比例）
+    // 两点必须记住：
+    //   1. 这条额度**只被 V5 消耗**。官方前端里只有 nai-diffusion-5-* 带 opusUsageLimit，
+    //      V4.5 及更早仍是「≤28 步且 ≤1MP 就免费」，不受充能条影响。
+    //   2. 充能用尽 ≠ 不能出图：V5 会退回按 Anlas 计费（官方文案原话）。
+    // 另外它跟 Anlas 余额是两回事：Anlas 余额官方 API 依旧查不到（见下）。
+    const NAI_OFFICIAL_USAGE_IMAGES_PER_PERCENT = 17.3;
+
+    // 官方 usage → 界面用的规范化结构；拿不到有效 percent 时返回 null（不假装是 0）。
+    const resolveNaiOfficialUsage = (usage) => {
+        if (!usage || typeof usage !== 'object') return null;
+        const percent = Number(usage.percent);
+        if (!Number.isFinite(percent)) return null;
+        const perPercent = Number(usage.timeUntilNextPercent);
+        return {
+            // 官方原样保留（可能是 100 以上：Anlatan 发过 100% 奖励，超满也是合法状态）。
+            percent,
+            isNegative: usage.isNegative === true,
+            // 每回 1% 的秒数；<= 0 或缺失一律记 null（= 回充已暂停/已满）。
+            secondsPerPercent: Number.isFinite(perPercent) && perPercent > 0 ? perPercent : null
+        };
+    };
+
+    // 条上真正显示的百分比：用尽记 0，下限 0，**不封顶**
+    // （官方刻意保留 >100 的奖励额度，只有条的宽度才封顶到 100）。
+    const naiOfficialUsagePercent = (usage) => {
+        if (!usage) return null;
+        if (usage.isNegative) return 0;
+        return Math.max(0, Number(usage.percent) || 0);
+    };
+
+    // 条的填充宽度：封顶 100，且**只允许**用它。
+    const naiOfficialUsageBarPercent = (usage) => {
+        const percent = naiOfficialUsagePercent(usage);
+        return percent === null ? 0 : Math.min(100, percent);
+    };
+
+    // 官方把「透支」或「不足 5%」都算作需要提醒的低位。
+    const isNaiOfficialUsageLow = (usage) => {
+        if (!usage) return false;
+        return usage.isNegative === true || (Number(usage.percent) || 0) < 5;
+    };
+
+    // 回充速度（%/天）。timeUntilNextPercent 是「每 1% 的秒数」，所以是 86400 / 秒数。
+    // 秒数缺失（已满 / 暂停回充）时返回 0，界面据此改说「回充已暂停」。
+    const naiOfficialUsageRefillRatePerDay = (usage) => {
+        if (!usage || !usage.secondsPerPercent) return 0;
+        return Math.round(86400 / usage.secondsPerPercent * 10) / 10;
+    };
+
+    // 这条额度还能出多少张（官方条上「~N images」的同款估算）。
+    const naiOfficialUsageImagesLeft = (usage) => {
+        const percent = naiOfficialUsagePercent(usage);
+        return percent === null ? null : Math.round(NAI_OFFICIAL_USAGE_IMAGES_PER_PERCENT * percent);
+    };
+
+    // 只有 V5 消耗这条充能（官方前端里 opusUsageLimit 只对 nai-diffusion-5-* 为真）。
+    const isNaiOfficialUsageModel = (model) => String(model || '').startsWith('nai-diffusion-5-');
+
+    // 一句话文案，直接给界面用。
+    const describeNaiOfficialUsage = (usage) => {
+        const percent = naiOfficialUsagePercent(usage);
+        if (percent === null) return '';
+        const shown = Math.round(percent * 10) / 10;
+        const images = naiOfficialUsageImagesLeft(usage);
+        const parts = [`V5 充能 剩余 ${shown}%`];
+        if (images !== null) parts.push(`约 ${images} 张`);
+        if (usage.isNegative) parts.push('已用尽，继续出图会消耗 Anlas');
+        return parts.join(' · ');
+    };
+
     // 把官方账户接口的响应整理成可直接显示的形态。
     //
     // 【重要事实】NovelAI 官方公开 API **不返回 Anlas 余额**：
     // swagger 里 anlas 出现 0 次，/user/subscription 与 /user/information 的 schema
     // 都没有该字段；维护中的社区实现也只把 Anlas 当「会被扣」的概念，从不查询余额。
     // 所以这里展示官方**真正给得出**的额度信息，不编造 Anlas：
-    //   订阅等级 / 是否生效 / 到期时间 / 试用剩余张数 / 模块训练步数剩余
+    //   订阅等级 / 是否生效 / 到期时间 / 试用剩余张数 / 模块训练步数剩余 / V5 充能条
+    // （V5 充能是 subscription.usage，属于「官方确实返回」的那一类，与 Anlas 余额无关。）
     const resolveNaiOfficialAccount = (payload) => {
         // 注意默认参数只对 undefined 生效，传 null 会在解构时抛错——这里统一收口。
         const source = (payload && typeof payload === 'object') ? payload : {};
@@ -3003,7 +3086,9 @@ window.RPHubUtils = {
             trialActionsLeft: Number.isFinite(trialActions) ? trialActions : null,
             trainingStepsLeft: fixed + purchased,
             fixedTrainingStepsLeft: fixed,
-            purchasedTrainingSteps: purchased
+            purchasedTrainingSteps: purchased,
+            // V5 充能（Opus 生成额度）：官方只在「Opus 且订阅生效」时返回，其余账号为 null。
+            usage: resolveNaiOfficialUsage(sub?.usage)
         };
     };
 
@@ -3014,6 +3099,9 @@ window.RPHubUtils = {
         if (account.active === false) parts.push('订阅未生效');
         if (account.trialImagesLeft !== null) parts.push(`试用剩余 ${account.trialImagesLeft} 张`);
         if (account.trainingStepsLeft > 0) parts.push(`训练步数 ${account.trainingStepsLeft}`);
+        // 充能条是 V5 专属的额度，有就带上（没有的账号不硬凑一句话）。
+        const usage = describeNaiOfficialUsage(account.usage);
+        if (usage) parts.push(usage);
         return parts.join(' · ');
     };
 
@@ -3021,6 +3109,16 @@ window.RPHubUtils = {
         NAI_OFFICIAL_TIER_LABELS,
         resolveNaiOfficialAccount,
         describeNaiOfficialAccount,
+        // V5 充能条（Opus 生成额度）的规范化与派生量
+        NAI_OFFICIAL_USAGE_IMAGES_PER_PERCENT,
+        resolveNaiOfficialUsage,
+        naiOfficialUsagePercent,
+        naiOfficialUsageBarPercent,
+        isNaiOfficialUsageLow,
+        naiOfficialUsageRefillRatePerDay,
+        naiOfficialUsageImagesLeft,
+        isNaiOfficialUsageModel,
+        describeNaiOfficialUsage,
         normalizeNaiOfficialDimension,
         resolveNaiOfficialSize,
         isNaiOfficialFreeTier,

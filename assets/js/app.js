@@ -4881,7 +4881,7 @@ let removedProviderConfigCleared = false;
         // 官方账户/额度查询。
         // 注意：官方公开 API 不返回 Anlas 余额（详见 core-utils 的说明），
         // 因此这里查的是官方真正给得出的项：订阅等级、是否生效、到期时间、
-        // 免费试用剩余张数、模块训练步数剩余。
+        // 免费试用剩余张数、模块训练步数剩余，以及 **V5 充能（Opus 生成额度）**。
         const naiOfficialAccount = reactive({
             loaded: false,
             loading: false,
@@ -4930,6 +4930,9 @@ let removedProviderConfigCleared = false;
             } catch (error) {
                 naiOfficialAccount.error = error.message || '查询失败';
                 naiOfficialAccount.loaded = false;
+                // 查询失败时必须把上一次的数据丢掉：否则界面一边报「Failed to fetch」，
+                // 一边继续画着上次的 69% 充能条 —— 用户会以为那是当前额度（真会花错钱的那种误导）。
+                naiOfficialAccount.data = null;
                 if (isManual) showToast(`查询账户信息失败：${error.message}`, 'error');
                 return { ok: false, error: naiOfficialAccount.error };
             } finally {
@@ -4937,11 +4940,54 @@ let removedProviderConfigCleared = false;
             }
         };
 
-        // 给界面直接用的文案（等级 · 试用剩余 N 张 · 训练步数）。
+        // 给界面直接用的文案（等级 · 试用剩余 N 张 · 训练步数 · V5 充能）。
         const naiOfficialAccountLabel = computed(() => {
             if (naiOfficialAccount.error) return naiOfficialAccount.error;
             if (!naiOfficialAccount.loaded) return '';
             return naiOfficialUtils.describeNaiOfficialAccount(naiOfficialAccount.data);
+        });
+
+        // ===== V5 充能条（Opus 生成额度）=====
+        // 数据来自 /user/subscription 的 usage 字段（官方只在「Opus 且订阅生效」时返回）。
+        // 它跟 Anlas 余额是两件事：充能是 V5 专属的免费额度，用尽后 V5 会退回按 Anlas 计费。
+        // 只在**这次查询成功**时才拿数据：报错时宁可什么都不显示，也不能展示上一次的旧数字。
+        const naiOfficialUsage = computed(
+            () => (naiOfficialAccount.loaded && !naiOfficialAccount.error ? naiOfficialAccount.data?.usage : null) || null
+        );
+        // 条宽只能用这个（封顶 100）；百分比文案用不封顶的那个。
+        const naiOfficialUsageBarPercent = computed(
+            () => naiOfficialUtils.naiOfficialUsageBarPercent(naiOfficialUsage.value)
+        );
+        const naiOfficialUsagePercentLabel = computed(() => {
+            const percent = naiOfficialUtils.naiOfficialUsagePercent(naiOfficialUsage.value);
+            if (percent === null) return '';
+            return `${Math.round(percent * 10) / 10}%`;
+        });
+        const naiOfficialUsageImagesLeft = computed(
+            () => naiOfficialUtils.naiOfficialUsageImagesLeft(naiOfficialUsage.value)
+        );
+        const naiOfficialUsageRefillRate = computed(
+            () => naiOfficialUtils.naiOfficialUsageRefillRatePerDay(naiOfficialUsage.value)
+        );
+        // 官方「~N images」同款换算：一天回充的量大约等于多少张图。
+        const naiOfficialUsageRefillImages = computed(
+            () => Math.round(naiOfficialUtils.NAI_OFFICIAL_USAGE_IMAGES_PER_PERCENT * naiOfficialUsageRefillRate.value)
+        );
+        // 官方把「透支」与「不足 5%」都算低位提醒。
+        const naiOfficialUsageLow = computed(() => naiOfficialUtils.isNaiOfficialUsageLow(naiOfficialUsage.value));
+        // 当前选的模型是不是 V5 —— 只有 V5 消耗这条充能，所以只有 V5 才值得提醒。
+        const naiOfficialUsageApplies = computed(
+            () => naiOfficialUtils.isNaiOfficialUsageModel(settings.naiOfficialModel)
+        );
+        // 充能偏低（但还没用尽）+ 当前是 V5：下一次出图还没走 Anlas，值得提前提醒。
+        // 用尽的情况已经在条下面那句里说清了，这里不重复。
+        const naiOfficialUsageHint = computed(() => {
+            if (!naiOfficialUsageApplies.value) return '';
+            const usage = naiOfficialUsage.value;
+            if (!usage) return '';
+            if (usage.isNegative) return '';
+            if (naiOfficialUsageLow.value) return 'V5 充能偏低：用尽后继续出图会消耗 Anlas。';
+            return '';
         });
 
         // 「同一段提示词正在生成」的去重表：key 是规范化后的 prompt tag。
@@ -12388,6 +12434,9 @@ let removedProviderConfigCleared = false;
             isComfyProvider, isNaiProvider, isNaiOfficialProvider,
             naiOfficialSize, naiOfficialSizeLabel, naiOfficialIsFree, naiOfficialFreeHint,
             naiOfficialAccount, naiOfficialAccountLabel, fetchNaiOfficialAccount,
+            naiOfficialUsage, naiOfficialUsageBarPercent, naiOfficialUsagePercentLabel,
+            naiOfficialUsageImagesLeft, naiOfficialUsageRefillRate, naiOfficialUsageRefillImages,
+            naiOfficialUsageLow, naiOfficialUsageApplies, naiOfficialUsageHint,
             naiOfficialModelOptions, naiOfficialResolutionOptions, naiOfficialSamplerOptions,
             naiGatewaySamplerOptions, naiGatewayNoiseScheduleOptions,
             naiOfficialNoiseScheduleOptions, naiOfficialUcPresetOptions,

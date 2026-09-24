@@ -6,11 +6,13 @@
 //                             成功时返回一个 ZIP（内含 PNG），而不是 JSON
 //   401 无/错 token，400 参数非法（宽高非 64 倍数），402 无订阅
 //   429 账号并发已满（官方是「全局并发 1」）：__fail?mode=concurrency 会复刻它
-//   GET  /user/subscription   探活用；有 token 时 200
+//   GET  /user/subscription   探活用；有 token 时 200，并带上 V5 充能 usage
+//   GET  /user/information    免费试用剩余张数在这里
 //
 // 用法: node tools/mock-nai-official.mjs [port]     默认 8897
 // 查看收到的请求: curl http://127.0.0.1:8897/__requests
 // 查看并发统计:   curl http://127.0.0.1:8897/__stats
+// 切换充能形态:   curl 'http://127.0.0.1:8897/__usage?mode=empty|bonus|absent'
 // 注入故障:       curl 'http://127.0.0.1:8897/__fail?mode=busy&count=1'（下 1 次请求 429）
 //                 curl 'http://127.0.0.1:8897/__fail?mode=concurrency'（并发 >1 时 429）
 //                 curl 'http://127.0.0.1:8897/__fail?mode=stall&count=1&ms=300'（下 1 次请求挂住）
@@ -32,6 +34,8 @@ let stallMs = 300;
 // 账号级并发：inFlight 用来复刻「全局并发 1」，maxInFlight 用来断言客户端确实没并发。
 let inFlight = 0;
 let maxInFlight = 0;
+// subscription 里 usage（V5 充能）的形态：normal / empty / bonus / absent。
+let usageMode = 'normal';
 // 默认接受任意 token；设环境变量可要求指定 token
 const EXPECTED_TOKEN = process.env.MOCK_NAI_TOKEN || '';
 
@@ -107,6 +111,7 @@ http.createServer(async (request, response) => {
         stallRemaining = 0;
         inFlight = 0;
         maxInFlight = 0;
+        usageMode = 'normal';
         json(response, 200, { ok: true });
         return;
     }
@@ -140,8 +145,27 @@ http.createServer(async (request, response) => {
             active: true,
             expiresAt: 1789000000000,
             perks: { maxPriorityActions: 30, startPriority: 30, contextTokens: 8192, unlimitedMaxPriority: true, moduleTrainingSteps: 30 },
-            trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 }
+            trainingStepsLeft: { fixedTrainingStepsLeft: 30, purchasedTrainingSteps: 5 },
+            // V5 充能（Opus 生成额度）：官方在「Opus 且订阅生效」时才返回 usage。
+            // percent 是**剩余**百分比；timeUntilNextPercent 是「每回 1% 需要多少秒」。
+            // 7888 秒 / % → 86400/7888 ≈ 10.95 → 官方条上写 ~11%/天。
+            ...(usageMode === 'absent' ? {} : {
+                usage: usageMode === 'empty'
+                    ? { percent: 0, isNegative: true, timeUntilNextPercent: 0 }
+                    : usageMode === 'bonus'
+                        // 官方发过 100% 奖励，所以 >100 是合法状态（条宽封顶，数字不封顶）。
+                        ? { percent: 140, isNegative: false, timeUntilNextPercent: 0 }
+                        : { percent: 69, isNegative: false, timeUntilNextPercent: 7888 }
+            })
         });
+    }
+
+    // 充能用尽的账号：isNegative=true 时官方把条显示成 0%。
+    // 通过 /__usage?mode=empty|bonus|absent 切换，用于验证各种边界口径。
+    if (p === '/__usage') {
+        usageMode = url.searchParams.get('mode') || 'normal';
+        json(response, 200, { ok: true, usageMode });
+        return;
     }
 
     // 账户信息端点：免费试用剩余张数在这里（官方把额度拆在 subscription / information 两处）

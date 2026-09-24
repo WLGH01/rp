@@ -2265,9 +2265,38 @@
                                             <p v-else class="text-xs text-gray-400 leading-relaxed">
                                                 点「查询」获取订阅等级与剩余额度。
                                             </p>
+
+                                            <!-- V5 充能条（Opus 生成额度）：官方 /user/subscription 的 usage 字段。
+                                                 只在「Opus 且订阅生效」时才有数据；其余账号整块不显示，不摆空条。 -->
+                                            <div v-if="naiOfficialUsage" class="mt-3 pt-3 border-t border-gray-100">
+                                                <div class="flex items-center justify-between gap-3 mb-2">
+                                                    <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">V5 充能（Opus 生成额度）</span>
+                                                    <span class="text-xs font-bold tabular-nums whitespace-nowrap"
+                                                        :class="naiOfficialUsageLow ? 'text-amber-600' : 'text-teal-700'">
+                                                        {{ naiOfficialUsagePercentLabel }}<span v-if="naiOfficialUsageImagesLeft !== null" class="font-normal text-gray-400"> · 约 {{ naiOfficialUsageImagesLeft }} 张</span>
+                                                    </span>
+                                                </div>
+                                                <div class="h-3 rounded-full bg-gray-200 overflow-hidden">
+                                                    <div class="h-full rounded-full transition-all duration-300"
+                                                        :class="naiOfficialUsageLow ? 'bg-amber-400' : 'bg-primary-500'"
+                                                        :style="{ width: Math.min(100, Math.max(0, naiOfficialUsageBarPercent)) + '%' }"></div>
+                                                </div>
+                                                <p class="mt-2 text-xs text-gray-400 leading-relaxed">
+                                                    <span v-if="naiOfficialUsage.isNegative" class="text-amber-600 font-bold">已用尽：继续出图会消耗 Anlas，回充后自动恢复免费。</span>
+                                                    <span v-else-if="naiOfficialUsageRefillRate > 0">回充速度约 <span class="font-bold text-gray-500">{{ naiOfficialUsageRefillRate }}% / 天</span>（约 {{ naiOfficialUsageRefillImages }} 张 / 天）。</span>
+                                                    <span v-else>回充已暂停（已满 100%）。</span>
+                                                    <!-- 「会不会被消耗」只在没满/没尽时才值得说一句，否则是废话。 -->
+                                                    <span v-if="!naiOfficialUsage.isNegative && naiOfficialUsageApplies"> 当前选的正是 V5，这条充能会被消耗。</span>
+                                                    <span v-else-if="!naiOfficialUsage.isNegative"> 这条充能只被 V5 消耗；当前模型（V4.5 及更早）仍是「≤ {{ naiOfficialFreeSteps }} 步且 ≤ 1.00MP 免费」。</span>
+                                                </p>
+                                                <!-- 充能跟当前参数的关系：用尽 + 选了 V5 才是真会花钱的那种情况。 -->
+                                                <p v-if="naiOfficialUsageHint" class="mt-2 text-xs text-amber-600 leading-relaxed">{{ naiOfficialUsageHint }}</p>
+                                            </div>
+
                                             <p class="mt-2 text-xs text-gray-400 leading-relaxed">
                                                 说明：NovelAI <span class="font-bold">官方公开 API 不返回 Anlas 余额</span>（官方接口文档与官方库中都没有该字段），
-                                                因此这里展示官方可查询到的项：订阅等级、免费试用剩余张数、模块训练步数。
+                                                因此这里展示官方可查询到的项：订阅等级、免费试用剩余张数、模块训练步数，
+                                                以及 Opus 账号的 <span class="font-bold">V5 充能（Opus 生成额度）</span>。
                                                 Anlas 请到 novelai.net 账户页查看。
                                             </p>
                                         </div>
