@@ -1194,10 +1194,11 @@
             tool: { type: Object, required: true },
             displayDescription: { type: String, default: '' },
             webTool: Boolean,
+            tagTool: Boolean,
             minResultCount: { type: Number, required: true },
             maxResultCount: { type: Number, required: true }
         },
-        emits: ['close', 'save', 'update:result-count', 'update:tavily-api-key'],
+        emits: ['close', 'save', 'update:result-count', 'update:tavily-api-key', 'update:tag-mode', 'update:mcp-url', 'update:mcp-tool', 'pick-model'],
         template: `
             <modal-shell v-if="show" overlay-class="z-50 bg-black/50 backdrop-blur-sm p-4 animate-fade-in"
                 panel-class="bg-white rounded-2xl border border-gray-200 w-full max-w-3xl flex flex-col shadow-2xl max-h-[90vh] overflow-hidden">
@@ -1234,6 +1235,47 @@
                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Tavily API Key</label>
                                 <input :value="tool.tavilyApiKey" @input="$emit('update:tavily-api-key', $event.target.value.trim())" type="password"
                                     class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:ring-4 focus:ring-primary-500/10 focus:border-primary-500 focus:outline-none transition-all" placeholder="tvly-...">
+                            </div>
+                        </div>
+                        <div v-if="tagTool" class="max-w-2xl mx-auto bg-white border border-gray-200 rounded-2xl p-5 md:p-6 shadow-sm space-y-5">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">谁来调用</label>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                    <button type="button" @click="$emit('update:tag-mode', 'main')"
+                                        class="text-left px-3 py-2.5 rounded-xl border transition-all"
+                                        :class="tool.mode === 'aux' ? 'border-gray-200 hover:border-primary-300 bg-white' : 'border-primary-500 bg-primary-50/60'">
+                                        <div class="text-sm font-bold text-gray-800">主模型调用</div>
+                                        <div class="text-[11px] leading-relaxed text-gray-500 mt-0.5">走 function calling。开箱即用，但工具说明书每轮都会进主上下文（约 150~250 token）。</div>
+                                    </button>
+                                    <button type="button" @click="$emit('update:tag-mode', 'aux')"
+                                        class="text-left px-3 py-2.5 rounded-xl border transition-all"
+                                        :class="tool.mode === 'aux' ? 'border-primary-500 bg-primary-50/60' : 'border-gray-200 hover:border-primary-300 bg-white'">
+                                        <div class="text-sm font-bold text-gray-800">另配模型调用（推荐）</div>
+                                        <div class="text-[11px] leading-relaxed text-gray-500 mt-0.5">主上下文零开销；出图前站内用指定模型规范化一次 tag，每张图多一次小请求。</div>
+                                    </button>
+                                </div>
+                            </div>
+                            <div v-if="tool.mode === 'aux'">
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">调用模型</label>
+                                <div class="flex gap-2">
+                                    <input :value="tool.model" readonly
+                                        class="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:outline-none"
+                                        placeholder="未选择（不选则不生效，按 AI 原样出图）">
+                                    <button type="button" @click="$emit('pick-model')" class="modal-secondary-button">选择模型</button>
+                                </div>
+                                <p class="mt-1.5 text-[11px] leading-relaxed text-gray-500">用便宜快的小模型即可：它只做「把自造短语换成本站词典里的真实 tag」这一件事，不需要写剧情。</p>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">MCP 端点（可选）</label>
+                                <input :value="tool.mcpUrl" @input="$emit('update:mcp-url', $event.target.value.trim())" type="text"
+                                    class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:ring-4 focus:ring-primary-500/10 focus:border-primary-500 focus:outline-none transition-all" placeholder="http://127.0.0.1:8000/mcp — 留空则用 Danbooru 官方标签接口">
+                                <p class="mt-1.5 text-[11px] leading-relaxed text-gray-500">支持 Streamable HTTP 的 MCP 服务（JSON-RPC <code>tools/call</code>）。留空直接查 danbooru.donmai.us；若浏览器被 CORS 拦截，就在 nginx 里加一层反代后把地址填这里。</p>
+                            </div>
+                            <div v-if="tool.mcpUrl">
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">MCP 工具名</label>
+                                <input :value="tool.mcpTool" @input="$emit('update:mcp-tool', $event.target.value.trim())" type="text"
+                                    class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:ring-4 focus:ring-primary-500/10 focus:border-primary-500 focus:outline-none transition-all" placeholder="search_tags">
+                                <p class="mt-1.5 text-[11px] leading-relaxed text-gray-500">留空默认 <code>search_tags</code>；调用参数为 <code>{ query, limit }</code>。</p>
                             </div>
                         </div>
                     </div>

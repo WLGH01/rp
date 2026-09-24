@@ -1740,4 +1740,75 @@ assertTrue('官方载荷内部也归一化（多角色解析跑在干净文本�
     /parseNaiMultiCharacterPrompt\(normalizePromptText\(prompt\), \{ grid \}\)/.test(
         readFileSync(join(root, 'assets/js/core-utils.js'), 'utf8')));
 
+// --- 23. 生图 Tag 词典 / MCP Tag 查询工具 / 网关换行归一化 ---
+// 这一节守三件事：
+//   a) 世界书里多出一条「生图Tag词典」，且词典里全是**真实存在**的 Danbooru tag
+//      （逐条核对语料是另一支脚本：tools/verify-image-tags.mjs）；
+//   b) 「生图 Tag 查询」工具的两种调用方式：主模型（进上下文）/ 另配模型（零开销）；
+//   c) 网关请求体里的 tag 必须先归一化 —— AI 写的字面「\n」不再原样进请求。
+section('23) 生图 tag 词典、MCP Tag 查询工具、网关换行归一化');
+const lexiconV45 = builtinPrompts.buildImageTagLexicon({ model: 'nai-diffusion-4-5-full', provider: 'novelai' });
+const lexiconV5 = builtinPrompts.buildImageTagLexicon({ model: 'nai-diffusion-5-full', provider: 'novelai' });
+const lexiconSd = builtinPrompts.buildImageTagLexicon({ model: 'mock-model', provider: 'stable-diffusion' });
+assertTrue('词典按【分类】行渲染', lexiconV45.includes('【人数 · 主体】') && lexiconV45.includes('【NSFW · 状态与体位】'));
+assertTrue('词典用 NovelAI 的空格写法（不是下划线）',
+    lexiconV45.includes('long hair') && !lexiconV45.includes('long_hair'));
+assertTrue('V5 专属 tag 只出现在 V5 那份里',
+    lexiconV5.includes('ultra complexity') && !lexiconV45.includes('ultra complexity'));
+assertEqual('SD / ComfyUI 不注入 NAI 词典', lexiconSd, '');
+assertTrue('词典带互动锚点与权重语法说明（用 - 行，校验脚本只解析【】行）',
+    lexiconV45.includes('source#动作') && lexiconV45.includes('1.3::tag::'));
+assertTrue('词典规模够大（≥400 个 tag）', (lexiconV45.match(/,/g) || []).length > 400);
+
+const normalizerV45 = builtinPrompts.buildImageTagNormalizePrompt({ model: 'nai-diffusion-4-5-full', provider: 'novelai' });
+assertTrue('另配模型用的规范器与词典同源', normalizerV45.includes('<tag_normalizer>') && normalizerV45.includes('【NSFW'));
+assertTrue('规范器要求：只输出一行、保留 | 分栏、不得臆造设定',
+    normalizerV45.includes('只输出一行') && normalizerV45.includes('分栏') && normalizerV45.includes('不得臆造'));
+assertEqual('SD / ComfyUI 不生成规范器提示词',
+    builtinPrompts.buildImageTagNormalizePrompt({ model: 'mock-model', provider: 'stable-diffusion' }), '');
+
+const worldbookWithTool = builtinPrompts.buildAutoImageGenPrompt({
+    count: 2, model: 'nai-diffusion-4-5-full', provider: 'novelai', tagLookupTool: 'tool_tag'
+});
+const worldbookWithoutTool = builtinPrompts.buildAutoImageGenPrompt({
+    count: 2, model: 'nai-diffusion-4-5-full', provider: 'novelai'
+});
+assertTrue('启用工具时世界书教 AI 先查 tag', worldbookWithTool.includes('tool_tag'));
+assertTrue('没启用工具时不出现工具名', !worldbookWithoutTool.includes('tool_tag'));
+assertTrue('世界书写明 tag 数量下限（默认不到 100 token 的那档被顶掉）',
+    worldbookWithTool.includes('不少于 60 个 tag') && worldbookWithTool.includes('每个角色段不少于 30 个 tag'));
+assertTrue('世界书强制两人以上写 Character Prompt', worldbookWithTool.includes('Character Prompt') && worldbookWithTool.includes('人数与场景 | 角色1'));
+assertTrue('世界书禁止自造英文短语/整句英文', worldbookWithTool.includes('严禁自造英文短语'));
+assertTrue('世界书禁止在 tag 里写换行与字面 \\n', worldbookWithTool.includes('不得换行'));
+assertTrue('世界书给出权重与排除语法', worldbookWithTool.includes('1.3::tag::') && worldbookWithTool.includes('-1::tag::'));
+
+const toolDefaults = sandbox.window.RPHubBuiltinContent.activeTools.defaults;
+const tagToolDefault = toolDefaults.find(tool => tool.id === 'tool_tag');
+assertTrue('工具栏里有「生图 Tag 查询」工具（默认关）',
+    !!tagToolDefault && tagToolDefault.type === 'tag_lookup' && tagToolDefault.enabled === false);
+assertEqual('默认调用方式是主模型', tagToolDefault.mode, 'main');
+assertEqual('默认没配 MCP 端点（回落 Danbooru 官方接口）', tagToolDefault.mcpUrl, '');
+
+assertTrue('aux 模式不进请求上下文（工具说明书的开销就省在这里）',
+    /isAuxTagLookupTool\(tool\)/.test(appJs) && /\.filter\(tool => !isAuxTagLookupTool\(tool\)\)/.test(appJs));
+assertTrue('出图前用另配的模型规范化 tag',
+    /const backendTag = await resolveBackendImageTag\(rawTag\)/.test(appJs));
+assertTrue('缓存 key 仍是 AI 原本写的 tag（规范化只影响发给后端的提示词）',
+    /const tags = request\?\.searchParams\?\.get\('tag'\) \|\| '';/.test(appJs));
+assertTrue('MCP 端点走 JSON-RPC tools/call', appJs.includes("method: 'tools/call'"));
+assertTrue('留空回落到 Danbooru 官方标签接口', appJs.includes('https://danbooru.donmai.us/tags.json'));
+assertTrue('规范化失败绝不挡住出图（catch 后返回原 tag）',
+    /规范化失败，按原样出图[\s\S]{0,120}return tag;/.test(appJs));
+assertTrue('工具面板能选调用方式 / 模型 / MCP 端点',
+    uiJs.includes("'update:tag-mode'") && uiJs.includes("'update:mcp-url'") && mainIndex.includes(':tag-tool="isTagActiveTool'));
+assertTrue('工具栏上能看出当前是哪种调用方式',
+    mainIndex.includes('另配模型调用（') && mainIndex.includes('需要选择调用模型'));
+assertTrue('「生图Tag词典」登记为系统世界书条目',
+    sandbox.window.RPHubConfig.systemWorldInfoNames.includes('生图Tag词典'));
+assertTrue('世界书里会创建/更新词典条目', appJs.includes("const tagLexiconWIName = '生图Tag词典'"));
+assertTrue('自动生图开关联动词典开关',
+    /const lexicon = worldInfo\.value\.find\(w => w\.comment === '生图Tag词典'\)/.test(appJs));
+assertTrue('网关请求体里的 tag 先归一化（字面 \\n 不再原样转发给 nai2api）',
+    /tag: imageUtils\.normalizePromptText\(backendTag\)/.test(appJs));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

@@ -234,6 +234,7 @@ const app = createApp({
         const ACTIVE_TOOL_KEYWORD_TYPE = activeToolConfig.types.keyword;
         const ACTIVE_TOOL_WEB_TYPE = activeToolConfig.types.web;
         const ACTIVE_TOOL_RANDOM_TYPE = activeToolConfig.types.random;
+        const ACTIVE_TOOL_TAG_TYPE = activeToolConfig.types.tag;
         const ACTIVE_TOOL_MIN_RESULT_COUNT = activeToolConfig.resultCount.min;
         const ACTIVE_TOOL_DEFAULT_RESULT_COUNT = activeToolConfig.resultCount.default;
         const ACTIVE_TOOL_MAX_RESULT_COUNT = activeToolConfig.resultCount.max;
@@ -1506,6 +1507,13 @@ let removedProviderConfigCleared = false;
             if (normalizedType === ACTIVE_TOOL_WEB_TYPE) {
                 normalized.tavilyApiKey = String(tool.tavilyApiKey || tool.apiKey || fallback.tavilyApiKey || '').trim();
             }
+            if (normalizedType === ACTIVE_TOOL_TAG_TYPE) {
+                // MCP 端点/工具名/调用方式跟着工具走（和 Tavily 的 key 一样，属于这条工具自己的配置）。
+                normalized.mcpUrl = String(tool.mcpUrl || tool.mcpEndpoint || fallback.mcpUrl || '').trim();
+                normalized.mcpTool = String(tool.mcpTool || fallback.mcpTool || '').trim();
+                normalized.mode = tool.mode === 'aux' ? 'aux' : 'main';
+                normalized.model = String(tool.model || fallback.model || '').trim();
+            }
             return normalized;
         };
 
@@ -2338,8 +2346,13 @@ let removedProviderConfigCleared = false;
             showToast(enabled ? '自动生图已开启' : '自动生图已关闭', enabled ? 'success' : 'info');
         };
 
+        // 「自动生图」开关同时管两条世界书：规则（自动生图）+ Tag 词典（生图Tag词典）。
+        // 词典也可以在世界书列表里单独关掉（省上下文 / 换自己的词典），此处只在两种状态
+        // 一致时才覆盖，避免用户单独关掉词典后被这里的联动又打开。
         const setAutoImageGenEnabled = (enabled) => {
             isAutoImageGenEnabled.value = enabled;
+            const lexicon = worldInfo.value.find(w => w.comment === '生图Tag词典');
+            if (lexicon) lexicon.enabled = enabled;
             const changed = isAutoImageGenEnabled.value === enabled;
             if (changed) showAutoImageGenToggleToast(enabled);
             return changed;
@@ -4633,10 +4646,15 @@ let removedProviderConfigCleared = false;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
             };
             task.promise = (async () => {
+                // 出图前可选的 tag 规范化（工具面板「生图 Tag 查询」的「另配模型」模式）：
+                // 只改**发给出图后端**的提示词，不改消息里那一行 tag ——
+                // 历史图缓存仍以 AI 原本写的 tag 为 key，因此开关它不会让历史图失效。
+                const rawTag = request.searchParams.get('tag') || '';
+                const backendTag = await resolveBackendImageTag(rawTag);
                 // NovelAI 官方 API：Bearer 提交，一次拿到 ZIP，没有任务队列。
                 // 但官方账号侧并发是 1，所以这里必须过一遍本地队列（同账号一张一张跑）。
                 if (isNaiOfficialProvider.value) {
-                    const tags = request.searchParams.get('tag') || '';
+                    const tags = backendTag;
                     const job = await naiOfficialImageQueue.run(
                         () => generateWithNaiOfficial({ tags, onProgress: publish }),
                         {
@@ -4663,7 +4681,7 @@ let removedProviderConfigCleared = false;
                 if (isComfyProvider.value) {
                     // 在卡片上挂一个「取消」按钮，绑到本次任务的 cancel 回调。
                     const job = await generateWithComfy({
-                        tags: request.searchParams.get('tag') || '',
+                        tags: backendTag,
                         onProgress: (progress) => publish({ ...progress, cancel: task.cancel }),
                         registerCancel: (cancel) => {
                             task.cancel = cancel;
@@ -4686,8 +4704,9 @@ let removedProviderConfigCleared = false;
                 // Stable Diffusion：sdapi 一次 POST 直接返回 base64，没有任务队列。
                 if (isSdProvider.value) {
                     publish({ status: 'running', generationProgress: { percent: 10 } });
-                    // URL 里的 tag 就是 AI 输出的画图标签（正则的 $1 捕获）。
-                    const tags = request.searchParams.get('tag') || '';
+                    // URL 里的 tag 就是 AI 输出的画图标签（正则的 $1 捕获）；backendTag 是
+                    // 可选的规范化结果（见 resolveBackendImageTag）。
+                    const tags = backendTag;
                     const { imageUrl, width, height } = await generateWithSd({ tags });
                     const job = { status: 'done', imageUrl, directImage: true, width, height };
                     publish(job);
@@ -4697,7 +4716,13 @@ let removedProviderConfigCleared = false;
                 let job = await fetchImageJobJson(`${task.baseUrl}/api/jobs`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify(Object.fromEntries(request.searchParams.entries()))
+                    // 网关按 query 取参数，但 tag 在这里必须过一遍归一化（第 83 条）：
+                    // 网关是**原样转发**，AI 偶尔会在 tag 里写「\n」这种字面转义，
+                    // 不过这一关就会原样进请求（用户实测看到过）。换行/重复逗号统一清掉。
+                    body: JSON.stringify({
+                        ...Object.fromEntries(request.searchParams.entries()),
+                        tag: imageUtils.normalizePromptText(backendTag)
+                    })
                 });
                 publish(job);
                 let pollFailures = 0;
@@ -6287,6 +6312,12 @@ let removedProviderConfigCleared = false;
                 showModelSelector.value = false;
                 return;
             }
+            // 生图 Tag 查询的「另配模型」：目标在工具编辑弹窗里，不在 settings 上。
+            if (modelSelectionTarget.value === 'tagToolModel') {
+                editingActiveTool.data.model = modelId;
+                showModelSelector.value = false;
+                return;
+            }
 
             settings[modelSelectionTarget.value] = modelId;
 
@@ -7135,8 +7166,14 @@ let removedProviderConfigCleared = false;
             }
         };
 
+        // 只有「主模型自己调用」的工具才会进请求；aux 模式由站内另外调用（见 isAuxTagLookupTool）。
         const getEnabledActiveTools = () => normalizeActiveTools()
-            .filter(tool => tool.enabled !== false && tool.callName);
+            .filter(tool => tool.enabled !== false && tool.callName)
+            .filter(tool => !isAuxTagLookupTool(tool));
+
+        // 出图前要用的「规范器」工具（另配模型模式）。没启用/选的是主模型模式就返回 null。
+        const getAuxTagLookupTool = () => normalizeActiveTools()
+            .find(tool => tool.enabled !== false && isAuxTagLookupTool(tool)) || null;
 
         const isWebActiveTool = (tool) => tool?.type === ACTIVE_TOOL_WEB_TYPE
             || normalizeActiveToolBaseCallName(tool?.callName) === 'tool_web'
@@ -7144,6 +7181,17 @@ let removedProviderConfigCleared = false;
             || /tavily|联网搜索/i.test(String(tool?.name || ''));
 
         const getActiveToolDisplayDescription = (tool) => tool?.displayDescription || '暂无说明';
+
+        // 生图 Tag 查询工具：把「摸头」这类概念查成 Danbooru 真实 tag，再交给生图提示词。
+        // 认 type 也认 callName，老存档里改过 id 的条目同样认得出。
+        const isTagActiveTool = (tool) => tool?.type === ACTIVE_TOOL_TAG_TYPE
+            || normalizeActiveToolBaseCallName(tool?.callName) === 'tool_tag'
+            || tool?.id === 'tool_tag';
+
+        // 「另配模型」模式（mode === 'aux'）下，这条工具**不进主模型上下文** ——
+        // 它由本站自己在出图前跑一次，所以不能在请求里注册成 function，否则白白多一份
+        // 工具说明书（每轮 150~250 token，工具一多就是 500~1500）。
+        const isAuxTagLookupTool = (tool) => isTagActiveTool(tool) && tool?.mode === 'aux';
 
         const appendActiveToolReminderToLatestUserMessage = (msgArray) => {
             if (getEnabledActiveTools().length === 0) return msgArray;
@@ -7182,7 +7230,12 @@ let removedProviderConfigCleared = false;
                 } : {
                     type: 'object',
                     properties: {
-                        query: { type: 'string', description: isWebActiveTool(tool) ? '具体搜索词，或需要读取的真实网页 URL。' : '前文原文中可能出现的关键词。' },
+                        query: {
+                            type: 'string',
+                            description: isTagActiveTool(tool)
+                                ? '要查询的概念或关键词：中英文都可以（例如「摸头」「双马尾」「holding hands」「furina」），英文、罗马字或角色原名命中率最高。'
+                                : isWebActiveTool(tool) ? '具体搜索词，或需要读取的真实网页 URL。' : '前文原文中可能出现的关键词。'
+                        },
                         reason: { type: 'string', description: '可选，一句话说明检索用途。' }
                     },
                     required: ['query'],
@@ -8693,8 +8746,216 @@ let removedProviderConfigCleared = false;
             return { min, max, value: min + sample % size };
         };
 
-        const parseNativeActiveToolCall = (call, tools) => {
-            const tool = tools.find(item => item.callName === call.function.name);
+        // ===== 生图 Tag 查询 / 规范化 =====
+        //
+        // 两个来源：
+        //   ① 用户自填的 MCP 端点（JSON-RPC 2.0 `tools/call`，Streamable HTTP）；
+        //   ② 留空时退回 Danbooru 官方标签接口 /tags.json（无需 key）。
+        //      浏览器直连若被 CORS 拦，就在 nginx 里加一层 /danbooru/ 反代，把地址填进 MCP 端点。
+        //
+        // 两种用法（工具面板里选）：
+        //   main —— 主模型自己 function calling 调用（工具说明书会进主上下文）；
+        //   aux  —— 另配一个模型，只在真出图前站内跑一次（主上下文零开销，推荐）。
+        const DANBOORU_TAGS_ENDPOINT = 'https://danbooru.donmai.us/tags.json';
+        const DANBOORU_CATEGORY_NAMES = { 0: 'general', 1: 'artist', 3: 'copyright', 4: 'character', 5: 'meta' };
+        const ACTIVE_TOOL_TAG_LOOKUP_MAX = 20;
+        const ACTIVE_TOOL_TAG_HINT = '中文泛指词命中率低：请传英文或角色原名（例：摸头 → headpat）。';
+
+        const normalizeTagLookupQuery = (query) => String(query || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+        const getTagLookupLimit = (tool) => Math.max(1, Math.min(
+            ACTIVE_TOOL_TAG_LOOKUP_MAX,
+            Number(tool?.resultCount) || ACTIVE_TOOL_DEFAULT_RESULT_COUNT
+        ));
+
+        // MCP 端点：最小可用的 Streamable HTTP 客户端（直接 tools/call，不先 initialize）。
+        // 只取 result.content[].text；拿到什么就原样交给模型，不做二次加工。
+        const callTagLookupMcp = async (endpoint, toolName, query, limit, signal) => {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    // Streamable HTTP 的客户端必须同时声明接受 JSON 与 SSE。
+                    'Accept': 'application/json, text/event-stream'
+                },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: Date.now(),
+                    method: 'tools/call',
+                    params: { name: toolName || 'search_tags', arguments: { query, limit } }
+                }),
+                signal
+            });
+            const raw = await response.text();
+            if (!response.ok) {
+                throw new Error(`MCP 端点返回 HTTP ${response.status}${raw ? `：${raw.slice(0, 200)}` : ''}`);
+            }
+            const payloads = [];
+            const trimmed = raw.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try { payloads.push(JSON.parse(trimmed)); } catch { /* 落到 SSE 分支 */ }
+            }
+            if (payloads.length === 0) {
+                raw.split('\n')
+                    .filter(line => line.startsWith('data:'))
+                    .forEach(line => {
+                        try { payloads.push(JSON.parse(line.slice(5).trim())); } catch { /* 忽略坏行 */ }
+                    });
+            }
+            const message = payloads.find(item => item && (item.result !== undefined || item.error !== undefined));
+            if (!message) throw new Error('MCP 端点没有返回可识别的 JSON-RPC 结果');
+            if (message.error) throw new Error(`MCP 报错：${message.error.message || JSON.stringify(message.error)}`);
+            const texts = (Array.isArray(message.result?.content) ? message.result.content : [])
+                .map(item => String(item?.text ?? '').trim())
+                .filter(Boolean);
+            const text = texts.length
+                ? texts.join('\n')
+                : typeof message.result === 'string' ? message.result : JSON.stringify(message.result ?? null);
+            const results = [{ index: 1, title: `MCP · ${toolName || 'search_tags'}`, content: trimMemoryText(text, 4000), sourceType: 'mcp' }];
+            results.tagLookupSource = 'mcp';
+            return results;
+        };
+
+        const fetchDanbooruTagsForTool = async (query, limit, signal) => {
+            const url = new URL(DANBOORU_TAGS_ENDPOINT);
+            // Danbooru 的 tag 名是下划线写法；这里按「包含」匹配，再把结果转成 NovelAI 的空格写法。
+            url.searchParams.set('search[name_matches]', `*${query.replace(/\s+/g, '_')}*`);
+            url.searchParams.set('search[order]', 'count');
+            url.searchParams.set('limit', String(limit));
+            const response = await fetch(url.href, { headers: { Accept: 'application/json' }, signal });
+            if (!response.ok) throw new Error(`Danbooru 标签接口返回 HTTP ${response.status}`);
+            const data = await response.json();
+            const results = (Array.isArray(data) ? data : [])
+                .map((item, index) => {
+                    const rawTag = String(item?.name || '');
+                    if (!rawTag) return null;
+                    return {
+                        index: index + 1,
+                        tag: rawTag.replace(/_/g, ' '),
+                        category: DANBOORU_CATEGORY_NAMES[item?.category] || String(item?.category ?? ''),
+                        post_count: Number(item?.post_count) || 0,
+                        url: `https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(rawTag)}`,
+                        sourceType: 'tag'
+                    };
+                })
+                .filter(Boolean);
+            results.tagLookupSource = 'danbooru';
+            return results;
+        };
+
+        const searchImageTagsForTool = async (query, tool, signal) => {
+            const clean = normalizeTagLookupQuery(query);
+            if (!clean) return [];
+            const limit = getTagLookupLimit(tool);
+            const mcpUrl = String(tool?.mcpUrl || '').trim();
+            const results = mcpUrl
+                ? await callTagLookupMcp(mcpUrl, String(tool?.mcpTool || '').trim(), clean, limit, signal)
+                : await fetchDanbooruTagsForTool(clean, limit, signal);
+            results.tagLookupQuery = clean;
+            if (/[\u4e00-\u9fff]/.test(clean)) results.tagLookupHint = ACTIVE_TOOL_TAG_HINT;
+            return results;
+        };
+
+        // 本地词典的 tag 集合：用来判断「这个词是不是已经在词典里」，只把可疑的词拿去查。
+        const getLexiconTagSet = () => {
+            if (getLexiconTagSet.cache) return getLexiconTagSet.cache;
+            const data = window.RPHubBuiltinContent?.imageTagLexicon;
+            const set = new Set();
+            if (data) {
+                [...data.sections, ...data.v5Sections].forEach(([, tags]) => {
+                    tags.forEach(tag => set.add(String(tag).trim().toLowerCase()));
+                });
+            }
+            getLexiconTagSet.cache = set;
+            return set;
+        };
+
+        // 替另配的模型先查一批「可疑词」：词典里没有、像自造短语或含中文的片段。
+        // 查不到不报错（只是不给查询结果），绝不因为查询失败挡住出图。
+        const lookupCandidateTags = async (tag, tool, signal) => {
+            const lexicon = getLexiconTagSet();
+            const candidates = String(tag || '')
+                .split(/[|,]/)
+                .map(item => item.replace(/^-?\d+(\.\d+)?::|::$/g, '').trim().toLowerCase())
+                .filter(item => item && item.length <= 60)
+                .filter(item => !lexicon.has(item))
+                .filter(item => /[\u4e00-\u9fff]/.test(item) || item.split(/\s+/).length >= 2)
+                .filter((item, index, list) => list.indexOf(item) === index)
+                .slice(0, 3);
+            const lookups = {};
+            await Promise.all(candidates.map(async (query) => {
+                try {
+                    const results = await searchImageTagsForTool(query, tool, signal);
+                    const top = results
+                        .filter(item => item.tag)
+                        .slice(0, 5)
+                        .map(item => `${item.tag} (${item.category}, ${item.post_count})`);
+                    if (top.length) lookups[query] = top;
+                } catch (error) {
+                    console.warn(`Tag 查询失败（${query}），继续：`, error?.message || error);
+                }
+            }));
+            return lookups;
+        };
+
+        // 出图前的规范化缓存：同一段 tag 只规范化一次（重渲染/重试不重复烧 token）。
+        const imageTagNormalizeCache = new Map();
+        const IMAGE_TAG_NORMALIZE_CACHE_MAX = 300;
+
+        // 返回「真正发给出图后端」的 tag：
+        //   未开启 aux 模式 / 没选模型 / 非 NAI 链路 / 调用失败 → 原样返回，绝不挡住出图。
+        // 注意：缓存 key 仍用 AI 自己写的 tag（见 cacheCompletedImageJob），历史图不受影响。
+        const resolveBackendImageTag = async (rawTag, { signal } = {}) => {
+            const tag = String(rawTag || '').trim();
+            const tool = getAuxTagLookupTool();
+            if (!tag || !tool) return tag;
+            const model = String(tool.model || '').trim();
+            if (!model) return tag;
+            const promptModel = isNaiOfficialProvider.value
+                ? String(settings.naiOfficialModel || '')
+                : String(settings.imageModel || '');
+            // 非 NAI 链路（SD / ComfyUI）没有 NAI 词典可抄，别浪费一次请求。
+            const systemPrompt = BUILTIN_PROMPTS.buildImageTagNormalizePrompt({
+                model: promptModel,
+                provider: settings.imageProvider
+            });
+            if (!systemPrompt) return tag;
+            const cacheKey = `${model}\u0000${normalizeImageTagKey(tag)}`;
+            if (imageTagNormalizeCache.has(cacheKey)) return imageTagNormalizeCache.get(cacheKey);
+            try {
+                const lookups = await lookupCandidateTags(tag, tool, signal);
+                const result = await requestTrackedChatCompletion({
+                    model,
+                    temperature: 0,
+                    stream: false,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: JSON.stringify({ tag, lookups }) }
+                    ],
+                    signal
+                }, 'tag_lookup');
+                const firstLine = String(result?.content || '')
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(Boolean)[0] || '';
+                // 只接受一行纯文本；明显没干活（过短/带标签）就按原样出图，不冒险。
+                const usable = firstLine
+                    && !/[<>{}]/.test(firstLine)
+                    && firstLine.length >= Math.min(24, Math.ceil(tag.length / 2));
+                const finalTag = usable ? firstLine : tag;
+                if (imageTagNormalizeCache.size >= IMAGE_TAG_NORMALIZE_CACHE_MAX) {
+                    // 简单的先进先出淘汰：缓存只是为了省重复请求，不需要精细策略。
+                    imageTagNormalizeCache.delete(imageTagNormalizeCache.keys().next().value);
+                }
+                imageTagNormalizeCache.set(cacheKey, finalTag);
+                if (finalTag !== tag) console.info('[生图 Tag 规范化]', { 原: tag, 新: finalTag });
+                return finalTag;
+            } catch (error) {
+                console.warn('生图 tag 规范化失败，按原样出图：', error?.message || error);
+                return tag;
+            }
+        };
+
+        const parseNativeActiveToolCall = (call, tools) => {            const tool = tools.find(item => item.callName === call.function.name);
             const parsed = { tool, callLabel: call.function.name, query: '', reason: '', raw: call.function.arguments };
             try {
                 if (!tool) throw new Error('该工具未开启或不存在');
@@ -8783,6 +9044,9 @@ let removedProviderConfigCleared = false;
             if (toolCall?.toolType === ACTIVE_TOOL_RANDOM_TYPE || baseCallName === 'tool_random') {
                 return ACTIVE_TOOL_RANDOM_TYPE;
             }
+            if (toolCall?.toolType === ACTIVE_TOOL_TAG_TYPE || baseCallName === 'tool_tag') {
+                return ACTIVE_TOOL_TAG_TYPE;
+            }
             return '';
         };
 
@@ -8791,6 +9055,7 @@ let removedProviderConfigCleared = false;
             if (groupKey === ACTIVE_TOOL_WEB_TYPE) return 'Tavily 联网搜索';
             if (groupKey === ACTIVE_TOOL_KEYWORD_TYPE) return '关键词检索';
             if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '随机数生成';
+            if (groupKey === ACTIVE_TOOL_TAG_TYPE) return '生图 Tag 查询';
             return toolCall?.name || '工具调用';
         };
 
@@ -8807,6 +9072,7 @@ let removedProviderConfigCleared = false;
                 return '关键词检索';
             }
             if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '生成随机数';
+            if (groupKey === ACTIVE_TOOL_TAG_TYPE) return '查询真实 tag';
             return '工具调用';
         };
 
@@ -8979,6 +9245,8 @@ let removedProviderConfigCleared = false;
                         const isRandom = toolCall.tool.type === ACTIVE_TOOL_RANDOM_TYPE;
                         const results = isRandom
                             ? [generateRandomNumberForTool(toolCall.min, toolCall.max)]
+                            : isTagActiveTool(toolCall.tool)
+                                ? await searchImageTagsForTool(toolCall.query, toolCall.tool, toolAbort.signal)
                             : isWebActiveTool(toolCall.tool)
                                 ? await searchWebByTavilyForTool(toolCall.query, toolCall.tool, toolAbort.signal)
                                 : searchDialogueByKeywordForTool(toolCall.query, toolCall.tool.resultCount, { excludeMessageId: assistantMessage.id });
@@ -8988,6 +9256,10 @@ let removedProviderConfigCleared = false;
                             query: toolCall.query,
                             results,
                             ...(isRandom ? { operation: 'random' } : {}),
+                            ...(results.tagLookupSource ? {
+                                operation: `tag_lookup:${results.tagLookupSource}`,
+                                ...(results.tagLookupHint ? { hint: results.tagLookupHint } : {})
+                            } : {}),
                             ...(results.tavilyMode ? { operation: results.tavilyMode } : {}),
                             ...(results.tavilyFailedResults?.length ? { failed_sources: results.tavilyFailedResults } : {})
                         };
@@ -9666,7 +9938,10 @@ let removedProviderConfigCleared = false;
                 content: BUILTIN_PROMPTS.buildAutoImageGenPrompt({
                     count: imageGenCount,
                     provider: settings.imageProvider,
-                    model: autoImageGenModel
+                    model: autoImageGenModel,
+                    // 只有「主模型自己调用」的那种模式才需要在世界书里教它调工具；
+                    // 「另配模型」模式由站内自己跑（见 resolveBackendImageTag），不进主上下文。
+                    tagLookupTool: getEnabledActiveTools().find(isTagActiveTool)?.callName || ''
                 }),
                 constant: true,
                 enabled: false, // Default closed
@@ -9686,6 +9961,39 @@ let removedProviderConfigCleared = false;
             }
             // 添加新的到首位
             worldInfo.value.unshift(autoImageGenWIContent);
+
+            // 3. 生图 Tag 词典（单独一条，可单独关掉省上下文）
+            //
+            // 为什么不并进「自动生图」那条：词典是一大坨**只和生图模型有关**的静态内容，
+            // 用户可能想单独控制它（例如换用自己维护的词典，或临时省 token）。
+            // 它随「自动生图」开关一起开合（见 setAutoImageGenEnabled），也能单独关。
+            const tagLexiconWIName = '生图Tag词典';
+            const tagLexiconContent = BUILTIN_PROMPTS.buildImageTagLexicon({
+                model: autoImageGenModel,
+                provider: settings.imageProvider
+            });
+            const lexiconIndex = worldInfo.value.findIndex(w => w.comment === tagLexiconWIName);
+            const lexiconWasEnabled = lexiconIndex !== -1 ? !!worldInfo.value[lexiconIndex].enabled : null;
+            if (lexiconIndex !== -1) worldInfo.value.splice(lexiconIndex, 1);
+            if (tagLexiconContent) {
+                const entry = {
+                    comment: tagLexiconWIName,
+                    keys: [],
+                    content: tagLexiconContent,
+                    constant: true,
+                    // 默认跟着「自动生图」的开关走：老存档保留用户自己的选择。
+                    enabled: lexiconWasEnabled === null ? autoImageGenWIContent.enabled : lexiconWasEnabled,
+                    scope: 'global',
+                    position: 'at_depth',
+                    depth: 4,
+                    order: 101,
+                    useProbability: false,
+                    probability: 100
+                };
+                // 排在「自动生图」后面：先读规则、再查词典，符合使用顺序。
+                const genAnchor = worldInfo.value.findIndex(w => w.comment === autoImageGenWIName);
+                worldInfo.value.splice(genAnchor === -1 ? 0 : genAnchor + 1, 0, entry);
+            }
 
         };
 
@@ -11602,7 +11910,7 @@ let removedProviderConfigCleared = false;
             // 生图风格：自定义画师串的命名预设（保存 / 删除）
             imageStylePresets, activeImageStylePreset, activeImageStylePresetId, isCustomImageStyle,
             saveImageStylePreset, deleteImageStylePreset,
-            activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
+            activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, isTagActiveTool, isAuxTagLookupTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
             getToolCallModeText, hasThinkingOrTools, isMessageThinkingOrRunning, isThinkingSummaryOpen, toggleThinkingSummary, markThinkingSummaryDetailOpened, getTimelineSteps,
             isStyleFilterDetailsOpen, toggleStyleFilterDetails, getStyleFilterHitSegments,
             chatRoundStats, conversationBodyLength, summaryCompressedBodyLength, summaryCompressionRate,
@@ -11816,7 +12124,12 @@ let removedProviderConfigCleared = false;
                     displayDescription: previous.displayDescription,
                     resultCount: editingActiveTool.data.resultCount,
                     resultCountVersion: ACTIVE_TOOL_RESULT_COUNT_VERSION,
-                    tavilyApiKey: editingActiveTool.data.tavilyApiKey
+                    tavilyApiKey: editingActiveTool.data.tavilyApiKey,
+                    // 生图 Tag 查询工具自己的配置（MCP 端点 / 调用方式 / 另配的模型）。
+                    mcpUrl: editingActiveTool.data.mcpUrl,
+                    mcpTool: editingActiveTool.data.mcpTool,
+                    mode: editingActiveTool.data.mode,
+                    model: editingActiveTool.data.model
                 });
                 activeTools.value[index] = data;
                 normalizeActiveTools();

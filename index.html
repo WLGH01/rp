@@ -3624,6 +3624,17 @@
                                     class="mt-1 text-[11px] font-bold text-amber-600">
                                     需要填写 Tavily API Key
                                 </div>
+                                <div v-if="isTagActiveTool(tool) && tool.enabled && tool.mode === 'aux' && !tool.model"
+                                    class="mt-1 text-[11px] font-bold text-amber-600">
+                                    另配模型模式：需要选择调用模型
+                                </div>
+                                <div v-else-if="isTagActiveTool(tool) && tool.enabled"
+                                    class="mt-1 text-[11px] text-gray-400">
+                                    {{ tool.mode === 'aux'
+                                        ? `另配模型调用（${tool.model || '未选模型'}）· 主上下文零开销`
+                                        : '主模型调用 · 工具说明书会占用主上下文' }}
+                                    {{ tool.mcpUrl ? '· 走 MCP' : '· 走 Danbooru 接口' }}
+                                </div>
                             </div>
                         </button>
                         <div class="sortable-item-actions">
@@ -4135,11 +4146,16 @@
         <active-tool-editor-modal :show="showActiveToolEditor" :tool="editingActiveTool.data"
             :display-description="getActiveToolDisplayDescription(editingActiveTool.data)"
             :web-tool="isWebActiveTool(editingActiveTool.data)"
+            :tag-tool="isTagActiveTool(editingActiveTool.data)"
             :min-result-count="getActiveToolResultCountMin(editingActiveTool.data)"
             :max-result-count="getActiveToolResultCountMax(editingActiveTool.data)"
             @close="showActiveToolEditor = false" @save="saveActiveTool"
             @update:result-count="editingActiveTool.data.resultCount = $event"
-            @update:tavily-api-key="editingActiveTool.data.tavilyApiKey = $event"></active-tool-editor-modal>
+            @update:tavily-api-key="editingActiveTool.data.tavilyApiKey = $event"
+            @update:tag-mode="editingActiveTool.data.mode = $event"
+            @update:mcp-url="editingActiveTool.data.mcpUrl = $event"
+            @update:mcp-tool="editingActiveTool.data.mcpTool = $event"
+            @pick-model="openModelSelector('tagToolModel')"></active-tool-editor-modal>
 
         <auto-image-gen-modal :show="showAutoImageGenModal" @decide="setAutoImageGen"></auto-image-gen-modal>
         <export-selection-modal :show="showExportModal" :items="exportItems" :selected="selectedExportIndices"

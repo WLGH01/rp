@@ -444,6 +444,242 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
         '4. 全程以第二人称对演员下令都可以（如「语速极慢，句与句之间留出令人不安的空白」），但不要出现「AI」「模型」「生成」等词。'
     ].filter(Boolean).join('\n');
 
+    // ===== 生图 Tag 词典（世界书「生图Tag词典」）=====
+    //
+    // 为什么必须有这一条：模型「知道有 Danbooru tag 这回事」，但**不知道真实存在的写法**。
+    // 于是在 V4.5 上大量自造英文短语（"a girl sitting on a chair looking at the camera"），
+    // 而 V4.5 走 T5 词表、自然语言理解弱：这些词既不在词表里也没被训练过 —— 结果就是
+    // 构图丢失、人物走形、服装随机换。把真实 tag 按类摊开给它抄，比任何「请用 tag」的
+    // 叮嘱都有效。
+    //
+    // ⚠️ 改完**必须**跑 `node tools/verify-image-tags.mjs`：它把这里每一个 tag 对着本地
+    // Danbooru 语料核一遍（NAI 专有 tag 走下面的白名单），核不过就说明又自己编词了。
+    //
+    // 写法一律是 NovelAI 的空格形式（long hair），不是 Danbooru 的下划线形式（long_hair）。
+    // 这里只写 tag 本身，解释性文字放 `- ` 开头的行（校验脚本只解析【】行）。
+    const IMAGE_TAG_LEXICON_SECTIONS = [
+        ['人数 · 主体', [
+            '1girl', '1boy', '1other', '2girls', '2boys', '2others', 'multiple girls', 'multiple boys',
+            'multiple others', 'solo', 'crowd', 'everyone', 'male focus', 'no humans', 'other'
+        ]],
+        ['镜头 · 取景', [
+            'close-up', 'upper body', 'lower body', 'full body', 'cowboy shot', 'portrait',
+            'wide shot', 'very wide shot', 'under shot', 'pantsu shot', 'from above', 'from below',
+            'from behind', 'from side', 'facing viewer', 'straight-on', 'profile', 'dutch angle',
+            'pov', 'pov hands', 'feet out of frame', 'head out of frame', 'cropped', 'out of frame',
+            'solo focus', 'depth of field', 'blurry background', 'bokeh', 'motion blur',
+            'motion lines', 'emphasis lines', 'silhouette', 'reflection', 'foreshortening',
+            'dynamic pose', 'vanishing point', 'horizon'
+        ]],
+        ['视线 · 朝向', [
+            'looking at viewer', 'looking back', 'looking to the side',
+            'looking down', 'looking up', 'looking ahead', 'looking afar', 'looking at object',
+            'looking outside', 'looking over eyewear', 'eye contact'
+        ]],
+        ['表情', [
+            'smile', 'grin', 'light smile', 'smirk', 'open mouth', 'closed mouth', 'parted lips',
+            'tongue out', 'blush', 'nose blush', 'half-closed eyes', 'closed eyes', 'rolling eyes',
+            'wide-eyed', 'surprised', 'angry', 'frown', 'pout', 'annoyed', 'serious',
+            'expressionless', 'sad', 'crying', 'tears', 'streaming tears', 'embarrassed',
+            'flustered', 'aroused', 'seductive smile', 'smug', 'bored', 'sleepy', 'yawning',
+            'screaming', 'shouting', 'moaning', 'heavy breathing', 'drooling', 'sweat', 'sweatdrop',
+            'trembling', 'heart-shaped pupils', 'dilated pupils', 'mismatched pupils', 'glowing eyes',
+            'empty eyes', 'sparkle', 'lipstick'
+        ]],
+        ['姿势 · 动作', [
+            'standing', 'sitting', 'kneeling', 'squatting', 'lying', 'on back', 'on stomach',
+            'on side', 'wariza', 'seiza', 'indian style', 'crossed legs', 'spread legs', 'legs apart',
+            'walking', 'running', 'jumping', 'crawling', 'leaning forward', 'leaning back',
+            'bent over', 'stretching', 'arched back', 'head back', 'arms up', 'arms behind back',
+            'arm up', 'hand up', 'hands on own hips', 'hand on own chest', 'crossed arms',
+            'clenched hand', 'holding', 'knees up', 'on floor', 'sitting on lap',
+            'straddling', 'sleeping', 'eating', 'drinking', 'cooking', 'bathing', 'showering',
+            'reading', 'writing', 'dancing', 'fighting'
+        ]],
+        ['互动 · 双人以上', [
+            'hug', 'hug from behind', 'holding hands', "hand on another's shoulder",
+            "hand on another's head", "hand on another's face", "hands on another's hips",
+            'arm around waist', "grabbing another's hair", "grabbing another's chin",
+            "grabbing another's hand", "grabbing another's arm", "grabbing another's ass",
+            "grabbing another's breast", 'grabbing from behind', 'headpat', 'kiss', 'kissing cheek',
+            'face-to-face', 'carrying', 'princess carry', 'piggyback', 'lap pillow', 'on lap',
+            'looking at another', 'reaching towards viewer', 'outstretched hand', 'beckoning',
+            'waving', 'salute', 'peace sign', 'thumbs up', 'pointing', 'pointing at viewer',
+            'patting', 'groping', 'pulling', 'pushing', 'tackle', 'wrestling', 'licking', 'biting'
+        ]],
+        ['服装', [
+            'school uniform', 'serafuku', 'sailor collar', 'pleated skirt', 'skirt', 'miniskirt',
+            'dress', 'blouse', 'shirt', 'white shirt', 't-shirt', 'sweater', 'hoodie', 'jacket',
+            'coat', 'cardigan', 'kimono', 'yukata', 'china dress', 'maid', 'nurse', 'apron',
+            'necktie', 'ribbon', 'bowtie', 'scarf', 'swimsuit', 'bikini', 'one-piece swimsuit',
+            'school swimsuit', 'gym uniform', 'track suit', 'pajamas', 'nightgown', 'towel',
+            'bathrobe', 'armor', 'cloak', 'cape', 'gloves', 'fingerless gloves', 'elbow gloves',
+            'thighhighs', 'kneehighs', 'pantyhose', 'socks', 'boots', 'high heels', 'sandals',
+            'slippers', 'barefoot', 'hat', 'baseball cap', 'glasses', 'sunglasses', 'earrings',
+            'necklace', 'choker', 'hair ribbon', 'hair bow', 'jewelry', 'thigh strap',
+            'garter belt', 'underwear', 'panties', 'bra', 'lingerie', 'shorts', 'denim shorts',
+            'jeans', 'pants', 'leggings', 'belt'
+        ]],
+        ['衣物状态 · 差分', [
+            'bare shoulders', 'off shoulder', 'sleeveless', 'strapless', 'cleavage', 'underboob',
+            'sideboob', 'clothes lift', 'skirt lift', 'shirt lift', 'dress lift', 'panty pull',
+            'panty lift', 'undressing', 'partially undressed', 'unbuttoned', 'open clothes',
+            'loose clothes', 'tight clothes', 'torn clothes', 'wet clothes', 'wet shirt',
+            'see-through clothes', 'no bra', 'no panties', 'topless', 'bottomless', 'nude',
+            'completely nude', 'wardrobe malfunction', 'nipple slip', 'areola slip', 'upskirt',
+            'cameltoe'
+        ]],
+        ['身体 · 种族特征', [
+            'breasts', 'large breasts', 'medium breasts', 'small breasts', 'flat chest', 'nipples',
+            'navel', 'collarbone', 'wide hips', 'narrow waist', 'thick thighs', 'thighs', 'long legs',
+            'bare legs', 'abs', 'muscular', 'muscular male', 'freckles', 'mole under eye', 'tan',
+            'dark-skinned female', 'pale skin', 'pointy ears', 'animal ears', 'cat ears', 'fox ears',
+            'horns', 'wings', 'halo', 'tail', 'fangs'
+        ]],
+        ['头发', [
+            'long hair', 'very long hair', 'medium hair', 'short hair', 'twintails', 'ponytail',
+            'side ponytail', 'twin braids', 'braid', 'hair bun', 'double bun', 'wavy hair',
+            'curly hair', 'straight hair', 'messy hair', 'wet hair', 'ahoge', 'sidelocks',
+            'hair between eyes', 'hair over one eye', 'blunt bangs', 'hair ornament', 'hair flower',
+            'multicolored hair', 'streaked hair', 'gradient hair', 'two-tone hair', 'drill hair'
+        ]],
+        ['场景 · 地点', [
+            'indoors', 'outdoors', 'bedroom', 'bed', 'on bed', 'bathroom', 'bathtub',
+            'kitchen', 'classroom', 'school', 'office', 'library', 'cafe', 'restaurant',
+            'hotel room', 'living room', 'hallway', 'stairs', 'rooftop', 'balcony', 'window',
+            'curtains', 'mirror', 'door', 'floor', 'forest', 'tree', 'grass', 'flower field',
+            'garden', 'park', 'beach', 'ocean', 'pool', 'river', 'lake', 'mountain', 'sky', 'cloud',
+            'cloudy sky', 'blue sky', 'city', 'cityscape', 'street', 'road', 'alley', 'bridge',
+            'train', 'train station', 'car', 'ruins', 'castle', 'church', 'shrine', 'tatami',
+            'futon', 'table', 'chair', 'desk', 'bookshelf', 'computer', 'phone', 'lamp', 'candle',
+            'fireplace', 'pillow', 'blanket'
+        ]],
+        ['时间 · 天气 · 光线', [
+            'day', 'night', 'morning', 'evening', 'sunset', 'sunrise', 'dusk', 'dawn', 'twilight',
+            'starry sky', 'full moon', 'moon', 'rain', 'snow', 'snowing', 'fog', 'wind',
+            'cherry blossoms', 'autumn leaves', 'golden hour', 'sunlight', 'moonlight', 'backlighting',
+            'light rays', 'sunbeam', 'dappled sunlight', 'neon lights', 'city lights', 'candlelight',
+            'dim lighting', 'shadow', 'light particles', 'dust', 'smoke', 'steam', 'water drop',
+            'wet floor', 'dark', 'glowing'
+        ]],
+        ['画风 · 质感', [
+            'monochrome', 'greyscale', 'sepia', 'colorful', 'pastel colors', 'realistic',
+            'anime coloring', 'watercolor (medium)', 'oil painting (medium)', 'sketch', 'lineart',
+            'flat color', 'pixel art', 'chibi', 'official art', 'concept art'
+        ]],
+        ['画面文字', [
+            'text', 'english text', 'japanese text', 'chinese text', 'speech bubble',
+            'thought bubble', 'sign', 'signpost', 'book', 'letter', 'newspaper', 'poster (object)',
+            'banner', 'text focus'
+        ]],
+        ['NSFW · 状态与体位', [
+            'rating:explicit', 'nsfw', 'pubic hair', 'anus', 'clitoris', 'urethra', 'pussy',
+            'spread pussy', 'pussy juice', 'cum', 'cumdrip', 'cum string', 'cum on body',
+            'cum on breasts', 'cum in pussy', 'cum on ass', 'cum in mouth', 'facial', 'fellatio',
+            'cunnilingus', 'paizuri', 'handjob', 'footjob', 'masturbation', 'fingering', 'anal',
+            'anal fingering', 'sex', 'clothed sex', 'sex from behind', 'doggystyle', 'missionary',
+            'cowgirl position', 'reverse cowgirl position', 'standing sex', 'suspended congress',
+            'mating press', 'full nelson', 'spooning', 'after sex', 'ahegao', 'torogao'
+        ]],
+        ['NSFW · 束缚与道具', [
+            'bdsm', 'bondage', 'shibari', 'restrained', 'restraints', 'bound wrists', 'collar',
+            'leash', 'blindfold', 'gag', 'nipple clamps', 'nipple piercing', 'sex toy', 'vibrator',
+            'dildo', 'condom', 'anal beads'
+        ]]
+    ];
+
+    // V5 专属（V4.5 上没有这些概念，写了就是白占预算）。
+    const IMAGE_TAG_LEXICON_V5_SECTIONS = [
+        ['V5 专属 · 复杂度与纵深', [
+            'low complexity', 'medium complexity', 'high complexity', 'ultra complexity', 'depthness',
+            'attractive male'
+        ]],
+        ['V5 专属 · 透明与风格', [
+            'transparent background', 'has alpha', 'alpha transparency', 'location',
+            'visual novel art', 'visual novel bg', 'visual novel cg', 'visual novel sprite',
+            'visual novel chibi', 'meta:novel era', 'meta:golden era'
+        ]]
+    ];
+
+    // NovelAI 自有的 tag：Danbooru 语料里查不到（Danbooru 官方没有这些词），
+    // 但官方文档/官方前端确认可用 —— 校验脚本据此放行，别往里塞编造的词。
+    //   出处：docs.novelai.net/en/image/tags（quality / aesthetic / dataset / alpha / complexity /
+    //   year / renamed tags）、docs.novelai.net/en/image/textrendering（text / english text / rating:*）。
+    const IMAGE_TAG_LEXICON_NAI_ONLY = [
+        'best quality', 'amazing quality', 'great quality', 'normal quality', 'bad quality',
+        'worst quality', 'masterpiece', 'top aesthetic', 'very aesthetic', 'aesthetic', 'displeasing',
+        'very displeasing', 'low complexity', 'medium complexity', 'high complexity',
+        'ultra complexity', 'depthness', 'attractive male', 'location', 'transparent background',
+        'has alpha', 'alpha transparency', 'fur dataset', 'background dataset', 'no text', 'text',
+        'english text', 'japanese text', 'rating:general', 'rating:sensitive', 'rating:questionable',
+        'rating:explicit', 'nsfw', 'other', '1other', 'multiple others', 'peace sign', 'year 2024',
+        'visual novel art', 'visual novel bg', 'visual novel cg', 'visual novel sprite',
+        'visual novel chibi', 'meta:novel era', 'meta:golden era'
+    ];
+
+    // 【分类】tag, tag, … 一行一类。校验脚本只解析【】行，所以解释性文字一律用 `- ` 开头。
+    const renderImageTagLexiconSections = (list) => list
+        .map(([title, tags]) => `【${title}】${tags.join(', ')}`)
+        .join('\n');
+
+    // 渲染成世界书正文。非 NAI 链路（SD / ComfyUI）返回空串，不改它们的行为。
+    const buildImageTagLexicon = ({ model = '', provider = '' } = {}) => {
+        const name = String(model || '');
+        const isNai = provider === 'novelai' || provider === 'novelai-official'
+            || (!provider && name.startsWith('nai-diffusion'));
+        if (!isNai) return '';
+        const isV5 = name.startsWith('nai-diffusion-5');
+        const isV3 = name.startsWith('nai-diffusion-3') || name.startsWith('nai-diffusion-furry-3');
+        const render = renderImageTagLexiconSections;
+        const lines = [
+            '<image_tag_lexicon>',
+            '下面每一类都是**绘图模型真正认得的 Danbooru 常用 tag**（NovelAI 写法：用空格，不要下划线）。'
+            + '写提示词时逐类到这里挑；挑不到就换一个同类里意思最接近的，**不要自己造英文短语或整句英文**。',
+            render(IMAGE_TAG_LEXICON_SECTIONS)
+        ];
+        if (isV5) lines.push(render(IMAGE_TAG_LEXICON_V5_SECTIONS));
+        if (!isV3) {
+            lines.push('- 权重与排除（NovelAI 语法）：`1.3::tag::` 加权（常用 1.15～1.4，最高 1.5）；`0.6::tag::` 减权；`-1::tag::` 排除单个元素；`no bra` / `no panties` / `no text` 这类 no+tag 用来明确不要的东西。');
+            lines.push('- 互动锚点：主动方写 `source#动作`、被动方写 `target#动作`、双方同做写 `mutual#动作`；动作本身照常写 tag（例：`hug, source#hug`）。');
+        }
+        if (isV3) lines.push('- V3 没有多角色分栏：整段平铺，越靠前的 tag 权重越高。');
+        lines.push('</image_tag_lexicon>');
+        return lines.join('\n');
+    };
+
+    // 另配模型用的「tag 规范化器」系统提示词。
+    //
+    // 为什么不直接给主模型加一个 function 工具：**工具说明书会每一轮都进主上下文**
+    // （注册 4~5 个工具，每轮平白多出 500~1500 token），对长记忆酒馆玩家是实打实的挤压。
+    // 换成「另配一个模型、只在真出图时跑一次」，主对话的上下文开销是 0 —— 代价是
+    // 每张图多一次小请求。两种方式都留着，由用户在工具面板里选。
+    //
+    // 与主模型拿到的世界书同源：同一份词典、同一套硬规则，只是这里只干一件事，所以更聚焦。
+    const buildImageTagNormalizePrompt = ({ model = '', provider = '' } = {}) => {
+        const lexicon = buildImageTagLexicon({ model, provider });
+        if (!lexicon) return '';
+        const isV5 = String(model || '').startsWith('nai-diffusion-5');
+        return [
+            '<tag_normalizer>',
+            '你是 NovelAI 生图提示词的 tag 规范化器。输入是一行 AI 写好的英文 tag（可能夹着自造短语、整句自然语言或中文），你要输出**规范化后的一行英文 tag**。',
+            '',
+            '硬规则：',
+            '1. 只输出一行最终 tag：英文逗号加空格分隔；不要换行、不要标题、不要解释、不要 markdown、不要引号。',
+            '2. 保留原有的 | 分栏结构与分段顺序（base | 角色1 | 角色2…），不要合并段落；人数 tag 仍在 base 段。',
+            '3. 把自造英文短语、整句自然语言、中文，换成本站词典里真实存在的 tag，取意思最接近的那个。',
+            '4. 原文里已经真实存在的 tag 一律原样保留，不要改写、不要删减、不要替换同义词。',
+            '5. 可以补足词典里的通用 tag（缺的服装、表情、姿势、镜头），但**不得臆造原文没有的设定**：发色、瞳色、服装颜色一律以原文为准，原文没写就不要加。',
+            '6. 互斥的取景、机位、姿势、状态只保留与原文一致的那一个。',
+            '7. 不要输出画师名，不要输出质量词（best quality / very aesthetic 之类），除非原文里本来就有。',
+            `8. 总长度控制在预算内（${isV5 ? 'V5 Curated ≤703 token' : 'V4.5 合计 ≤512 个 T5 token'}），宁可精炼也不能被截断。`,
+            '',
+            '如果下面还提供了「查询结果」，那是真实存在的 tag 及其准确写法，优先采用查询结果里的写法；查询结果为空就以词典为准。',
+            '',
+            lexicon.replace(/^<image_tag_lexicon>\s*/, '').replace(/\s*<\/image_tag_lexicon>$/, ''),
+            '</tag_normalizer>'
+        ].join('\n');
+    };
+
     // ===== 按「当前生图模型」给的硬约束（第 82 条）=====
     //
     // 为什么要按模型切换：V4.5 与 V5 的**提示词预算差一倍多**、多角色写法也不同
@@ -468,6 +704,9 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             return [
                 '<模型约束 · NovelAI V5>',
                 '- 预算：V5 Curated 约 703 / V5 Full 约 1471（base + 角色段合计），够用就好，别刻意写满。',
+                '- tag 数量：base + 角色段**合计 70 个以上**（base ≥25、每个角色段 ≥30）；上限是 703 / 1471，写满反而糊，信息量比数量重要。',
+                '- 成人向：写 rating:explicit + 身体状态 tag 即可，不需要靠重复堆词。',
+                '- V5 专属可以直接用：复杂度（low/medium/high/ultra complexity）、depthness、透明背景（transparent background / has alpha / alpha transparency）、location、visual novel 系列、year XXXX。',
                 '- 多角色（最多 22 个）：用 | 分段 ——「人数与场景 | 角色1 | 角色2」。人数 tag（2girls/1boy）只写在第一段；每个角色段开头写 girl/boy/other（不带数字），只写这个角色本人。',
                 positionLine || '- 定位可选：段首写 @左上/上/右上/左/中/右/左下/下/右下，或 @0.3,0.7（0~1 归一化坐标）；V5 定位自由。',
                 '- 互动动作标明主被动：主动方 source#hug、被动方 target#hug、互相 mutual#hug（该语法不总可靠，再用一句自然语言补清楚谁对谁做了什么）。',
@@ -480,6 +719,9 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             return [
                 '<模型约束 · NovelAI V4.5>',
                 '- 预算：base + 所有角色段**合计约 512 个 T5 token**，超了会被截断（画面直接跑偏），写完自查。',
+                '- tag 数量：合计 **60 个以上**（base ≥25、每个角色段 ≥30），但**不要超过 512 T5 token**；宁可精炼也不能被截断 —— 被截断等于后半段全丢。',
+                '- 成人向：必须显式写 rating:explicit 与身体状态 tag（nude、nipples、spread legs、cum…），V4.5 不会自己补；含蓄说法一律无效。',
+                '- **不要写 V5 专属 tag**：complexity 系列、depthness、has alpha 这一类 V4.5 没有，写了只是白占额度。',
                 '- **不要写中文与 emoji**：V4.5 用 T5 词表，非拉丁字符基本不支持，会白占额度或直接丢字；全部用英文 tag。',
                 '- 多角色（最多 6 个）：用 | 分段 ——「人数与场景 | 角色1 | 角色2」。人数 tag（2girls/1boy）只写在第一段；每个角色段开头写 girl/boy/other（不带数字），只写这个角色本人（这一段是防串味的关键）。',
                 positionLine || '- 定位可选：段首写 @左上/上/右上/左/中/右/左下/下/右下（V4/V4.5 是 5×5 网格，只能落在格点上）或 @0.1,0.5。',
@@ -501,14 +743,55 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
 
     const buildAutoImageGenPrompt = (options) => {
         // 兼容旧签名：buildAutoImageGenPrompt(3)
-        const { count: imageGenCount, model = '', provider = '' } = typeof options === 'object' && options !== null
+        const { count: imageGenCount, model = '', provider = '', tagLookupTool = '' } = typeof options === 'object' && options !== null
             ? options
             : { count: options };
         const modelRules = buildImageModelPromptRules({ model, provider });
         return `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
-围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。所有Tag必须使用英文并以英文逗号分隔，禁止中文Tag；提示词必须详尽、细致且可直接绘制，不得使用笼统省略的Tag或脱离场景拼凑通用画面。
+围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。
+每个 image###…### 里只放**一行**英文 tag：不得换行、不得写 \`\\n\` 这类转义符号、不得写中文或 emoji、不得写 markdown 或解释。
 强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。
-注意：如为nsfw场景，生成的提示词必须带上 nsfw 标签；如果是同人/已有作品角色，角色名仍必须放在最前面，nsfw 紧跟其后。
+
+<生图提示词硬规则>
+# 一、信息量下限（达不到就是糊图，必须重写到达标再输出）
+- 每张图的提示词合计**不少于 60 个 tag**（V4.5 约 250～450 个 T5 token；V5 约 350～650 token）；上限是模型预算，不必刻意写满，但**绝不能**用 5～10 个 tag 交差。
+- 第一段（base）不少于 25 个 tag：人数 tag、地点与背景结构、关键道具、镜头（取景范围 + 观察方向 + 焦点）、整体光线与氛围。
+- 每个角色段不少于 30 个 tag，按这个顺序写：girl/boy/other → 同人角色名（如有）→ 发色发型 → 瞳色 → 身材特征 → 此刻穿的每一件衣服 → 表情 → 视线 → 姿势 → 手在做什么 → 与谁/什么物体互动 → 只有这个角色才有的细节（伤、汗、饰品、道具）。
+- 输出前逐项过一遍，画面里**看得见的**一项都不许省：① 有几个人、分别是谁 ② 每个人的固定外貌 ③ 每个人此刻穿什么、脱到哪一步 ④ 姿势与手部动作 ⑤ 表情与视线 ⑥ 人物之间/人物与物品的交互 ⑦ 镜头 ⑧ 地点与背景结构 ⑨ 时间、天气、光线 ⑩ 剧情特有状态（伤、汗、湿、凌乱、道具位置）。
+
+# 二、两人以上必须写 Character Prompt（禁止把所有人塞进一段）
+- 画面里有 2 个及以上角色时，一律用 | 分栏：「人数与场景 | 角色1 | 角色2 …」，| 两边各留一个空格。
+- base 段**只写**公共信息：人数 tag、场景、镜头构图、公共道具、光线氛围、画面文字；**不写任何单个角色的外貌、服装、表情**。
+- 每个角色段以 girl / boy / other 开头（**不带数字**），随后只写这一个角色本人的信息；不许把 A 的头发写进 B 的段里。
+- 人数 tag（1girl / 2girls / 1boy / 2boys…）只写在 base；角色段里的 girl/boy 不带数字。
+- 角色段的先后顺序 = 画面里的位置顺序（先左到右、再上到下），要与剧情里的站位一致。
+- 角色之间有互动时：主动方写 source#动作、被动方写 target#动作、双方同做写 mutual#动作，同时把动作 tag 本身照常写出来（例：hug, source#hug）；互动写进**各自的角色段**，不要把互动全堆在 base 里。
+- 只有 1 个角色或空镜（风景/静物）时不必分栏，一段平铺即可。
+
+# 三、用词：只抄《生图Tag词典》里的真实 tag
+- 每张图的 tag 必须来自随本条一起注入的 <image_tag_lexicon>；词典里没有的，换一个**词典里有的、意思最接近**的 tag。
+- **严禁自造英文短语或整句英文**（如 a girl sitting on a chair looking at the camera）：V4.5 走 T5 词表，这类句子它认不出来，只会让构图和人物一起跑偏。V5 可以用**一句**自然语言补充姿势或互动，但主结构仍然是 tag。
+- 不要写下划线（写 long hair，不写 long_hair）；不要写画师名（画师串由本站自动拼在最前面）。
+- 质量词（best quality / very aesthetic 之类）由本站参数控制，除非用户明确要求，否则不要自己加。
+- 同义词只留一个：写了 holding hands 就不要再写 hand in hand。
+
+# 四、权重与排除（NovelAI 官方语法）
+- 加权：1.3::tag::（常用 1.15～1.4；最难的关键元素最高 1.5，不要全篇加权）。
+- 减权：0.6::tag::；排除单个元素：-1::tag::（写在 base 最前面）。
+- 容易被顺带画出来的东西用 no+tag 明确排除：no bra、no panties、no text。
+- 权重与排除写在**对应的那一段**里：角色独有的特征不要写到 base。
+
+# 五、输出前自检（逐条过，删掉互斥项）
+- 取景只留一个：close-up / upper body / lower body / full body / cowboy shot。
+- 机位方向只留一个：from above / from below / from behind / from side / facing viewer（人物回头时可以再加 looking back）。
+- 同一角色不要同时 sitting 与 standing、不要同时 nude 与 dressed。
+- 单人画面里不要出现第二人的部位 tag（如 another's hand）。
+- 多人画面里每个动作都要能归到具体角色段；有互动的必须成对出现 source#/target#（或 mutual#）。
+- 只写画面里**看得见**的东西：不要写内心、回忆、幻想、声音、气味、比喻、台词原文和下一步计划。
+</生图提示词硬规则>
+
+注意：如为nsfw场景，必须显式写 rating:explicit（官方示例里用过 rating:general 这一族）与身体/状态 tag（nude、nipples、spread legs、cum 之类），不要用含蓄说法；同人/已有作品角色的官方角色名仍放在该角色段最前面。
+${tagLookupTool ? `\n不确定某个概念的准确 tag 时，先调用 \`${tagLookupTool}\` 工具查它的真实拼写与别称，拿到结果再写提示词；查不到就用词典里最接近的 tag，**不要编**。\n` : ''}
 ${modelRules ? `\n${modelRules}\n` : ''}
 ### 提示词生成指导
 先结合当前正文还原画面，再逐项检查人物数量与身份、固定外貌、当下服装、姿势、动作细节、表情与视线、人物/物品/环境交互、镜头构图、地点背景、时间光线及剧情状态；即使画面简单，也不得省略决定人物形象、动作、构图和场景的必要信息。
@@ -582,6 +865,8 @@ image###英文Tag###
         buildOpeningAnalysisContent,
         buildNextResponsePrompt,
         buildImageModelPromptRules,
+        buildImageTagLexicon,
+        buildImageTagNormalizePrompt,
         buildUiTemplateAnalysisSystemPrompt,
         buildUserInfoPrompt,
         replyToolInstruction,
@@ -590,7 +875,7 @@ image###英文Tag###
     });
 
     const activeTools = Object.freeze({
-            types: Object.freeze({ keyword: 'keyword_dialogue', web: 'web_search', random: 'random_number' }),
+            types: Object.freeze({ keyword: 'keyword_dialogue', web: 'web_search', random: 'random_number', tag: 'tag_lookup' }),
             resultCount: Object.freeze({ min: 5, default: 5, max: 10, version: 4 }),
             maxAutoContinue: 4,
             aggressiveness: Object.freeze({
@@ -642,13 +927,39 @@ image###英文Tag###
                     callName: 'tool_random',
                     description: '由程序在 min 与 max 之间等概率生成一个随机整数，包含上下限，可包含负数。AI 根据任务或游戏规则选择范围；上下限须为安全整数，范围内整数个数不超过 9007199254740991。适合掷骰、抽签和概率判定。必须使用工具返回的 value，不得自行编造随机结果或因结果不理想而反复重抽。',
                     displayDescription: 'AI 自行选择上下限，由程序生成一个随机整数，包含上下限，可用于掷骰、抽签和概率判定。'
+                }),
+                Object.freeze({
+                    id: 'tool_tag',
+                    name: '生图 Tag 查询（MCP）',
+                    enabled: false,
+                    type: 'tag_lookup',
+                    callName: 'tool_tag',
+                    resultCount: 8,
+                    resultCountVersion: 4,
+                    description: '查询 Danbooru 里**真实存在**的生图 tag，返回准确英文写法、所属分类与使用量，用来把自造短语换成绘图模型真正认得的 tag（例如「摸头」→ headpat、「双马尾」→ twintails）。写生图提示词前，凡是不确定写法的概念、服装、动作、角色名都应当先查一次。query 传要查的概念或英文关键词，中英文都可以但英文命中率更高。填了 MCP 端点就走 MCP；留空则走 Danbooru 官方标签接口。',
+                    displayDescription: '把「摸头」「双马尾」这类概念查成 Danbooru 里真实存在的英文 tag，供生图提示词直接抄用；可接自己的 MCP 服务。',
+                    // 留空 = 用 Danbooru 官方标签接口；填了就优先走这个 MCP 端点（JSON-RPC tools/call）。
+                    mcpUrl: '',
+                    mcpTool: '',
+                    // 谁来调用：main = 主模型通过 function calling（工具说明书会占主上下文）；
+                    //           aux  = 另配一个模型，只在真出图时站内跑一次（主上下文零开销，推荐）。
+                    mode: 'main',
+                    model: ''
                 })
             ])
         });
     window.RPHubBuiltinContent = Object.freeze({
         activeTools,
         imageStyleArtists,
-        prompts
+        prompts,
+        // 生图 Tag 词典的**数据本体**（tools/verify-image-tags.mjs 直接对着它校验，
+        // 保证「模型抄到的每个 tag 都在真实语料里」这条约定不会被悄悄打破）。
+        imageTagLexicon: Object.freeze({
+            sections: IMAGE_TAG_LEXICON_SECTIONS,
+            v5Sections: IMAGE_TAG_LEXICON_V5_SECTIONS,
+            naiOnlyTags: IMAGE_TAG_LEXICON_NAI_ONLY,
+            render: renderImageTagLexiconSections
+        })
     });
 })();
 
