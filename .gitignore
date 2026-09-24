@@ -23,6 +23,8 @@ Thumbs.db
 tools/_out/
 tools/tmp/
 
-# 本机部署笔记与代码地图：属于个人运维/本地参考文档（含自己的路径与服务信息），不入公共仓库
-docs/REFACTOR-NOTES.md
-docs/PROJECT-STRUCTURE.md
+# 本机部署笔记与代码地图：属于个人运维/本地参考文档（含自己的路径与服务信息），不入公共仓库。
+# 两份索引 REFACTOR-NOTES.md / PROJECT-STRUCTURE.md 及其按主题拆分的子文档
+# （REFACTOR-NOTES-NN-*.md / PROJECT-STRUCTURE-NN-*.md）全部不入库，通配符一并覆盖。
+docs/REFACTOR-NOTES*.md
+docs/PROJECT-STRUCTURE*.md

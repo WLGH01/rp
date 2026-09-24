@@ -514,16 +514,14 @@
 
                                                                     <!-- Content Box -->
                                                                     <div class="flex flex-col min-w-0">
-                                                                        <div v-if="step.isReason" class="text-sm font-bold text-gray-700 leading-relaxed select-text whitespace-normal break-words">
-                                                                            {{ step.title }}
-                                                                        </div>
-                                                                        <details v-else class="group/detail" @toggle="markThinkingSummaryDetailOpened(msg, $event)">
+                                                                        <!-- 思考类步骤（原生思考 / 分析过程）：单层折叠，保持原有行为 -->
+                                                                        <details v-if="step.type === 'thinking'" class="group/detail" @toggle="markThinkingSummaryDetailOpened(msg, $event)">
                                                                             <summary class="list-none outline-none cursor-pointer flex items-center justify-between gap-3 text-gray-500 text-xs leading-relaxed select-none hover:text-gray-900 transition-colors">
                                                                                 <div class="flex items-center gap-2 min-w-0">
                                                                                     <span class="timeline-step-title-row text-sm font-bold text-gray-700 select-none">
                                                                                         <span class="timeline-step-title-text">{{ step.title }}</span>
-                                                                                        <span v-if="step.type === 'thinking'" class="timeline-step-count">{{ step.charCount }} 字</span>
-                                                                                        <span v-if="step.isLive || (step.type === 'tool' && step.status !== 'done' && step.status !== 'error')" class="timeline-tool-title-flow" aria-hidden="true">{{ step.type === 'thinking' ? (step.title + ' ' + step.charCount + ' 字') : step.title }}</span>
+                                                                                        <span class="timeline-step-count">{{ step.charCount }} 字</span>
+                                                                                        <span v-if="step.isLive" class="timeline-tool-title-flow" aria-hidden="true">{{ step.title + ' ' + step.charCount + ' 字' }}</span>
                                                                                     </span>
                                                                                     <svg v-if="step.status === 'done'" class="w-4 h-4 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path>
@@ -537,29 +535,77 @@
                                                                                     </svg>
                                                                                 </span>
                                                                             </summary>
-                                                                            <div class="mt-2 bg-gray-50 border border-gray-100/60 rounded-xl p-3 text-[13px] text-gray-700 overflow-x-auto custom-scrollbar shadow-inner select-text"
-                                                                                :class="{ 'timeline-thinking-detail': step.type === 'thinking' }">
-                                                                                <div v-if="step.type === 'thinking'" class="markdown-body"
+                                                                            <div class="mt-2 bg-gray-50 border border-gray-100/60 rounded-xl p-3 text-[13px] text-gray-700 overflow-x-auto custom-scrollbar shadow-inner select-text timeline-thinking-detail">
+                                                                                <div class="markdown-body"
                                                                                     :style="settings.fontSize ? { fontSize: (settings.fontSize - 1.5) + 'px' } : {}"
                                                                                     v-html="renderMarkdown(step.text, 'assistant', true, false)">
                                                                                 </div>
-                                                                                <div v-else class="tool-call-detail flex flex-col gap-3 text-[13px]">
-                                                                                    <div class="flex justify-between items-center text-[13px] border-b border-gray-200 pb-2">
-                                                                                        <span>调用工具: <code class="font-mono bg-white px-1 border rounded text-primary-600">&lt;{{ step.toolCall.callName }}&gt;</code></span>
-                                                                                        <span class="text-gray-400 font-semibold">{{ getToolCallModeText(step.toolCall) }}</span>
-                                                                                    </div>
-                                                                                    <div class="flex flex-col gap-1.5">
-                                                                                        <span class="text-xs font-semibold text-gray-500">参数输入:</span>
-                                                                                        <pre class="bg-gray-50 p-3 rounded-lg border border-gray-200 font-mono text-[13px] leading-relaxed text-gray-800 whitespace-pre-wrap max-h-40 overflow-y-auto custom-scrollbar break-all">{{ step.toolCall.query }}</pre>
-                                                                                    </div>
-                                                                                    <div v-if="step.toolCall.error" class="text-red-600 bg-red-50 border border-red-100 rounded-lg p-3 mt-1 font-mono text-[13px] leading-relaxed">
-                                                                                        {{ step.toolCall.error }}
-                                                                                    </div>
-                                                                                    <div v-else-if="step.toolCall.resultText" class="flex flex-col gap-1.5 mt-1">
-                                                                                        <span class="text-xs font-semibold text-gray-500">执行输出:</span>
-                                                                                        <pre class="bg-gray-50 p-3 rounded-lg border border-gray-200 font-mono text-[13px] leading-relaxed text-gray-800 whitespace-pre-wrap max-h-56 overflow-y-auto custom-scrollbar break-all">{{ step.toolCall.resultText }}</pre>
-                                                                                    </div>
+                                                                            </div>
+                                                                        </details>
+                                                                        <!-- 工具分组步骤：外层只占一行，展开后先列出组内每一步（嵌套折叠） -->
+                                                                        <details v-else-if="step.type === 'toolGroup'" class="group/detail" @toggle="markThinkingSummaryDetailOpened(msg, $event)">
+                                                                            <summary class="list-none outline-none cursor-pointer flex items-center justify-between gap-3 text-gray-500 text-xs leading-relaxed select-none hover:text-gray-900 transition-colors">
+                                                                                <div class="flex items-center gap-2 min-w-0">
+                                                                                    <span class="timeline-step-title-row text-sm font-bold text-gray-700 select-none">
+                                                                                        <span class="timeline-step-title-text">{{ step.title }}</span>
+                                                                                        <span v-if="step.count > 1" class="timeline-tool-group-count">{{ step.count }} 次</span>
+                                                                                        <span v-if="step.modeText" class="timeline-tool-group-mode">{{ step.modeText }}</span>
+                                                                                        <span v-if="step.isLive" class="timeline-tool-title-flow" aria-hidden="true">{{ step.title }}</span>
+                                                                                    </span>
+                                                                                    <svg v-if="step.status === 'done'" class="w-4 h-4 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path>
+                                                                                    </svg>
+                                                                                    <span v-if="step.status === 'error'" class="bg-red-50 text-red-700 border border-red-100 rounded px-1.5 py-0.5 text-[9px] font-semibold whitespace-nowrap">失败</span>
                                                                                 </div>
+                                                                                <span class="text-[10px] text-primary-500 opacity-60 group-hover/detail:opacity-100 flex items-center gap-0.5 font-bold whitespace-nowrap flex-shrink-0 ml-auto">
+                                                                                    详情
+                                                                                    <svg class="w-2.5 h-2.5 transform group-open/detail:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                                                                    </svg>
+                                                                                </span>
+                                                                            </summary>
+                                                                            <div class="mt-2 bg-gray-50 border border-gray-100/60 rounded-xl p-3 text-[13px] text-gray-700 custom-scrollbar shadow-inner select-text timeline-tool-group-detail">
+                                                                                <div v-if="Array.isArray(step.items) && step.items.length" class="timeline-tool-group-list">
+                                                                                    <!-- 组内单步：折叠块，summary 显示 query 与该步状态 -->
+                                                                                    <details v-for="item in step.items" :key="item.id" class="group/item timeline-tool-group-item">
+                                                                                        <summary class="list-none outline-none timeline-tool-group-item-summary">
+                                                                                            <span class="timeline-tool-group-item-query" :title="item.query">{{ item.query }}</span>
+                                                                                            <span class="timeline-tool-group-item-meta">
+                                                                                                <svg v-if="item.status === 'done'" class="w-3.5 h-3.5 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path>
+                                                                                                </svg>
+                                                                                                <span v-else-if="item.status === 'error'" class="bg-red-50 text-red-700 border border-red-100 rounded px-1.5 py-0.5 text-[9px] font-semibold whitespace-nowrap">失败</span>
+                                                                                                <span v-else-if="item.status === 'running' || item.status === 'receiving'" class="timeline-tool-group-item-badge timeline-tool-group-item-badge-live">运行中</span>
+                                                                                                <span v-else-if="item.status === 'queued'" class="timeline-tool-group-item-badge">排队中</span>
+                                                                                                <svg class="w-2.5 h-2.5 transform group-open/item:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                                                                                </svg>
+                                                                                            </span>
+                                                                                        </summary>
+                                                                                        <div class="tool-call-detail timeline-tool-group-item-detail">
+                                                                                            <div class="flex justify-between items-center text-[13px] border-b border-gray-200 pb-2">
+                                                                                                <span>调用工具: <code class="font-mono bg-white px-1 border rounded text-primary-600">&lt;{{ item.callName }}&gt;</code></span>
+                                                                                                <span class="text-gray-400 font-semibold">{{ item.toolCall ? getToolCallModeText(item.toolCall) : '' }}</span>
+                                                                                            </div>
+                                                                                            <div class="flex flex-col gap-1.5">
+                                                                                                <span class="text-xs font-semibold text-gray-500">参数输入:</span>
+                                                                                                <pre class="bg-gray-50 p-3 rounded-lg border border-gray-200 font-mono text-[13px] leading-relaxed text-gray-800 whitespace-pre-wrap max-h-40 overflow-y-auto custom-scrollbar break-all">{{ item.query }}</pre>
+                                                                                            </div>
+                                                                                            <div v-if="item.reason" class="flex flex-col gap-1.5">
+                                                                                                <span class="text-xs font-semibold text-gray-500">调用原因:</span>
+                                                                                                <div class="timeline-tool-group-item-reason">{{ item.reason }}</div>
+                                                                                            </div>
+                                                                                            <div v-if="item.error" class="text-red-600 bg-red-50 border border-red-100 rounded-lg p-3 mt-1 font-mono text-[13px] leading-relaxed">
+                                                                                                {{ item.error }}
+                                                                                            </div>
+                                                                                            <div v-else-if="item.resultText" class="flex flex-col gap-1.5 mt-1">
+                                                                                                <span class="text-xs font-semibold text-gray-500">执行输出:</span>
+                                                                                                <pre class="bg-gray-50 p-3 rounded-lg border border-gray-200 font-mono text-[13px] leading-relaxed text-gray-800 whitespace-pre-wrap max-h-56 overflow-y-auto custom-scrollbar break-all">{{ item.resultText }}</pre>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    </details>
+                                                                                </div>
+                                                                                <div v-else class="timeline-tool-group-empty">暂无步骤记录</div>
                                                                             </div>
                                                                         </details>
                                                                     </div>

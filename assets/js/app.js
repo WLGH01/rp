@@ -6497,20 +6497,29 @@ let removedProviderConfigCleared = false;
                         ? getImageTagRegex()
                         : new RegExp(regexPattern, flags);
 
+                    // 生图正则必须走回调替换：tag 里可能带 `#`（NovelAI 互动语法
+                    // `source#trampling`）或 `&`，裸拼进 data-image-request 会被浏览器当成
+                    // fragment / query 分隔符截断——不只丢参数，卡片 URL 的 tag 还会与正文
+                    // 匹配出的 tag 对不上，缓存与 liveImage 双双失配，图永远不显示。
+                    // 其余正则保持原样的字符串替换，行为不变。
+                    const replaceWith = isImageGenScript
+                        ? (match, tag) => imageUtils.encodeImageTagInReplacement(replacement, tag)
+                        : replacement;
+
                     // 普通正则保护 HTML/代码；明确匹配标签或代码围栏的规则仍直接执行。
                     if (isVoiceScript) {
-                        result = result.replace(re, replacement);
+                        result = result.replace(re, replaceWith);
                     } else if (!/[<>]/.test(regexPattern) && !regexPattern.includes('```')) {
                         const wholeMatch = re.exec(result);
                         re.lastIndex = 0;
-                        const wrapped = wholeMatch?.[0] === result ? result.replace(re, replacement) : null;
+                        const wrapped = wholeMatch?.[0] === result ? result.replace(re, replaceWith) : null;
                         re.lastIndex = 0;
                         // 完整保留原文的整条包裹只执行一次，避免给面板内每段文字重复套壳。
                         result = wrapped !== null && wrapped.includes(result)
                             ? wrapped
-                            : cardUtils.transformUnprotectedText(result, part => part.replace(re, replacement));
+                            : cardUtils.transformUnprotectedText(result, part => part.replace(re, replaceWith));
                     } else {
-                        result = result.replace(re, replacement);
+                        result = result.replace(re, replaceWith);
                     }
 
                 } catch (e) {
@@ -9585,11 +9594,6 @@ let removedProviderConfigCleared = false;
             saveChatHistoryNow();
         };
 
-        const getToolCallStepText = (toolCall) => {
-            const modeText = getToolCallModeText(toolCall);
-            return `${modeText}: ${toolCall.query}`;
-        };
-
         const getTimelineCharCount = (text) => Array.from(String(text || '')).length;
 
         const getTimelineSteps = (message) => {
@@ -9599,7 +9603,10 @@ let removedProviderConfigCleared = false;
             const cotInfo = parseCot(message.content || '');
 
             // 1. 初始原生思考
-            const reasoningText = String(getAssistantReasoningText(message) || '').trim();
+            // 只取 message.reasoning：工具调用各自的 reason 已经收进下方分组步骤的 items 里，
+            // 这里若再走 getAssistantReasoningText（它会把 toolCall.reasoning 一起并进来），
+            // 同一段文字会在时间线上出现两次。
+            const reasoningText = String(message.reasoning || '').trim();
             if (reasoningText) {
                 steps.push({
                     id: 'init-reasoning',
@@ -9611,27 +9618,56 @@ let removedProviderConfigCleared = false;
                 });
             }
 
-            // 2. 工具调用列表
+            // 2. 工具调用列表：按分组键折叠成一个步骤
+            //
+            // 起因：一次回复里连续查十几个 tag 是很常见的，旧实现「每个调用一个步骤 + 每个 reason
+            // 再单独一个步骤」会把时间线撑到几十屏。折叠后外层只有一行，多步查询收进 items，
+            // 展开才逐条看。分组用已有 getActiveToolUiGroupKey（web/keyword/random/tag），
+            // 它认不出的工具按 callName 兜底成一组，保证「同类合并、异类不串」。
             if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) {
+                const groups = new Map();
                 message.toolCalls.forEach((toolCall, idx) => {
-                    const status = getToolCallEffectiveStatus(toolCall);
+                    if (!toolCall) return;
+                    const groupKey = getActiveToolUiGroupKey(toolCall)
+                        || `other:${toolCall.callName || toolCall.name || ''}`;
+                    if (!groups.has(groupKey)) groups.set(groupKey, []);
                     const reason = cleanActiveToolCallReason(toolCall?.reason);
-                    if (reason) {
-                        steps.push({
-                            id: `tool-reason-${toolCall.id || idx}`,
-                            type: 'thinking',
-                            text: reason,
-                            title: reason,
-                            isReason: true
-                        });
-                    }
-                    steps.push({
+                    groups.get(groupKey).push({
                         id: `tool-call-${toolCall.id || idx}`,
-                        type: 'tool',
-                        toolCall: toolCall,
-                        title: getToolCallDisplayName(toolCall),
-                        text: getToolCallStepText(toolCall),
-                        status
+                        query: toolCall.query || '',
+                        // 空 reason 不写字段，模板里 v-if="item.reason" 才不会渲染空块。
+                        ...(reason ? { reason } : {}),
+                        status: getToolCallEffectiveStatus(toolCall),
+                        resultText: toolCall.resultText || '',
+                        error: toolCall.error || '',
+                        callName: toolCall.callName || toolCall.baseCallName || '',
+                        toolCall
+                    });
+                });
+
+                // 分组前取一次：下面每个分组都要用它判断「是不是当前正在思考的那一步」。
+                const currentToolCall = getCurrentThinkingToolCall(message);
+                // Map 的插入顺序就是分组键首次出现的顺序，直接遍历即可保持原顺序。
+                groups.forEach((items, groupKey) => {
+                    const firstToolCall = items[0]?.toolCall;
+                    // 汇总状态：错误优先（有一处失败就要显眼），其次「还在跑」，最后才算完成。
+                    const runningStatus = items
+                        .map(item => item.status)
+                        .find(status => TOOL_CALL_RUNNING_STATUSES.includes(status));
+                    const status = items.some(item => item.status === 'error')
+                        ? 'error'
+                        : (runningStatus || 'done');
+                    steps.push({
+                        // groupKey 里可能有 ':' 等字符，做一次安全替换才能当 DOM id / :key 用。
+                        id: `tool-group-${String(groupKey).replace(/[^A-Za-z0-9_-]/g, '_')}`,
+                        type: 'toolGroup',
+                        groupKey,
+                        title: getToolCallDisplayName(firstToolCall),
+                        modeText: getToolCallModeText(firstToolCall),
+                        count: items.length,
+                        status,
+                        isLive: !!runningStatus || (!!currentToolCall && items.some(item => item.toolCall === currentToolCall)),
+                        items
                     });
                 });
             }

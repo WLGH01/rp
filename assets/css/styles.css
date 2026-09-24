@@ -2892,6 +2892,134 @@ opacity: 0;
             overscroll-behavior: contain;
         }
 
+        /* 时间线工具分组：外层只占一行，展开后按步折叠 */
+        .timeline-tool-group-count {
+            display: inline-block;
+            margin-left: 0.5rem;
+            padding: 0 0.35rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.375rem;
+            background: #f1f5f9;
+            color: #64748b;
+            font-size: 0.66rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        .timeline-tool-group-mode {
+            display: inline-block;
+            margin-left: 0.4rem;
+            max-width: 12em;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #94a3b8;
+            font-size: 0.7rem;
+            font-weight: 400;
+        }
+
+        .timeline-tool-group-detail {
+            max-height: min(55vh, 34rem);
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior: contain;
+        }
+
+        .timeline-tool-group-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            padding-left: 0.6rem;
+            border-left: 1px solid #e2e8f0;
+        }
+
+        .timeline-tool-group-item {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.6rem;
+            overflow: hidden;
+        }
+
+        .timeline-tool-group-item-summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            padding: 0.4rem 0.6rem;
+            cursor: pointer;
+            color: #475569;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            user-select: none;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+
+        .timeline-tool-group-item-summary:hover {
+            background: #f8fafc;
+            color: #0f172a;
+        }
+
+        .timeline-tool-group-item-query {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .timeline-tool-group-item-meta {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            flex-shrink: 0;
+            color: #94a3b8;
+        }
+
+        .timeline-tool-group-item-badge {
+            padding: 0.05rem 0.35rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.25rem;
+            background: #f8fafc;
+            color: #64748b;
+            font-size: 0.6rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        .timeline-tool-group-item-badge-live {
+            border-color: #bfdbfe;
+            background: #eff6ff;
+            color: #2563eb;
+        }
+
+        .timeline-tool-group-item-detail {
+            padding: 0.6rem 0.7rem 0.7rem;
+            border-top: 1px solid #eef2f7;
+            background: #fff;
+        }
+
+        .timeline-tool-group-item-reason {
+            padding: 0.5rem 0.6rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            background: #f8fafc;
+            color: #475569;
+            font-size: 0.75rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .timeline-tool-group-empty {
+            padding: 0.35rem 0;
+            color: #94a3b8;
+            font-size: 0.75rem;
+            text-align: center;
+        }
+
         .tool-call-detail {
             display: flex;
             flex-direction: column;

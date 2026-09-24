@@ -1893,6 +1893,24 @@ window.RPHubUtils = {
         return next;
     };
 
+    // ===== 生图 Tag 写进 replacement 前的 URL 编码 =====
+    //
+    // 起因：NovelAI 官方互动语法允许 tag 里出现 `#`（如 `source#trampling`），而四条生图
+    // URL 模板都是 `...?tag=$1&token=...` 这种**裸拼接**。浏览器解析 data-image-request 时
+    // 会把 `#` 之后全部当成 fragment：tag 被截断在 `source`，后面的 token/model/size/nocache
+    // 一起丢失。更致命的是卡片 URL 里的 tag 与 markLiveImageTagsByText 用原始正文匹配出的
+    // 完整 tag 对不上，缓存与 liveImage 双双失配，那张图**一个请求都不会发**、永远显示占位框。
+    //
+    // 所以这里只做一件事：把捕获到的原始 tag 编码后填回 $1。URLSearchParams.get('tag')
+    // 会自动解码 %23 回 `#`，因此解码后的 tag 与修复前逐字符一致 —— 生图缓存 key 不变，
+    // 历史图不会失效（见 docs/REFACTOR-06 的硬约定）。
+    //
+    // 顺带解决属性安全：encodeURIComponent 会编码 `"` 与 `&`（前者会拼断 data-image-request="…"
+    // 属性、后者会截断 query），而保留的 `'` `(` `)` `!` `*` `~` `-` `_` `.` 对 HTML 属性无害。
+    // 结果里不含 `$`，因此可以安全地当作 String.replace 的替换串使用。
+    const encodeImageTagInReplacement = (replacement, tag) => String(replacement || '')
+        .replace(/\$1/g, encodeURIComponent(String(tag ?? '')));
+
     // ===== ComfyUI：API 格式工作流的解析、参数绑定与输出收集 =====
     //
     // ComfyUI 与 NAI/SD 的根本差异：它不认识「提示词」「步数」这些概念，只认识一张节点图。
@@ -3072,6 +3090,7 @@ window.RPHubUtils = {
         IMAGE_CACHE_LIMITS,
         selectImageCacheEntriesForPersist,
         applyNaiGatewayUrlParams,
+        encodeImageTagInReplacement,
         normalizeSdDimension,
         resolveSdSize,
         resolveGeneratedImageUrl,

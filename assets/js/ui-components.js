@@ -870,7 +870,7 @@
         },
         template: `
             <transition name="fade">
-                <modal-shell v-if="show" overlay-class="z-50 bg-black/50 backdrop-blur-sm p-4"
+                <modal-shell v-if="show" overlay-class="z-[150] bg-black/50 backdrop-blur-sm p-4"
                     panel-class="bg-white rounded-xl border border-gray-200 w-full max-w-2xl max-h-[90vh] h-[90vh] flex flex-col shadow-2xl transform transition-all scale-100">
                         <div class="p-4 border-b border-gray-100 flex justify-between items-center">
                             <h3 class="text-lg font-bold text-gray-800">{{ target === 'quickModels' ? '聊天模型' : '选择模型' }}</h3>
