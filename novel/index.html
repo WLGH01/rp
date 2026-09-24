@@ -2314,13 +2314,13 @@
                             || '';
                         const providerDefinitions = syncData.providers || [
                             ...RPHUB_PROVIDER_DEFINITIONS,
-                            { id: 'custom', name: '自定义', apiUrl: rphubSettings.customApiUrl || '' },
-                            { id: 'custom2', name: '自定义 2', apiUrl: rphubSettings.customApiUrl2 || '' }
+                            { id: 'custom', name: '自定义', apiUrl: rphubSettings.customApiUrl || '', builtin: false },
+                            { id: 'custom2', name: '自定义 2', apiUrl: rphubSettings.customApiUrl2 || '', builtin: false }
                         ];
                         const providers = providerDefinitions.map(provider => ({
                             ...provider,
                             apiKey: getProviderKey(provider.id)
-                        })).filter(provider => provider.id !== 'custom' && provider.id !== 'custom2'
+                        })).filter(provider => provider.builtin
                             || provider.apiUrl || provider.apiKey || rphubSettings.apiProviderId === provider.id);
 
                         apiProviders.value = providers;

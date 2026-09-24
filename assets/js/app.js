@@ -371,7 +371,8 @@ const app = createApp({
         const modelSearchQuery = ref('');
         const activeModelTag = ref('all');
         const characterSearchQuery = ref('');
-        const availableModels = ref([]);
+        // 「全部地址的模型」由 providerModelCache 拼出来（见 API 地址与模型目录那一段），
+        // 这里是 computed，不是 ref —— 模型列表不再只有「当前地址」那一份。
         const toasts = ref([]);
         let toastIdSeed = 0;
         const chatContainer = ref(null);
@@ -586,13 +587,40 @@ const app = createApp({
 
         const MAX_CONTEXT_SIZE = 1000000;
 
+        // ===== API 地址与模型槽位（5 个）常量 =====
+        // 聊天模型槽位固定 5 个，**每个槽位自带地址绑定**：前三个沿用 quality / balanced / fast
+        // 的旧语义（角色卡工坊与老存档还在读这三个字段），后两个只在本站用。
+        // 老行为是「槽位只记模型名、请求一律走界面上选中的那个地址」，于是「槽位 3 的模型属于
+        // 自定义地址 2、界面却停在地址 1」时会拿错地址发请求；现在按槽位自己的 providerId 路由。
+        const CHAT_MODEL_SLOT_MODES = ['quality', 'balanced', 'fast', 'slot4', 'slot5'];
+        const CHAT_MODEL_SLOT_COUNT = CHAT_MODEL_SLOT_MODES.length;
+        const CHAT_SLOT_TARGET_MODES = { qualityModel: 'quality', balancedModel: 'balanced', fastModel: 'fast' };
+        // 自定义地址可增删改名；上限只是防手滑，不是产品限制。
+        const CUSTOM_API_PROVIDER_LIMIT = 10;
+        const DEFAULT_CUSTOM_API_PROVIDERS = [
+            { id: 'custom', name: '自定义', url: '' },
+            { id: 'custom2', name: '自定义2', url: '' }
+        ];
+        const createDefaultChatModelSlots = () => CHAT_MODEL_SLOT_MODES.map(() => ({ model: '', providerId: '' }));
+
         const settings = reactive({
             apiUrl: DEFAULT_API_CONFIG.apiUrl,
             apiKey: DEFAULT_API_CONFIG.apiKey,
             apiProviderId: DEFAULT_API_PROVIDER_ID,
             apiProviderKeys: {},
+            // 自定义 API 地址列表：{ id, name, url }。id 稳定（老存档的 custom / custom2 原样保留，
+            // 密钥表 apiProviderKeys 也按 id 存），name 可随意改，可增可删。
+            customApiProviders: DEFAULT_CUSTOM_API_PROVIDERS.map(provider => ({ ...provider })),
+            // 老字段仅作兼容镜像（novel 页的无父窗口兜底路径与回滚时还读得到），真相在 customApiProviders。
             customApiUrl: '',
             customApiUrl2: '',
+            // 聊天模型槽位：{ model, providerId }。providerId 决定这条槽位往哪个地址发请求。
+            chatModelSlots: createDefaultChatModelSlots(),
+            // 当前生效槽位（settings.model）用的是哪个地址；'' = 按模型自动找地址、再兜底界面当前地址。
+            modelProviderId: '',
+            // 单模型选择项自己的地址绑定（识图 / UI 模板分析）。
+            visionModelProviderId: '',
+            uiTemplateModelProviderId: '',
             model: DEFAULT_API_CONFIG.qualityModel,
             contextSize: MAX_CONTEXT_SIZE,
             temperature: 1.0,
@@ -869,21 +897,6 @@ const app = createApp({
 
         const showApiProviderSelector = ref(false);
         const selectedApiProviderId = ref(DEFAULT_API_PROVIDER_ID);
-        const customApiProviderOption = {
-            id: 'custom',
-            name: '自定义',
-            apiUrl: '',
-            icon: ''
-        };
-        const customApiProviderOption2 = {
-            id: 'custom2',
-            name: '自定义2',
-            apiUrl: '',
-            icon: ''
-        };
-        const customApiProviderOptions = [customApiProviderOption, customApiProviderOption2];
-        const isCustomApiProviderId = (id) => customApiProviderOptions.some(provider => provider.id === id);
-        const getCustomApiUrlKey = (id) => id === 'custom2' ? 'customApiUrl2' : 'customApiUrl';
         const normalizeApiProviderUrl = (url) => String(url || '').replace(/\/+$/, '').toLowerCase();
 // 旧版内置的项目作者网关（已从默认配置与提供商列表移除）。
 // 老用户存档里可能仍指向它们，必须识别出来清空，否则会静默把请求连 API Key 一起发往该第三方服务。
@@ -902,52 +915,187 @@ const isRemovedProviderUrl = (url) => {
 const embedsRemovedProvider = (text) => REMOVED_PROVIDER_HOSTS.some(domain => String(text || '').includes(domain));
 // 标记本轮启动是否清除了残留的作者网关配置，用于决定是否需要回写存档。
 let removedProviderConfigCleared = false;
-        const getApiProviderById = (id) => apiProviderOptions.find(provider => provider.id === id);
+        // --- API 地址登记表（内置 + 自定义）---
+        const customApiProviderList = computed(() => (
+            Array.isArray(settings.customApiProviders) ? settings.customApiProviders : []
+        ));
+        const isCustomApiProviderId = (id) => customApiProviderList.value.some(provider => provider.id === id);
+        const getCustomApiProvider = (id) => customApiProviderList.value.find(provider => provider.id === id) || null;
+        // 内置预设 + 用户自定义地址 = 眼下所有可用的 API 地址。
+        const allApiProviders = computed(() => [
+            ...apiProviderOptions.map(provider => ({ ...provider, builtin: true })),
+            ...customApiProviderList.value.map(provider => ({
+                id: String(provider.id || ''),
+                name: String(provider.name || provider.id || '自定义'),
+                apiUrl: String(provider.url || ''),
+                icon: '',
+                builtin: false
+            }))
+        ]);
+        const customApiProviderOptions = computed(() => allApiProviders.value.filter(provider => !provider.builtin));
+        const getApiProviderById = (id) => allApiProviders.value.find(provider => provider.id === id) || null;
         const getApiProviderByUrl = (url) => {
             const currentUrl = normalizeApiProviderUrl(url);
-            return apiProviderOptions.find(provider => normalizeApiProviderUrl(provider.apiUrl) === currentUrl);
+            if (!currentUrl) return null;
+            return allApiProviders.value.find(provider => normalizeApiProviderUrl(provider.apiUrl) === currentUrl) || null;
+        };
+        // 某个地址的 Key：密钥表按 provider id 存；「界面当前地址」另有一份 apiKey 镜像。
+        const getApiProviderKey = (provider) => {
+            if (!provider) return String(settings.apiKey || '');
+            const stored = settings.apiProviderKeys?.[provider.id];
+            if (typeof stored === 'string' && stored) return stored;
+            if (provider.id === settings.apiProviderId) return String(settings.apiKey || '');
+            return typeof stored === 'string' ? stored : '';
+        };
+        const getApiProviderLabel = (providerId) => {
+            const provider = getApiProviderById(String(providerId || ''));
+            return provider ? provider.name : '';
+        };
+        const selectedCustomApiProvider = computed(() => (
+            isCustomApiProviderId(settings.apiProviderId) ? getCustomApiProvider(settings.apiProviderId) : null
+        ));
+        const nextCustomApiProviderId = () => {
+            const used = new Set(customApiProviderList.value.map(provider => provider.id));
+            if (!used.has('custom')) return 'custom';
+            let index = 2;
+            while (used.has(`custom${index}`)) index++;
+            return `custom${index}`;
+        };
+        // 老字段只是镜像：novel 页在没有父窗口时的兜底读取、以及回滚到旧版本时会用它。
+        const syncLegacyCustomApiUrlFields = () => {
+            const list = customApiProviderList.value;
+            settings.customApiUrl = String(list[0]?.url || '');
+            settings.customApiUrl2 = String(list[1]?.url || '');
+        };
+        // 自定义地址列表的规范化 + 老存档迁移（幂等：列表非空时永不回读老字段）。
+        const normalizeCustomApiProviders = () => {
+            const source = Array.isArray(settings.customApiProviders) ? settings.customApiProviders : [];
+            const list = [];
+            const usedIds = new Set();
+            source.forEach((item, index) => {
+                if (!item || typeof item !== 'object') return;
+                let id = String(item.id || '').trim();
+                if (!id || usedIds.has(id)) {
+                    id = `custom${index + 1}`;
+                    while (usedIds.has(id)) id = `${id}x`;
+                }
+                usedIds.add(id);
+                list.push({
+                    id,
+                    name: String(item.name || '').trim().slice(0, 40) || `自定义 ${index + 1}`,
+                    url: String(item.url || '').trim()
+                });
+            });
+            if (!list.length) {
+                // 老存档：只有 customApiUrl / customApiUrl2 两个字段。
+                list.push(
+                    { id: 'custom', name: DEFAULT_CUSTOM_API_PROVIDERS[0].name, url: String(settings.customApiUrl || '') },
+                    { id: 'custom2', name: DEFAULT_CUSTOM_API_PROVIDERS[1].name, url: String(settings.customApiUrl2 || '') }
+                );
+            }
+            settings.customApiProviders = list;
+            syncLegacyCustomApiUrlFields();
+        };
+        const addCustomApiProvider = () => {
+            if (customApiProviderList.value.length >= CUSTOM_API_PROVIDER_LIMIT) {
+                showToast(`最多 ${CUSTOM_API_PROVIDER_LIMIT} 个自定义 API 地址`, 'warning');
+                return;
+            }
+            const id = nextCustomApiProviderId();
+            settings.customApiProviders.push({
+                id,
+                name: `自定义 ${customApiProviderList.value.length + 1}`,
+                url: ''
+            });
+            if (typeof settings.apiProviderKeys[id] !== 'string') settings.apiProviderKeys[id] = '';
+            selectedApiProviderId.value = id;
+            settings.apiProviderId = id;
+            settings.apiUrl = '';
+            settings.apiKey = '';
+            syncLegacyCustomApiUrlFields();
+            showApiProviderSelector.value = false;
+            showToast('已新增自定义 API 地址：填好地址与 Key，刷新模型列表后即可选它的模型', 'success');
+        };
+        const renameCustomApiProvider = (id, name) => {
+            const provider = getCustomApiProvider(id);
+            if (!provider) return;
+            provider.name = String(name || '').slice(0, 40);
+        };
+        // 删地址时把指向它的绑定统统解绑（不留在指向不存在地址的槽位上），再交给
+        // 「按模型自动找地址 → 界面当前地址」兜底。
+        const unbindProviderEverywhere = (providerId) => {
+            if (!providerId) return;
+            settings.chatModelSlots.forEach(slot => {
+                if (slot && slot.providerId === providerId) slot.providerId = '';
+            });
+            ['modelProviderId', 'visionModelProviderId', 'uiTemplateModelProviderId'].forEach(key => {
+                if (settings[key] === providerId) settings[key] = '';
+            });
+            if (memorySettings.classicModelProviderId === providerId) memorySettings.classicModelProviderId = '';
+            if (memorySettings.embeddingModelProviderId === providerId) memorySettings.embeddingModelProviderId = '';
+            if (editingActiveTool.data && editingActiveTool.data.modelProviderId === providerId) {
+                editingActiveTool.data.modelProviderId = '';
+            }
+        };
+        const removeCustomApiProvider = (id) => {
+            const provider = getCustomApiProvider(id);
+            if (!provider) return;
+            if (customApiProviderList.value.length <= 1) {
+                showToast('至少保留一个自定义地址（可以直接清空它的地址）', 'warning');
+                return;
+            }
+            confirmAction(`确定要删除自定义地址「${provider.name}」吗？绑定到它的模型会改回按模型自动匹配地址。`, () => {
+                settings.customApiProviders = customApiProviderList.value.filter(item => item.id !== id);
+                unbindProviderEverywhere(id);
+                delete settings.apiProviderKeys[id];
+                if (settings.apiProviderId === id) {
+                    const fallback = getApiProviderById(DEFAULT_API_PROVIDER_ID);
+                    selectedApiProviderId.value = DEFAULT_API_PROVIDER_ID;
+                    settings.apiProviderId = DEFAULT_API_PROVIDER_ID;
+                    settings.apiUrl = String(fallback?.apiUrl || '');
+                }
+                syncLegacyCustomApiUrlFields();
+                showToast('已删除自定义 API 地址', 'success');
+            });
         };
         const syncCurrentApiKeyToProvider = () => {
-            const providerId = settings.apiProviderId || selectedApiProvider.value.id || DEFAULT_API_PROVIDER_ID;
+            const providerId = settings.apiProviderId || selectedApiProvider.value?.id || DEFAULT_API_PROVIDER_ID;
             if (!settings.apiProviderKeys || typeof settings.apiProviderKeys !== 'object' || Array.isArray(settings.apiProviderKeys)) {
                 settings.apiProviderKeys = {};
             }
             settings.apiProviderKeys[providerId] = settings.apiKey || '';
-            if (isCustomApiProviderId(providerId)) {
-                settings[getCustomApiUrlKey(providerId)] = settings.apiUrl || '';
+            const customProvider = getCustomApiProvider(providerId);
+            if (customProvider) {
+                customProvider.url = String(settings.apiUrl || '');
+                syncLegacyCustomApiUrlFields();
             }
         };
         const normalizeApiProviderSettings = () => {
             if (!settings.apiProviderKeys || typeof settings.apiProviderKeys !== 'object' || Array.isArray(settings.apiProviderKeys)) {
                 settings.apiProviderKeys = {};
             }
-            [...apiProviderOptions, ...customApiProviderOptions].forEach(provider => {
+            normalizeCustomApiProviders();
+            [...apiProviderOptions, ...customApiProviderOptions.value].forEach(provider => {
                 if (typeof settings.apiProviderKeys[provider.id] !== 'string') {
                     settings.apiProviderKeys[provider.id] = '';
                 }
             });
 
             let provider = getApiProviderById(settings.apiProviderId);
-            if (!provider && !isCustomApiProviderId(settings.apiProviderId)) {
-                provider = getApiProviderByUrl(settings.apiUrl);
+            if (!provider) {
+                provider = getApiProviderByUrl(settings.apiUrl) || getApiProviderById(DEFAULT_API_PROVIDER_ID);
                 settings.apiProviderId = provider?.id || DEFAULT_API_PROVIDER_ID;
             }
-            if (isCustomApiProviderId(settings.apiProviderId)) {
-                const urlKey = getCustomApiUrlKey(settings.apiProviderId);
-                settings[urlKey] = settings[urlKey] || settings.apiUrl || '';
-                settings.apiUrl = settings[urlKey];
-            } else {
-                provider = getApiProviderById(settings.apiProviderId) || getApiProviderById(DEFAULT_API_PROVIDER_ID);
-                settings.apiProviderId = provider.id;
-                settings.apiUrl = provider.apiUrl;
-            }
+            // 地址一律以登记的地址表为准（自定义地址的真相在 customApiProviders[].url）。
+            settings.apiUrl = String(provider?.apiUrl || '');
 
             // 老存档指向已移除的作者网关时清空，避免迁移后继续外发请求。
             if (isRemovedProviderUrl(settings.apiUrl)) {
                 console.warn('已清空指向项目作者网关的旧配置，请在设置里填写你自己的 API 地址。');
                 settings.apiUrl = '';
                 settings.apiKey = '';
-                settings[getCustomApiUrlKey(settings.apiProviderId)] = '';
+                const customProvider = getCustomApiProvider(settings.apiProviderId);
+                if (customProvider) customProvider.url = '';
                 removedProviderConfigCleared = true;
             }
             // 提供商密钥表里也可能留着已移除网关的旧 Key，一并清掉。
@@ -966,23 +1114,21 @@ let removedProviderConfigCleared = false;
             settings.apiKey = settings.apiProviderKeys[settings.apiProviderId] || '';
         };
         const selectedApiProvider = computed(() => {
-            const customProvider = customApiProviderOptions.find(provider => (
-                provider.id === settings.apiProviderId || provider.id === selectedApiProviderId.value
-            ));
-            if (customProvider) return customProvider;
-            const selectedProvider = getApiProviderById(settings.apiProviderId) || getApiProviderById(selectedApiProviderId.value);
-            if (selectedProvider) return selectedProvider;
-            return getApiProviderByUrl(settings.apiUrl) || customApiProviderOption;
+            const current = getApiProviderById(settings.apiProviderId) || getApiProviderById(selectedApiProviderId.value);
+            if (current) return current;
+            return getApiProviderByUrl(settings.apiUrl)
+                || customApiProviderOptions.value[0]
+                || { id: '', name: '未选择地址', apiUrl: String(settings.apiUrl || ''), icon: '', builtin: false };
         });
         const isCustomApiProvider = computed(() => isCustomApiProviderId(selectedApiProvider.value.id));
         const selectApiProvider = (provider) => {
+            if (!provider) return;
             syncCurrentApiKeyToProvider();
-            selectedApiProviderId.value = provider.id;
-            settings.apiProviderId = provider.id;
-            settings.apiUrl = isCustomApiProviderId(provider.id)
-                ? settings[getCustomApiUrlKey(provider.id)] || ''
-                : provider.apiUrl;
-            settings.apiKey = settings.apiProviderKeys[provider.id] || '';
+            const current = getApiProviderById(provider.id) || provider;
+            selectedApiProviderId.value = current.id;
+            settings.apiProviderId = current.id;
+            settings.apiUrl = String(current.apiUrl || '');
+            settings.apiKey = settings.apiProviderKeys[current.id] || '';
             showApiProviderSelector.value = false;
         };
         normalizeApiProviderSettings();
@@ -998,18 +1144,75 @@ let removedProviderConfigCleared = false;
         });
 
         watch(() => settings.apiUrl, (newUrl) => {
-            if (isCustomApiProviderId(settings.apiProviderId)) {
-                settings[getCustomApiUrlKey(settings.apiProviderId)] = newUrl || '';
+            const customProvider = getCustomApiProvider(settings.apiProviderId);
+            if (customProvider) {
+                customProvider.url = String(newUrl || '');
+                syncLegacyCustomApiUrlFields();
             }
         });
+
+        // 地址列表一变就把两个老镜像字段跟着刷新：这样「列表」永远是这份配置的真相，
+        // 老版本（或 novel 页的无父窗口兜底路径）读镜像也读得到当前值。
+        watch(() => settings.customApiProviders, () => {
+            syncLegacyCustomApiUrlFields();
+        }, { deep: true });
+
+        // --- 模型目录：所有地址的模型 ---
+        // providerId -> 最近一次成功拉到的模型列表。界面上的「模型列表」是这一份拼出来的，
+        // 因此记忆总结模型 / Tag 工具模型都能选到**任意地址**的模型，并在选中时记住地址。
+        const providerModelCache = reactive({});
+        const providerModelIds = (providerId) => (providerModelCache[providerId] || [])
+            .map(model => String(model?.id || '').trim())
+            .filter(Boolean);
+        const availableModels = computed(() => {
+            const list = [];
+            allApiProviders.value.forEach(provider => {
+                providerModelIds(provider.id).forEach(id => {
+                    list.push({ id, providerId: provider.id, providerName: provider.name });
+                });
+            });
+            return list;
+        });
+        const modelProviderTags = computed(() => allApiProviders.value
+            .filter(provider => providerModelIds(provider.id).length)
+            .map(provider => ({ id: provider.id, name: provider.name, count: providerModelIds(provider.id).length })));
+        const activeModelProvider = ref('all');
+        // 模型 → 地址：① 显式绑定；② 全地址模型表里唯一命中；③ 界面当前地址。
+        const resolveApiProviderForModel = (model, providerId) => {
+            const explicit = providerId ? getApiProviderById(String(providerId)) : null;
+            if (explicit && String(explicit.apiUrl || '').trim()) return explicit;
+            const modelId = String(model || '').trim();
+            if (modelId) {
+                const matched = allApiProviders.value.filter(provider => providerModelIds(provider.id).includes(modelId));
+                if (matched.length === 1 && String(matched[0].apiUrl || '').trim()) return matched[0];
+            }
+            if (explicit) return explicit;
+            return getApiProviderById(settings.apiProviderId) || selectedApiProvider.value || null;
+        };
+        // 一次请求真正要用的地址与 Key（url/apiKey），供所有 LLM 调用点复用。
+        const resolveProviderRequestTarget = (model, providerId) => {
+            const provider = resolveApiProviderForModel(model, providerId);
+            if (provider) {
+                return { providerId: provider.id, url: String(provider.apiUrl || ''), apiKey: getApiProviderKey(provider) };
+            }
+            return { providerId: '', url: String(settings.apiUrl || ''), apiKey: String(settings.apiKey || '') };
+        };
 
         const syncSettingsToGenerator = () => {
             const iframe = document.querySelector('iframe[src*="character"]');
             if (iframe && iframe.contentWindow) {
                 try {
+                    // 工坊页拿 settings.apiUrl/apiKey 直接发请求，所以这里发**当前生效槽位**的地址，
+                    // 而不是设置页里正在编辑的那个地址（两者可以不是同一个）。
+                    const target = resolveProviderRequestTarget(settings.model, settings.modelProviderId);
+                    const syncedSettings = JSON.parse(JSON.stringify(settings));
+                    if (target.url) {
+                        syncedSettings.apiUrl = target.url;
+                        syncedSettings.apiKey = target.apiKey;
+                    }
                     const syncData = {
                         type: 'SYNC_SETTINGS',
-                        settings: JSON.parse(JSON.stringify(settings))
+                        settings: syncedSettings
                     };
                     iframe.contentWindow.postMessage(syncData, '*');
                 } catch (e) {
@@ -1052,15 +1255,9 @@ let removedProviderConfigCleared = false;
                 const iframe = document.querySelector('iframe[src*="novel/index.html"]');
                 if (event.source !== iframe?.contentWindow) return;
 
-                const providers = [
-                    ...apiProviderOptions.map(({ id, name, apiUrl, icon }) => ({ id, name, apiUrl, icon })),
-                    ...customApiProviderOptions.map(({ id, name }) => ({
-                        id,
-                        name,
-                        apiUrl: settings[getCustomApiUrlKey(id)] || '',
-                        icon: ''
-                    }))
-                ];
+                const providers = allApiProviders.value.map(({ id, name, apiUrl, icon, builtin }) => ({
+                    id, name, apiUrl, icon: icon || '', builtin: !!builtin
+                }));
                 event.source.postMessage({
                     type: 'RPHUB_API_SETTINGS',
                     requestId: event.data.requestId,
@@ -1068,6 +1265,7 @@ let removedProviderConfigCleared = false;
                         apiProviderId: settings.apiProviderId,
                         apiProviderKeys: JSON.parse(JSON.stringify(settings.apiProviderKeys || {})),
                         apiKey: settings.apiKey,
+                        // 兼容镜像（老版 novel 页读这两个字段）
                         customApiUrl: settings.customApiUrl,
                         customApiUrl2: settings.customApiUrl2
                     },
@@ -1076,22 +1274,8 @@ let removedProviderConfigCleared = false;
             }
         });
 
-        watch(() => [settings.apiUrl, settings.apiKey, settings.model], ([, , newModel]) => {
-            if (newModel !== settings.fastModel && newModel !== settings.balancedModel) {
-                settings.qualityModel = newModel; // 确保 qualityModel 也同步更新
-            }
-
-
-
-            // Update currentModelMode based on the actual selected model
-            if (newModel === settings.fastModel) {
-                currentModelMode.value = 'fast';
-            } else if (newModel === settings.balancedModel) {
-                currentModelMode.value = 'balanced';
-            } else {
-                currentModelMode.value = 'quality';
-            }
-
+        // 地址 / Key 变了就把当前生效槽位的地址同步给工坊页；模型变了则由下面的槽位 watcher 处理。
+        watch(() => [settings.apiUrl, settings.apiKey, settings.model], () => {
             syncSettingsToGenerator();
         }, { deep: true });
 
@@ -1103,23 +1287,133 @@ let removedProviderConfigCleared = false;
         const currentModelMode = ref('quality');
         const isGeminiModel = computed(() => /gemini/i.test(String(settings.model || '')));
         const isTruncationEnabled = computed(() => isGeminiModel.value && settings.preventTruncation);
+        // 槽位：{ model, providerId }。providerId 是「这条槽位往哪个地址发请求」的唯一依据，
+        // 与设置页里正在编辑的地址（settings.apiProviderId）解耦。
+        const chatModelSlots = computed(() => {
+            const list = Array.isArray(settings.chatModelSlots) ? settings.chatModelSlots : [];
+            return CHAT_MODEL_SLOT_MODES.map((mode, index) => {
+                const slot = (list[index] && typeof list[index] === 'object') ? list[index] : {};
+                const model = String(slot.model || '');
+                const providerId = String(slot.providerId || '');
+                const provider = providerId ? getApiProviderById(providerId) : null;
+                const fallbackProvider = provider || getApiProviderById(settings.apiProviderId);
+                return {
+                    mode,
+                    index,
+                    model,
+                    providerId,
+                    providerName: provider ? provider.name : '',
+                    requestUrl: String(fallbackProvider?.apiUrl || '')
+                };
+            });
+        });
+        const configuredChatModelSlotCount = computed(() => chatModelSlots.value.filter(slot => slot.model).length);
+        const ensureChatModelSlots = () => {
+            const source = Array.isArray(settings.chatModelSlots) ? settings.chatModelSlots : [];
+            settings.chatModelSlots = CHAT_MODEL_SLOT_MODES.map((mode, index) => {
+                const slot = (source[index] && typeof source[index] === 'object') ? source[index] : {};
+                return { model: String(slot.model || ''), providerId: String(slot.providerId || '') };
+            });
+            return settings.chatModelSlots;
+        };
+        // 前三个槽位与老字段（qualityModel / balancedModel / fastModel）互为镜像：
+        // 角色卡工坊页与老存档还在读那三个字段。
+        const syncLegacySlotMirrors = () => {
+            const list = ensureChatModelSlots();
+            settings.qualityModel = list[0].model;
+            settings.balancedModel = list[1].model;
+            settings.fastModel = list[2].model;
+        };
+        const writeModelToSlot = (index, model, providerId) => {
+            const list = ensureChatModelSlots();
+            const slot = list[Math.max(0, Math.min(list.length - 1, Number(index) || 0))];
+            slot.model = String(model || '');
+            if (providerId !== undefined) slot.providerId = String(providerId || '');
+            syncLegacySlotMirrors();
+        };
+        // 启动时的槽位迁移：老存档只有三个模型名（没有地址绑定），先落进前三个槽位；
+        // 地址绑定留空，等模型表拉回来后由 reconcileModelProviderBindings 自动补。
+        const normalizeChatModelSlots = () => {
+            const legacyModels = [settings.qualityModel, settings.balancedModel, settings.fastModel];
+            const source = Array.isArray(settings.chatModelSlots) ? settings.chatModelSlots : [];
+            settings.chatModelSlots = CHAT_MODEL_SLOT_MODES.map((mode, index) => {
+                const slot = (source[index] && typeof source[index] === 'object') ? source[index] : {};
+                let model = String(slot.model || '').trim();
+                if (!model && index < legacyModels.length) model = String(legacyModels[index] || '').trim();
+                let providerId = String(slot.providerId || '').trim();
+                if (providerId && !getApiProviderById(providerId)) providerId = '';
+                return { model, providerId };
+            });
+            syncLegacySlotMirrors();
+            const current = String(settings.model || '').trim();
+            const matched = chatModelSlots.value.find(slot => slot.model && slot.model === current);
+            if (matched) {
+                currentModelMode.value = matched.mode;
+                if (matched.providerId) settings.modelProviderId = matched.providerId;
+            } else if (!current) {
+                const first = chatModelSlots.value.find(slot => slot.model);
+                if (first) {
+                    currentModelMode.value = first.mode;
+                    settings.model = first.model;
+                    settings.modelProviderId = first.providerId || '';
+                }
+            }
+        };
+        // 老存档 / 手工填过的槽位可能没有地址绑定：模型表拉回来后，按「这个模型只在某一家出现过」
+        // 自动补绑（这正是「槽位 3 的模型其实属于自定义地址 2」那种情况）。
+        const reconcileModelProviderBindings = () => {
+            const pickProviderForModel = (model) => {
+                const matched = allApiProviders.value.filter(provider => providerModelIds(provider.id).includes(model));
+                return matched.length === 1 ? matched[0] : null;
+            };
+            const bind = (holder, modelKey, providerKey) => {
+                const model = String(holder?.[modelKey] || '').trim();
+                if (!model || String(holder[providerKey] || '').trim()) return false;
+                const provider = pickProviderForModel(model);
+                if (!provider) return false;
+                holder[providerKey] = provider.id;
+                return true;
+            };
+            ensureChatModelSlots().forEach(slot => bind(slot, 'model', 'providerId'));
+            bind(settings, 'model', 'modelProviderId');
+            bind(settings, 'visionModel', 'visionModelProviderId');
+            bind(settings, 'uiTemplateModel', 'uiTemplateModelProviderId');
+            bind(memorySettings, 'classicModel', 'classicModelProviderId');
+            bind(memorySettings, 'embeddingModel', 'embeddingModelProviderId');
+            activeTools.value.filter(tool => isTagActiveTool(tool)).forEach(tool => bind(tool, 'model', 'modelProviderId'));
+        };
         const modelMode = computed({
-            get: () => {
-                return currentModelMode.value;
-            },
+            get: () => currentModelMode.value,
             set: (val) => {
                 currentModelMode.value = val;
-                if (val === 'fast') {
-                    settings.model = settings.fastModel;
-                } else if (val === 'balanced') {
-                    settings.model = settings.balancedModel;
-                } else {
-                    settings.model = settings.qualityModel;
-                }
+                const slot = chatModelSlots.value.find(item => item.mode === val);
+                settings.model = slot ? slot.model : '';
+                settings.modelProviderId = slot?.providerId || '';
                 showModelSelector.value = false;
                 showChatModelSelector.value = false;
             }
         });
+        const selectChatModelSlot = (slot) => {
+            if (!slot?.model) return;
+            currentModelMode.value = slot.mode;
+            settings.model = slot.model;
+            settings.modelProviderId = slot.providerId || '';
+        };
+        // 模型名被改动时（切槽位 / 选模型 / 换地址）回写进当前槽位，保持「槽位 = 真相」。
+        watch(() => settings.model, (newModel) => {
+            const index = CHAT_MODEL_SLOT_MODES.indexOf(currentModelMode.value);
+            if (index < 0) return;
+            const list = ensureChatModelSlots();
+            const slot = list[index];
+            const nextModel = String(newModel || '');
+            if (slot.model !== nextModel) {
+                slot.model = nextModel;
+                if (settings.modelProviderId) slot.providerId = settings.modelProviderId;
+                syncLegacySlotMirrors();
+            }
+            syncSettingsToGenerator();
+        });
+
         const reasoningEffortOptions = [
             { value: 'none', label: '关闭' },
             { value: 'low', label: '低（Low）' },
@@ -1133,16 +1427,6 @@ let removedProviderConfigCleared = false;
             set: index => { settings.reasoningEffort = reasoningEffortOptions[index]?.value || ''; }
         });
         const reasoningEffortLabel = computed(() => reasoningEffortOptions[reasoningEffortSlider.value].label);
-        const chatModelSlots = computed(() => [
-            { mode: 'quality', model: settings.qualityModel },
-            { mode: 'balanced', model: settings.balancedModel },
-            { mode: 'fast', model: settings.fastModel }
-        ]);
-        const selectChatModelSlot = (slot) => {
-            if (!slot?.model) return;
-            currentModelMode.value = slot.mode;
-            settings.model = slot.model;
-        };
 
 
         const characters = ref([]);
@@ -1379,7 +1663,11 @@ let removedProviderConfigCleared = false;
             enabled: false,
             mode: MEMORY_MODE_CLASSIC,
             embeddingModel: '',
+            // 向量模型 / 总结模型各自的地址绑定：模型可以从**任意地址**里选，
+            // 选中哪家的模型就把 providerId 记下来，请求时按它路由。
+            embeddingModelProviderId: '',
             classicModel: '',
+            classicModelProviderId: '',
             summaryKeepFloors: SUMMARY_KEEP_FLOORS_DEFAULT,
             classicConcurrency: CLASSIC_MEMORY_DEFAULT_CONCURRENCY
         });
@@ -1431,7 +1719,10 @@ let removedProviderConfigCleared = false;
             if (!memorySettings.classicModel && memorySettings.model) {
                 memorySettings.classicModel = String(memorySettings.model).trim();
             }
-            const fields = new Set(['enabled', 'mode', 'embeddingModel', 'classicModel', 'summaryKeepFloors', 'classicConcurrency']);
+            const fields = new Set([
+                'enabled', 'mode', 'embeddingModel', 'embeddingModelProviderId',
+                'classicModel', 'classicModelProviderId', 'summaryKeepFloors', 'classicConcurrency'
+            ]);
             Object.keys(memorySettings).forEach(key => {
                 if (!fields.has(key)) delete memorySettings[key];
             });
@@ -1440,6 +1731,11 @@ let removedProviderConfigCleared = false;
                 ? MEMORY_MODE_ENHANCED : MEMORY_MODE_CLASSIC;
             memorySettings.classicModel = String(memorySettings.classicModel || '').trim();
             memorySettings.embeddingModel = String(memorySettings.embeddingModel || '').trim();
+            // 地址绑定指向不存在的地址（例如删掉了那条自定义地址）时解绑，交给自动匹配兜底。
+            memorySettings.classicModelProviderId = getApiProviderById(memorySettings.classicModelProviderId)
+                ? String(memorySettings.classicModelProviderId) : '';
+            memorySettings.embeddingModelProviderId = getApiProviderById(memorySettings.embeddingModelProviderId)
+                ? String(memorySettings.embeddingModelProviderId) : '';
             memorySettings.summaryKeepFloors = normalizeKeepFloors(
                 memorySettings.summaryKeepFloors,
                 SUMMARY_KEEP_FLOORS_MIN,
@@ -1513,6 +1809,9 @@ let removedProviderConfigCleared = false;
                 normalized.mcpTool = String(tool.mcpTool || fallback.mcpTool || '').trim();
                 normalized.mode = tool.mode === 'aux' ? 'aux' : 'main';
                 normalized.model = String(tool.model || fallback.model || '').trim();
+                // 「另配模型」可以从任意地址里选，选完记住它属于哪家（请求时按这个走）。
+                const modelProviderId = String(tool.modelProviderId || fallback.modelProviderId || '').trim();
+                normalized.modelProviderId = getApiProviderById(modelProviderId) ? modelProviderId : '';
             }
             return normalized;
         };
@@ -1652,11 +1951,15 @@ let removedProviderConfigCleared = false;
             saveStoredValue: setStoredValue,
             toast: (...args) => showToast(...args)
         });
+        // 所有站内 LLM 调用的统一出口：调用方可以带 providerId（模型绑定的地址），
+        // 不带就按「模型在全地址模型表里唯一命中 → 界面当前地址」兜底。
+        // 这样「槽位 3 的模型属于自定义地址 2、界面停在地址 1」也不会再发错地址。
         const requestTrackedChatCompletion = (options, type) => {
-            const apiUrl = settings.apiUrl;
-            const request = { url: buildApiEndpoint(apiUrl, 'chat/completions'), apiKey: settings.apiKey, ...options };
+            const { providerId, ...rest } = options || {};
+            const target = resolveProviderRequestTarget(rest.model, providerId);
+            const request = { url: buildApiEndpoint(target.url, 'chat/completions'), apiKey: target.apiKey, ...rest };
             return requestChatCompletion({ ...request, onUsage: (usage, metrics) => recordApiUsage(usage, {
-                type, model: request.model, apiUrl, apiKey: request.apiKey, ...metrics
+                type, model: request.model, apiUrl: target.url, apiKey: target.apiKey, ...metrics
             }) });
         };
         const {
@@ -2023,11 +2326,33 @@ let removedProviderConfigCleared = false;
                     if (!Object.prototype.hasOwnProperty.call(savedSettings, 'apiProviderId')) {
                         const legacyProvider = getApiProviderByUrl(savedSettings.apiUrl);
                         settings.apiProviderId = legacyProvider?.id || (savedSettings.apiUrl ? 'custom' : DEFAULT_API_PROVIDER_ID);
-                        if (!legacyProvider && savedSettings.apiUrl) settings.customApiUrl = savedSettings.apiUrl;
+                    }
+                    // 老存档没有「地址列表」这个概念，只有 customApiUrl / customApiUrl2 两个字段
+                    // （更老的连 provider 都没有，自定义地址就躺在 apiUrl 里）：这里播种一次。
+                    // 播种只发生在存档里没有 customApiProviders 时，之后一律以列表为准，
+                    // 不会把用户后来清空/改掉的地址又「迁移」回来。
+                    if (!Array.isArray(savedSettings.customApiProviders)) {
+                        const legacyFirst = String(savedSettings.customApiUrl || '');
+                        const legacySecond = String(savedSettings.customApiUrl2 || '');
+                        const savedUrl = String(savedSettings.apiUrl || '');
+                        const savedUrlIsBuiltin = apiProviderOptions.some(provider => (
+                            normalizeApiProviderUrl(provider.apiUrl) === normalizeApiProviderUrl(savedUrl)
+                        ));
+                        settings.customApiProviders = [
+                            {
+                                id: 'custom',
+                                name: DEFAULT_CUSTOM_API_PROVIDERS[0].name,
+                                url: legacyFirst || (savedUrl && !savedUrlIsBuiltin ? savedUrl : '')
+                            },
+                            { id: 'custom2', name: DEFAULT_CUSTOM_API_PROVIDERS[1].name, url: legacySecond }
+                        ];
                     }
                     normalizeApiProviderSettings();
+                    // 槽位迁移要放在地址表规范化之后（要按 id 校验绑定是否还存在）。
+                    normalizeChatModelSlots();
                 } else {
                     normalizeApiProviderSettings();
+                    normalizeChatModelSlots();
                 }
                 // API Key 的清理必须落盘，否则每次启动又会从存档读回旧密钥。
                 if (removedProviderConfigCleared) {
@@ -2818,12 +3143,13 @@ let removedProviderConfigCleared = false;
         };
 
         const requestTtsAssistantText = async ({ system, prompt, temperature = 0.9 }) => {
-            if (!String(settings.apiUrl || '').trim() || !String(settings.apiKey || '').trim()) {
+            const target = resolveProviderRequestTarget(settings.model, settings.modelProviderId);
+            if (!String(target.url || '').trim() || !String(target.apiKey || '').trim()) {
                 throw new Error('请先在「API 连接与服务」里配置主模型（地址 + Key）');
             }
             const result = await requestChatCompletion({
-                url: buildApiEndpoint(settings.apiUrl, 'chat/completions'),
-                apiKey: settings.apiKey,
+                url: buildApiEndpoint(target.url, 'chat/completions'),
+                apiKey: target.apiKey,
                 model: settings.model,
                 temperature,
                 messages: [
@@ -5984,7 +6310,12 @@ let removedProviderConfigCleared = false;
         });
 
         const filteredModels = computed(() => {
+            // 模型条目是 { id, providerId, providerName }：地址筛选 + 家族标签 + 搜索。
             let result = availableModels.value;
+
+            if (activeModelProvider.value && activeModelProvider.value !== 'all') {
+                result = result.filter(m => m.providerId === activeModelProvider.value);
+            }
 
             if (activeModelTag.value && activeModelTag.value !== 'all') {
                 if (activeModelTag.value === 'other') {
@@ -6003,7 +6334,10 @@ let removedProviderConfigCleared = false;
                 result = result.filter(m => m.id.toLowerCase().includes(query));
             }
 
-            return result.sort((a, b) => a.id.localeCompare(b.id));
+            // 按地址分组排序：同一家的模型排在一起，跨地址找模型时更容易看清它属于谁。
+            return [...result].sort((a, b) => (
+                String(a.providerName || '').localeCompare(String(b.providerName || '')) || a.id.localeCompare(b.id)
+            ));
         });
 
         const getCharacterWICount = (char) => {
@@ -6256,26 +6590,51 @@ let removedProviderConfigCleared = false;
         };
 
         // API & Models
+        // 拉取**所有**已配置地址的模型列表：模型选择弹窗要能选到任意地址的模型，
+        // 记忆总结模型与 Tag 工具模型也一样。某一家失败只记名字，不清掉它上次的结果。
         const fetchModels = async (isManual = false) => {
-            const apiKey = String(settings.apiKey || '').trim();
-            if (!apiKey) {
-                if (isManual) showToast('请先填写当前 API 预设的 Key', 'info');
+            const targets = allApiProviders.value.filter(provider => (
+                String(provider.apiUrl || '').trim() && String(getApiProviderKey(provider) || '').trim()
+            ));
+            if (!targets.length) {
+                if (isManual) showToast('请先填写 API 地址与 Key', 'info');
                 return;
             }
-            try {
-                if (isManual) showToast('正在获取模型列表...', 'info');
-                const url = buildApiEndpoint(settings.apiUrl, 'models');
-                const data = await requestJson({ url, apiKey });
-                availableModels.value = data.data || [];
-                if (isManual) showToast(`成功获取 ${availableModels.value.length} 个模型`, 'success');
-            } catch (error) {
-                console.error(error);
-                showToast('获取模型失败: ' + error.message, 'error');
+            if (isManual) showToast('正在获取全部地址的模型列表...', 'info');
+            const results = await Promise.all(targets.map(async provider => {
+                try {
+                    const data = await requestJson({
+                        url: buildApiEndpoint(provider.apiUrl, 'models'),
+                        apiKey: getApiProviderKey(provider)
+                    });
+                    return { provider, models: Array.isArray(data?.data) ? data.data : [], error: null };
+                } catch (error) {
+                    return { provider, models: null, error };
+                }
+            }));
+            const failed = [];
+            let total = 0;
+            results.forEach(({ provider, models, error }) => {
+                if (models) {
+                    providerModelCache[provider.id] = models;
+                    total += models.length;
+                } else {
+                    failed.push(provider.name || provider.id);
+                    console.warn(`获取模型列表失败（${provider.name || provider.id}）`, error);
+                }
+            });
+            reconcileModelProviderBindings();
+            if (!isManual) return;
+            if (failed.length) {
+                showToast(`已获取 ${total} 个模型；${failed.join('、')} 拉取失败`, 'warning');
+            } else {
+                showToast(`已从 ${targets.length} 个地址获取 ${total} 个模型`, 'success');
             }
         };
 
         const openModelSelector = (target) => {
             modelSelectionTarget.value = target;
+            activeModelProvider.value = 'all';
             if (target === 'memoryEmbeddingModel') {
                 modelSearchQuery.value = 'embedding';
                 activeModelTag.value = 'all';
@@ -6283,54 +6642,110 @@ let removedProviderConfigCleared = false;
                 modelSearchQuery.value = '';
             }
             showModelSelector.value = true;
+            // 打开时不主动发请求（避免每次点开都打一轮接口）；列表为空或不在缓存里时提示刷新。
+            if (!availableModels.value.length) {
+                showToast('还没有模型列表：填好地址与 Key 后点「刷新可用模型列表」', 'info');
+            }
         };
 
-        const selectQuickModels = (models) => {
+        // 槽位编辑器回传：[{ model, providerId }, ...]（5 个）。
+        const selectQuickModels = (drafts) => {
             const previousModel = settings.model;
-            const [qualityModel, balancedModel, fastModel] = models;
-            settings.qualityModel = qualityModel || '';
-            settings.balancedModel = balancedModel || '';
-            settings.fastModel = fastModel || '';
+            const list = ensureChatModelSlots();
+            (Array.isArray(drafts) ? drafts : []).forEach((draft, index) => {
+                if (index >= list.length) return;
+                const normalized = typeof draft === 'string' ? { model: draft, providerId: '' } : (draft || {});
+                list[index].model = String(normalized.model || '');
+                list[index].providerId = String(normalized.providerId || '');
+            });
+            syncLegacySlotMirrors();
             const activeSlot = chatModelSlots.value.find(slot => slot.mode === currentModelMode.value && slot.model)
                 || chatModelSlots.value.find(slot => slot.model);
             if (activeSlot) {
                 currentModelMode.value = activeSlot.mode;
                 settings.model = activeSlot.model;
+                settings.modelProviderId = activeSlot.providerId || '';
             } else {
                 settings.model = previousModel;
             }
         };
 
-        const selectModel = (modelId) => {
-            if (modelSelectionTarget.value === 'memoryEmbeddingModel') {
+        const selectModel = (modelId, providerId = '') => {
+            const target = modelSelectionTarget.value;
+            if (target === 'memoryEmbeddingModel') {
                 memorySettings.embeddingModel = modelId;
+                memorySettings.embeddingModelProviderId = providerId;
                 showModelSelector.value = false;
                 return;
             }
-            if (modelSelectionTarget.value === 'memoryClassicModel') {
+            if (target === 'memoryClassicModel') {
                 memorySettings.classicModel = modelId;
+                memorySettings.classicModelProviderId = providerId;
                 showModelSelector.value = false;
                 return;
             }
             // 生图 Tag 查询的「另配模型」：目标在工具编辑弹窗里，不在 settings 上。
-            if (modelSelectionTarget.value === 'tagToolModel') {
+            if (target === 'tagToolModel') {
                 editingActiveTool.data.model = modelId;
+                editingActiveTool.data.modelProviderId = providerId;
+                showModelSelector.value = false;
+                return;
+            }
+            if (target === 'visionModel') {
+                settings.visionModel = modelId;
+                settings.visionModelProviderId = providerId;
+                showModelSelector.value = false;
+                return;
+            }
+            if (target === 'uiTemplateModel') {
+                settings.uiTemplateModel = modelId;
+                settings.uiTemplateModelProviderId = providerId;
                 showModelSelector.value = false;
                 return;
             }
 
-            settings[modelSelectionTarget.value] = modelId;
-
-            if (
-                (modelSelectionTarget.value === 'qualityModel' && currentModelMode.value === 'quality') ||
-                (modelSelectionTarget.value === 'balancedModel' && currentModelMode.value === 'balanced') ||
-                (modelSelectionTarget.value === 'fastModel' && currentModelMode.value === 'fast')
-            ) {
-                settings.model = modelId;
+            // 聊天模型槽位：写进对应槽位（地址绑定一起记下来）。
+            const slotMode = CHAT_SLOT_TARGET_MODES[target];
+            if (slotMode) {
+                writeModelToSlot(CHAT_MODEL_SLOT_MODES.indexOf(slotMode), modelId, providerId);
+                if (currentModelMode.value === slotMode) {
+                    settings.model = modelId;
+                    settings.modelProviderId = providerId;
+                }
+                showModelSelector.value = false;
+                return;
             }
 
+            // 兜底：其它以 settings 字段为目标的单模型选择（地址绑定存 <target>ProviderId）。
+            settings[target] = modelId;
+            settings[`${target}ProviderId`] = providerId;
             showModelSelector.value = false;
         };
+
+        const currentModelSelectionValue = computed(() => {
+            const target = modelSelectionTarget.value;
+            if (target === 'memoryEmbeddingModel') return memorySettings.embeddingModel;
+            if (target === 'memoryClassicModel') return memorySettings.classicModel;
+            if (target === 'tagToolModel') return editingActiveTool.data.model || '';
+            if (target === 'visionModel') return settings.visionModel;
+            if (target === 'uiTemplateModel') return settings.uiTemplateModel;
+            if (target === 'quickModels') return settings.model;
+            return String(settings[target] || '');
+        });
+        const currentModelSelectionProviderId = computed(() => {
+            const target = modelSelectionTarget.value;
+            if (target === 'memoryEmbeddingModel') return memorySettings.embeddingModelProviderId || '';
+            if (target === 'memoryClassicModel') return memorySettings.classicModelProviderId || '';
+            if (target === 'tagToolModel') return editingActiveTool.data.modelProviderId || '';
+            if (target === 'visionModel') return settings.visionModelProviderId || '';
+            if (target === 'uiTemplateModel') return settings.uiTemplateModelProviderId || '';
+            const slotMode = CHAT_SLOT_TARGET_MODES[target];
+            if (slotMode) {
+                const slot = chatModelSlots.value.find(item => item.mode === slotMode);
+                return slot?.providerId || '';
+            }
+            return String(settings[`${target}ProviderId`] || '');
+        });
 
         const checkConnectionStatus = async (status, latency, label, request, isConnected = response => response.ok) => {
             status.value = 'checking';
@@ -6502,6 +6917,7 @@ let removedProviderConfigCleared = false;
         const recognizeChatImage = async (image) => {
             try {
                 const result = await requestTrackedChatCompletion({
+                    providerId: settings.visionModelProviderId,
                     model: settings.visionModel,
                     temperature: 0.2,
                     stream: false,
@@ -6537,7 +6953,8 @@ let removedProviderConfigCleared = false;
             }
         };
         const requestChatImageSelection = (input) => {
-            if (!settings.apiKey || !settings.visionModel) {
+            const visionTarget = resolveProviderRequestTarget(settings.visionModel, settings.visionModelProviderId);
+            if (!String(visionTarget.apiKey || '').trim() || !settings.visionModel) {
                 showToast('请先在设置中配置识图模型', 'warning');
                 return;
             }
@@ -6900,6 +7317,7 @@ let removedProviderConfigCleared = false;
                         const currentVariableJson = JSON.stringify(template.variableState || {}, null, 2);
                         const variableSchemaText = stringifyUiSchema(template.variableSchema).trim();
                         const result = await requestTrackedChatCompletion({
+                            providerId: settings.uiTemplateModelProviderId,
                             model, temperature: 0.2, stream: false,
                             messages: [
                                 {
@@ -7778,6 +8196,7 @@ let removedProviderConfigCleared = false;
                     ...(extra_content ? { extra_content } : {})
                 }));
                 const responseResult = await requestTrackedChatCompletion({
+                    providerId: settings.modelProviderId,
                     model: requestModel,
                     messages: apiMessages,
                     logResponse: true,
@@ -8032,10 +8451,12 @@ let removedProviderConfigCleared = false;
 
         const requestClassicMemoryCompletion = async (requestMessages, signal) => {
             const model = String(memorySettings.classicModel || '').trim();
-            if (!settings.apiUrl || !settings.apiKey) throw new Error('请先配置 API 地址和 Key');
+            const target = resolveProviderRequestTarget(model, memorySettings.classicModelProviderId);
+            if (!target.url || !target.apiKey) throw new Error('请先配置 API 地址和 Key');
             if (!model) throw new Error('请先选择总结模型');
 
             const result = await requestTrackedChatCompletion({
+                providerId: memorySettings.classicModelProviderId,
                 model, temperature: 0.2, stream: false, messages: requestMessages, signal
             }, 'summary');
             const summary = parseCot(result.content).main
@@ -8349,16 +8770,23 @@ let removedProviderConfigCleared = false;
 
         const extractMemoryFromChat = () => startAutomaticMemoryPatrol();
 
+        // 向量模型的请求目标：向量模型可以从任意地址里选，这里算出它该发去哪家。
+        // 记忆条目里记的 embeddingApiUrl 也用它 —— 那是「这份向量是哪个地址算的」的指纹。
+        const getMemoryEmbeddingTarget = () => resolveProviderRequestTarget(
+            getMemoryEmbeddingModel(), memorySettings.embeddingModelProviderId
+        );
+
         const requestMemoryEmbeddings = async (inputs, signal, model = getMemoryEmbeddingModel()) => {
-            if (!settings.apiUrl || !settings.apiKey) throw new Error('请先配置 API 地址和 Key');
+            const target = getMemoryEmbeddingTarget();
+            if (!target.url || !target.apiKey) throw new Error('请先配置 API 地址和 Key');
             if (!model) throw new Error('请先选择向量模型');
 
             const normalizedInputs = inputs.map(input => String(input || '').trim());
             if (normalizedInputs.some(input => !input)) throw new Error('嵌入内容不能为空');
 
             const requestStartedAt = Date.now();
-            const apiUrl = settings.apiUrl;
-            const apiKey = settings.apiKey;
+            const apiUrl = target.url;
+            const apiKey = target.apiKey;
             const data = await requestJson({
                 url: buildApiEndpoint(apiUrl, 'embeddings'), apiKey, signal,
                 body: { model, input: normalizedInputs.length === 1 ? normalizedInputs[0] : normalizedInputs }
@@ -8383,13 +8811,13 @@ let removedProviderConfigCleared = false;
             return vectors;
         };
 
-        const hasCurrentSummaryEmbedding = (memory, model = getMemoryEmbeddingModel(), apiUrl = settings.apiUrl) =>
+        const hasCurrentSummaryEmbedding = (memory, model = getMemoryEmbeddingModel(), apiUrl = getMemoryEmbeddingTarget().url) =>
             memory.embeddingModel === model && memory.embeddingApiUrl === apiUrl
             && getSummaryEmbedding(memory).length > 0;
 
         const indexSummaryMemories = async (snapshot, signal, sources = getSummarySources(classicMemories.value)) => {
             const model = getMemoryEmbeddingModel();
-            const apiUrl = settings.apiUrl;
+            const apiUrl = getMemoryEmbeddingTarget().url;
             const epoch = _classicExtractionEpoch;
             const scopeId = getCurrentStoryBranchScopeId();
             const isCurrent = () => !signal?.aborted && epoch === _classicExtractionEpoch
@@ -8919,11 +9347,13 @@ let removedProviderConfigCleared = false;
                 provider: settings.imageProvider
             });
             if (!systemPrompt) return tag;
-            const cacheKey = `${model}\u0000${normalizeImageTagKey(tag)}`;
+            // Tag 工具的「另配模型」也可以来自任意地址：地址随模型一起记在工具上。
+            const cacheKey = `${tool.modelProviderId || ''}\u0000${model}\u0000${normalizeImageTagKey(tag)}`;
             if (imageTagNormalizeCache.has(cacheKey)) return imageTagNormalizeCache.get(cacheKey);
             try {
                 const lookups = await lookupCandidateTags(tag, tool, signal);
                 const result = await requestTrackedChatCompletion({
+                    providerId: tool.modelProviderId,
                     model,
                     temperature: 0,
                     stream: false,
@@ -9498,7 +9928,10 @@ let removedProviderConfigCleared = false;
         const startBatchMemoryExtraction = () => startClassicBatchMemoryExtraction({ manual: true });
         const abortBatchExtraction = () => abortClassicBatchExtraction();
 
-        watch(() => [memorySettings.enabled, memorySettings.mode, memorySettings.classicModel, memorySettings.embeddingModel, settings.apiUrl], () => {
+        watch(() => [
+            memorySettings.enabled, memorySettings.mode, memorySettings.classicModel, memorySettings.embeddingModel,
+            memorySettings.classicModelProviderId, memorySettings.embeddingModelProviderId, settings.apiUrl
+        ], () => {
             abortClassicBatchExtraction();
         });
 
@@ -11888,7 +12321,7 @@ let removedProviderConfigCleared = false;
             updateModalRef, latestUpdateConfig,
             showConfirmModal, confirmMessage, modelMode, isGeminiModel, isTruncationEnabled, isPresetEnabled, chatModelSlots, selectChatModelSlot, reasoningEffortSlider, reasoningEffortLabel, showNoMemoryNeededModal, // Export for template
             isGenerating, isRemoteGenerating, remoteEstimatedTime, isReceiving, isThinking, hasActiveToolInlineWork, isConversationBusy, activeToolContinuationMessageId, activeToolContinuationHasResponse, userInput, pendingCardInteraction, clearPendingCardInteraction, pendingChatImages, pendingChatImageReadCount, isRecognizingImages, requestChatImageSelection, handleChatImageSelection, removePendingChatImage, modelSearchQuery, activeModelTag, modelTags, characterSearchQuery, filteredModels, filteredCharacters,
-            user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, characters, currentCharacter, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontFamilyOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
+            user, settings, apiProviderOptions, allApiProviders, customApiProviderOptions, selectedCustomApiProvider, selectedApiProvider, isCustomApiProvider, showApiProviderSelector, selectApiProvider, addCustomApiProvider, renameCustomApiProvider, removeCustomApiProvider, getApiProviderLabel, configuredChatModelSlotCount, modelProviderTags, activeModelProvider, currentModelSelectionValue, currentModelSelectionProviderId, characters, currentCharacter, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontFamilyOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
             // 生图方式与 SD 专用
             isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
@@ -12125,11 +12558,12 @@ let removedProviderConfigCleared = false;
                     resultCount: editingActiveTool.data.resultCount,
                     resultCountVersion: ACTIVE_TOOL_RESULT_COUNT_VERSION,
                     tavilyApiKey: editingActiveTool.data.tavilyApiKey,
-                    // 生图 Tag 查询工具自己的配置（MCP 端点 / 调用方式 / 另配的模型）。
+                    // 生图 Tag 查询工具自己的配置（MCP 端点 / 调用方式 / 另配的模型 + 它的地址）。
                     mcpUrl: editingActiveTool.data.mcpUrl,
                     mcpTool: editingActiveTool.data.mcpTool,
                     mode: editingActiveTool.data.mode,
-                    model: editingActiveTool.data.model
+                    model: editingActiveTool.data.model,
+                    modelProviderId: editingActiveTool.data.modelProviderId
                 });
                 activeTools.value[index] = data;
                 normalizeActiveTools();

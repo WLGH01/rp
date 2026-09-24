@@ -935,7 +935,7 @@
                                                 <div class="chat-model-slots relative grid auto-rows-fr gap-1.5 rounded-xl bg-gray-100/70 p-1">
                                                     <div class="segmented-switch__indicator flex items-center justify-end px-2.5 text-primary-600" aria-hidden="true"
                                                         v-show="chatModelSlots.some(slot => slot.mode === modelMode && slot.model)"
-                                                        :style="{ '--slot-index': chatModelSlots.findIndex(slot => slot.mode === modelMode) }">
+                                                        :style="{ '--slot-index': chatModelSlots.findIndex(slot => slot.mode === modelMode), '--slot-count': chatModelSlots.length }">
                                                         <svg class="w-4 h-4 flex-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m5 12 4 4L19 6"></path>
                                                         </svg>
@@ -943,9 +943,13 @@
                                                     <button v-for="(slot, slotIndex) in chatModelSlots" :key="slot.mode"
                                                         type="button" @click="selectChatModelSlot(slot)"
                                                         :disabled="!slot.model" :aria-pressed="modelMode === slot.mode && !!slot.model"
+                                                        :title="slot.model ? `${slot.model}${slot.providerName ? ' · ' + slot.providerName : ''}` : '未配置'"
                                                         :class="['relative z-10 flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors', modelMode === slot.mode && slot.model ? 'text-primary-600' : 'text-gray-500', !slot.model ? 'cursor-not-allowed opacity-45' : 'hover:text-primary-600']">
                                                         <span class="flex-none text-xs font-semibold">槽位 {{ slotIndex + 1 }}</span>
-                                                        <span class="min-w-0 flex-1 truncate text-[13px] font-medium" :title="slot.model">{{ slot.model || '未配置' }}</span>
+                                                        <span class="min-w-0 flex-1 flex flex-col">
+                                                            <span class="block truncate text-[13px] font-medium">{{ slot.model || '未配置' }}</span>
+                                                            <span v-if="slot.model" class="block truncate text-[10px] text-gray-400">{{ slot.providerName || '未绑定地址' }}</span>
+                                                        </span>
                                                         <span class="w-4 flex-none" aria-hidden="true"></span>
                                                     </button>
                                                 </div>
@@ -1607,34 +1611,15 @@
                                         </button>
                                         <div v-if="showApiProviderSelector"
                                             class="absolute left-0 right-0 top-full z-40 mt-2 w-full max-h-96 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl p-2">
-                                            <button v-for="provider in apiProviderOptions" :key="provider.id"
+                                            <button v-for="provider in allApiProviders" :key="provider.id"
                                                 type="button" @click="selectApiProvider(provider)"
                                                 :class="['w-full px-3 py-2.5 rounded-lg flex items-center text-left transition-all', selectedApiProvider.id === provider.id ? 'bg-teal-50 text-teal-700' : 'hover:bg-gray-50 text-gray-700']">
                                                 <span
                                                     class="w-8 h-8 rounded-lg bg-white border border-gray-100 shadow-sm flex items-center justify-center mr-3 shrink-0 overflow-hidden">
-                                                    <img :src="provider.icon" :alt="provider.name"
+                                                    <img v-if="provider.icon" :src="provider.icon" :alt="provider.name"
                                                         class="w-5 h-5 object-contain"
                                                         @error="$event.target.style.visibility = 'hidden'">
-                                                </span>
-                                                <span class="min-w-0 flex-1">
-                                                    <span class="block text-sm font-bold truncate">{{ provider.name
-                                                        }}</span>
-                                                    <span class="block text-xs text-gray-400 font-mono truncate">{{
-                                                        provider.apiUrl }}</span>
-                                                </span>
-                                                <svg v-if="selectedApiProvider.id === provider.id"
-                                                    class="w-4 h-4 ml-2 text-teal-600 shrink-0" fill="none"
-                                                    stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        stroke-width="2" d="M5 13l4 4L19 7"></path>
-                                                </svg>
-                                            </button>
-                                            <button v-for="provider in customApiProviderOptions" :key="provider.id"
-                                                type="button" @click="selectApiProvider(provider)"
-                                                :class="['w-full mt-2 px-3 py-2.5 border-t border-gray-100 rounded-lg flex items-center text-left transition-all', selectedApiProvider.id === provider.id ? 'bg-teal-50 text-teal-700' : 'hover:bg-gray-50 text-gray-700']">
-                                                <span
-                                                    class="w-8 h-8 rounded-lg bg-white border border-gray-100 shadow-sm flex items-center justify-center mr-3 shrink-0">
-                                                    <svg class="w-5 h-5 text-gray-500" fill="none"
+                                                    <svg v-else class="w-5 h-5 text-gray-500" fill="none"
                                                         stroke="currentColor" viewBox="0 0 24 24">
                                                         <path stroke-linecap="round" stroke-linejoin="round"
                                                             stroke-width="2"
@@ -1643,9 +1628,13 @@
                                                     </svg>
                                                 </span>
                                                 <span class="min-w-0 flex-1">
-                                                    <span class="block text-sm font-bold truncate">{{ provider.name }}</span>
-                                                    <span class="block text-xs text-gray-400 truncate">手动输入 API 地址</span>
+                                                    <span class="block text-sm font-bold truncate">{{ provider.name
+                                                        }}</span>
+                                                    <span class="block text-xs text-gray-400 font-mono truncate">{{
+                                                        provider.apiUrl || (provider.builtin ? '未填写' : '手动输入 API 地址') }}</span>
                                                 </span>
+                                                <span v-if="!provider.builtin"
+                                                    class="ml-2 shrink-0 rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-bold text-gray-400">自定义</span>
                                                 <svg v-if="selectedApiProvider.id === provider.id"
                                                     class="w-4 h-4 ml-2 text-teal-600 shrink-0" fill="none"
                                                     stroke="currentColor" viewBox="0 0 24 24">
@@ -1653,20 +1642,54 @@
                                                         stroke-width="2" d="M5 13l4 4L19 7"></path>
                                                 </svg>
                                             </button>
+                                            <button type="button" @click="addCustomApiProvider"
+                                                class="w-full mt-2 px-3 py-2.5 border-t-2 border-dashed border-gray-100 rounded-lg flex items-center text-left text-teal-700 hover:bg-teal-50 transition-all">
+                                                <span class="w-8 h-8 rounded-lg bg-white border border-teal-100 shadow-sm flex items-center justify-center mr-3 shrink-0 text-teal-600">
+                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                                                    </svg>
+                                                </span>
+                                                <span class="min-w-0 flex-1">
+                                                    <span class="block text-sm font-bold truncate">新增自定义 API 地址</span>
+                                                    <span class="block text-xs text-gray-400 truncate">可以自己起名；模型列表会标出它属于哪条地址</span>
+                                                </span>
+                                            </button>
                                         </div>
                                     </div>
-                                    <div v-if="isCustomApiProvider" class="relative">
-                                        <div
-                                            class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-teal-500 transition-colors pointer-events-none">
-                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                    d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
-                                                </path>
-                                            </svg>
+                                    <div v-if="isCustomApiProvider" class="flex flex-col gap-2 md:flex-row">
+                                        <div class="relative md:w-56">
+                                            <div class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-teal-500 transition-colors pointer-events-none">
+                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h10M7 11h6m-8 9h12a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v13a2 2 0 002 2z"></path>
+                                                </svg>
+                                            </div>
+                                            <input :value="selectedCustomApiProvider ? selectedCustomApiProvider.name : ''"
+                                                @input="renameCustomApiProvider(settings.apiProviderId, $event.target.value)"
+                                                type="text" maxlength="40"
+                                                class="w-full h-12 bg-gray-50/60 border-2 border-gray-100 rounded-xl pl-11 pr-3 py-0 text-gray-800 font-medium focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-100 focus:outline-none transition-all placeholder-gray-400 text-sm"
+                                                placeholder="地址名称（可改）"
+                                                title="给这条地址起个名字，模型列表与槽位里都会显示它">
                                         </div>
-                                        <input v-model="settings.apiUrl" type="text"
-                                            class="w-full h-12 bg-gray-50/60 border-2 border-gray-100 rounded-xl pl-11 pr-4 py-0 text-gray-800 font-medium focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-100 focus:outline-none transition-all placeholder-gray-400 font-mono text-sm"
-                                            placeholder="https://your-api.example/v1">
+                                        <div class="relative flex-1">
+                                            <div
+                                                class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-teal-500 transition-colors pointer-events-none">
+                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                        d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                                                    </path>
+                                                </svg>
+                                            </div>
+                                            <input v-model="settings.apiUrl" type="text"
+                                                class="w-full h-12 bg-gray-50/60 border-2 border-gray-100 rounded-xl pl-11 pr-4 py-0 text-gray-800 font-medium focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-100 focus:outline-none transition-all placeholder-gray-400 font-mono text-sm"
+                                                placeholder="https://your-api.example/v1">
+                                        </div>
+                                        <button type="button" @click="removeCustomApiProvider(settings.apiProviderId)"
+                                            class="h-12 px-4 shrink-0 rounded-xl border-2 border-gray-100 bg-white text-gray-400 hover:text-red-500 hover:border-red-200 hover:bg-red-50 transition-all"
+                                            title="删除这条自定义地址">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                            </svg>
+                                        </button>
                                     </div>
                                 </div>
                                 <div class="group">
@@ -1703,8 +1726,12 @@
                                             </div>
                                             <div
                                                 class="w-full bg-gray-50/60 border-2 border-gray-100 rounded-xl pl-11 pr-4 py-3 text-gray-800 font-medium flex items-center justify-between cursor-pointer hover:bg-white hover:border-teal-300 hover:shadow-md transition-all active:scale-[0.99]">
-                                                <span class="truncate mr-2 text-sm">已配置 {{ [settings.qualityModel,
-                                                    settings.balancedModel, settings.fastModel].filter(Boolean).length }} / 3 个槽位</span>
+                                                <span class="min-w-0 mr-2 text-sm">
+                                                    <span class="block truncate">已配置 {{ configuredChatModelSlotCount }} / {{ chatModelSlots.length }} 个槽位</span>
+                                                    <span class="block truncate text-[11px] text-gray-400" title="每个槽位单独记住自己的 API 地址">
+                                                        {{ chatModelSlots.filter(slot => slot.model).map(slot => '槽位' + (slot.index + 1) + '→' + (slot.providerName || '未绑定地址')).join('　') || '每个槽位可各自绑定一条 API 地址' }}
+                                                    </span>
+                                                </span>
                                                 <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor"
                                                     viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round"
@@ -3810,6 +3837,8 @@
                                     :title="memorySettings.classicModel || '请选择总结模型'">
                                     <span :class="memorySettings.classicModel ? 'text-gray-700' : 'text-gray-400'">{{
                                         memorySettings.classicModel || '请选择总结模型' }}</span>
+                                    <span v-if="memorySettings.classicModel" class="ml-2 shrink-0 text-[11px] text-gray-400">{{
+                                        getApiProviderLabel(memorySettings.classicModelProviderId) || '未绑定地址' }}</span>
                                 </button>
                             </div>
 
@@ -3827,6 +3856,8 @@
                                     <span
                                         :class="memorySettings.embeddingModel ? 'text-gray-700' : 'text-gray-400'">{{
                                         memorySettings.embeddingModel || '请选择向量模型' }}</span>
+                                    <span v-if="memorySettings.embeddingModel" class="ml-2 shrink-0 text-[11px] text-gray-400">{{
+                                        getApiProviderLabel(memorySettings.embeddingModelProviderId) || '未绑定地址' }}</span>
                                 </button>
                             </div>
 
@@ -4102,10 +4133,13 @@
         <model-selector-modal :show="showModelSelector" :target="modelSelectionTarget"
             :search-query="modelSearchQuery" :active-tag="activeModelTag" :tags="modelTags"
             :models="filteredModels"
-            :slot-models="[settings.qualityModel, settings.balancedModel, settings.fastModel]"
-            :current-model="modelSelectionTarget === 'memoryEmbeddingModel' ? memorySettings.embeddingModel : (modelSelectionTarget === 'memoryClassicModel' ? memorySettings.classicModel : settings[modelSelectionTarget])"
+            :provider-tags="modelProviderTags" :active-provider="activeModelProvider"
+            :slot-models="chatModelSlots"
+            :current-model="currentModelSelectionValue"
+            :current-provider-id="currentModelSelectionProviderId"
             @close="showModelSelector = false" @select="selectModel" @select-slots="selectQuickModels"
             @update:search-query="modelSearchQuery = $event"
+            @update:active-provider="activeModelProvider = $event"
             @update:active-tag="activeModelTag = $event"></model-selector-modal>
 
         <add-character-modal :show="showAddCharacterMenu" @close="showAddCharacterMenu = false"
@@ -4147,6 +4181,7 @@
             :display-description="getActiveToolDisplayDescription(editingActiveTool.data)"
             :web-tool="isWebActiveTool(editingActiveTool.data)"
             :tag-tool="isTagActiveTool(editingActiveTool.data)"
+            :model-provider-name="getApiProviderLabel(editingActiveTool.data.modelProviderId)"
             :min-result-count="getActiveToolResultCountMin(editingActiveTool.data)"
             :max-result-count="getActiveToolResultCountMax(editingActiveTool.data)"
             @close="showActiveToolEditor = false" @save="saveActiveTool"

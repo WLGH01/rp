@@ -788,6 +788,8 @@
             </modal-shell>`
     };
 
+    // 模型选择弹窗：模型条目是 { id, providerId, providerName }，来自**所有**已配置的 API 地址。
+    // 选中时把 providerId 一起抛给父组件（记忆总结模型 / Tag 工具模型 / 槽位都靠它记住地址）。
     const ModelSelectorModal = {
         props: {
             show: Boolean,
@@ -797,32 +799,73 @@
             tags: { type: Array, default: () => [] },
             models: { type: Array, default: () => [] },
             currentModel: { type: String, default: '' },
+            // 当前选中的模型属于哪个地址（用于高亮「同一模型名在不同地址下」的那一条）。
+            currentProviderId: { type: String, default: '' },
+            // 地址筛选条：[{ id, name, count }]。
+            providerTags: { type: Array, default: () => [] },
+            activeProvider: { type: String, default: 'all' },
+            // 槽位编辑器：draft 直接就是 [{ model, providerId }, ...]。
             slotModels: { type: Array, default: () => [] }
         },
-        emits: ['close', 'select', 'select-slots', 'update:search-query', 'update:active-tag'],
+        emits: ['close', 'select', 'select-slots', 'update:search-query', 'update:active-tag', 'update:active-provider'],
         data() {
             return {
                 activeSlot: 0,
-                draftSlotModels: ['', '', '']
+                draftSlotModels: []
             };
+        },
+        methods: {
+            providerNameOf(model) {
+                return model?.providerName || '';
+            },
+            // 「全部地址」的数字用各地址计数之和，免得和右边的分地址计数对不上
+            // （搜索/标签筛选只影响下面的列表，不影响筛选条的计数）。
+            allProviderCount() {
+                return this.providerTags.reduce((total, provider) => total + (Number(provider.count) || 0), 0);
+            },
+            isSlotModel(model) {
+                const draft = this.draftSlotModels[this.activeSlot] || {};
+                return draft.model === model.id && (draft.providerId || '') === (model.providerId || '');
+            },
+            isCurrentModel(model) {
+                if (this.currentModel !== model.id) return false;
+                // 没记地址时（老存档）只要模型名对上就算选中。
+                if (!this.currentProviderId) return true;
+                return this.currentProviderId === model.providerId;
+            },
+            chooseModel(model) {
+                if (this.target !== 'quickModels') {
+                    this.$emit('select', model.id, model.providerId || '');
+                    return;
+                }
+                const draft = this.draftSlotModels[this.activeSlot] || { model: '', providerId: '' };
+                const sameModel = draft.model === model.id && (draft.providerId || '') === (model.providerId || '');
+                this.draftSlotModels[this.activeSlot] = sameModel
+                    ? { model: '', providerId: '', providerName: '' }
+                    : { model: model.id, providerId: model.providerId || '', providerName: model.providerName || '' };
+                this.draftSlotModels = [...this.draftSlotModels];
+                this.$emit('select-slots', this.draftSlotModels.map(item => ({ ...item })));
+            },
+            slotLabel(slot) {
+                if (!slot?.model) return '未选择';
+                return slot.providerName ? `${slot.model} · ${slot.providerName}` : slot.model;
+            }
         },
         watch: {
             show(visible) {
-                if (visible && this.target === 'quickModels') {
-                    this.activeSlot = 0;
-                    this.draftSlotModels = [0, 1, 2].map(index => this.slotModels[index] || '');
-                }
-            }
-        },
-        methods: {
-            chooseModel(modelId) {
-                if (this.target !== 'quickModels') {
-                    this.$emit('select', modelId);
-                    return;
-                }
-                this.draftSlotModels[this.activeSlot] = this.draftSlotModels[this.activeSlot] === modelId ? '' : modelId;
-                this.draftSlotModels = [...this.draftSlotModels];
-                this.$emit('select-slots', [...this.draftSlotModels]);
+                if (!visible || this.target !== 'quickModels') return;
+                this.activeSlot = 0;
+                // 槽位数由父组件决定（现在是 5 个），不再写死 3 个。
+                const source = Array.isArray(this.slotModels) ? this.slotModels : [];
+                const count = Math.max(source.length, 1);
+                this.draftSlotModels = Array.from({ length: count }, (_, index) => {
+                    const slot = source[index] || {};
+                    return {
+                        model: String(slot.model || ''),
+                        providerId: String(slot.providerId || ''),
+                        providerName: String(slot.providerName || '')
+                    };
+                });
             }
         },
         template: `
@@ -837,12 +880,13 @@
                                 </svg>
                             </button>
                         </div>
-                        <div v-if="target === 'quickModels'" class="grid grid-cols-3 gap-2 p-4 pb-0">
-                            <button v-for="(_, index) in draftSlotModels" :key="index" type="button"
+                        <div v-if="target === 'quickModels'" class="grid grid-cols-2 sm:grid-cols-3 gap-2 p-4 pb-0">
+                            <button v-for="(slot, index) in draftSlotModels" :key="index" type="button"
                                 @click="activeSlot = index"
                                 :class="['min-w-0 rounded-xl border px-3 py-2.5 text-left transition-colors', activeSlot === index ? 'border-primary-300 bg-primary-50 text-primary-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50']">
                                 <span class="block text-xs font-bold mb-1">槽位 {{ index + 1 }}</span>
-                                <span class="block truncate text-[11px] font-mono" :title="draftSlotModels[index]">{{ draftSlotModels[index] || '未选择' }}</span>
+                                <span class="block truncate text-[11px] font-mono" :title="slotLabel(draftSlotModels[index])">{{ draftSlotModels[index].model || '未选择' }}</span>
+                                <span class="block truncate text-[10px] text-gray-400" :title="draftSlotModels[index].providerName || '按模型自动匹配地址'">{{ draftSlotModels[index].providerName || '未绑定地址' }}</span>
                             </button>
                         </div>
                         <div class="p-4 border-b border-gray-100 flex flex-col gap-3">
@@ -851,6 +895,30 @@
                                 :readonly="target === 'memoryEmbeddingModel'"
                                 :title="target === 'memoryEmbeddingModel' ? '模型选择已锁定' : ''"
                                 :class="['w-full border rounded-lg px-4 py-2 focus:outline-none transition-all shadow-sm', target === 'memoryEmbeddingModel' ? 'bg-gray-100 border-gray-200 text-gray-400 placeholder-gray-400 cursor-not-allowed shadow-none select-none' : 'bg-gray-50/60 border-gray-300 text-gray-800 focus:ring-2 focus:ring-primary-500 focus:shadow-md']">
+                            <div v-if="providerTags.length > 1" class="flex flex-col gap-1.5">
+                                <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wide">按 API 地址筛选</span>
+                                <div class="flex flex-wrap gap-2 items-center">
+                                    <button type="button" @click="$emit('update:active-provider', 'all')" :class="[
+                                        'flex items-center px-3.5 py-1.5 text-xs font-bold rounded-full transition-all border outline-none active:scale-95 whitespace-nowrap',
+                                        activeProvider === 'all'
+                                            ? 'bg-teal-50 text-teal-700 border-teal-300 shadow-sm'
+                                            : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50 hover:text-gray-700 hover:border-gray-300 shadow-sm'
+                                    ]">
+                                        <span class="leading-none">全部地址</span>
+                                        <span class="ml-1.5 opacity-60 font-mono text-[11px] leading-none">{{ allProviderCount() }}</span>
+                                    </button>
+                                    <button v-for="provider in providerTags" :key="provider.id" type="button"
+                                        @click="$emit('update:active-provider', provider.id)" :class="[
+                                            'flex items-center px-3.5 py-1.5 text-xs font-bold rounded-full transition-all border outline-none active:scale-95 whitespace-nowrap',
+                                            activeProvider === provider.id
+                                                ? 'bg-teal-50 text-teal-700 border-teal-300 shadow-sm'
+                                                : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50 hover:text-gray-700 hover:border-gray-300 shadow-sm'
+                                        ]">
+                                        <span class="leading-none truncate max-w-[10rem]" :title="provider.name">{{ provider.name }}</span>
+                                        <span class="ml-1.5 opacity-60 font-mono text-[11px] leading-none">{{ provider.count }}</span>
+                                    </button>
+                                </div>
+                            </div>
                             <div class="flex flex-wrap gap-2 max-h-[160px] overflow-y-auto custom-scrollbar items-center py-1">
                                 <button v-for="tag in tags" :key="tag.name" @click="$emit('update:active-tag', tag.name)" :class="[
                                     'flex items-center px-3.5 py-1.5 text-xs font-bold rounded-full transition-all border outline-none active:scale-95 whitespace-nowrap',
@@ -871,10 +939,13 @@
                                 未找到模型或正在加载...
                             </div>
                             <div class="space-y-1">
-                                <button v-for="model in models" :key="model.id" @click="chooseModel(model.id)"
+                                <button v-for="model in models" :key="model.providerId + '::' + model.id" @click="chooseModel(model)"
                                     class="w-full text-left px-4 py-3 rounded-xl hover:bg-gray-50 hover:shadow-[0_2px_4px_rgba(0,0,0,0.02)] transition-colors flex justify-between items-center group border border-transparent hover:border-gray-100 active:bg-gray-100">
-                                    <span class="text-gray-700 font-mono font-medium group-hover:text-primary-600 transition-colors">{{ model.id }}</span>
-                                    <span v-if="(target === 'quickModels' ? draftSlotModels[activeSlot] : currentModel) === model.id" class="text-primary-600 bg-primary-50 p-1 rounded-full shadow-sm">
+                                    <span class="min-w-0 flex flex-col">
+                                        <span class="text-gray-700 font-mono font-medium group-hover:text-primary-600 transition-colors truncate">{{ model.id }}</span>
+                                        <span class="text-[11px] text-gray-400 truncate">{{ providerNameOf(model) }}</span>
+                                    </span>
+                                    <span v-if="target === 'quickModels' ? isSlotModel(model) : isCurrentModel(model)" class="text-primary-600 bg-primary-50 p-1 rounded-full shadow-sm shrink-0">
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
                                         </svg>
@@ -1195,6 +1266,8 @@
             displayDescription: { type: String, default: '' },
             webTool: Boolean,
             tagTool: Boolean,
+            // 「另配模型」当前绑定的 API 地址名（空 = 未绑定，按模型自动匹配）。
+            modelProviderName: { type: String, default: '' },
             minResultCount: { type: Number, required: true },
             maxResultCount: { type: Number, required: true }
         },
@@ -1264,6 +1337,7 @@
                                     <button type="button" @click="$emit('pick-model')" class="modal-secondary-button">选择模型</button>
                                 </div>
                                 <p class="mt-1.5 text-[11px] leading-relaxed text-gray-500">用便宜快的小模型即可：它只做「把自造短语换成本站词典里的真实 tag」这一件事，不需要写剧情。</p>
+                                <p class="mt-1 text-[11px] leading-relaxed text-gray-500">请求地址：<span class="font-semibold text-gray-600">{{ modelProviderName || '按模型自动匹配（未绑定地址）' }}</span></p>
                             </div>
                             <div>
                                 <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">MCP 端点（可选）</label>

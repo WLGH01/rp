@@ -1720,10 +1720,12 @@
             background: linear-gradient(#dbe4f0, #dbe4f0) center / 100% 3px no-repeat;
         }
 
+        /* 快捷面板的槽位指示器：行高按槽位数（--slot-count，当前 5 个）算，
+           容器 p-1（上下 0.5rem）+ gap-1.5（每行之间 0.375rem）。 */
         .chat-model-slots > .segmented-switch__indicator {
             inset-block-end: auto;
             width: calc(100% - 0.5rem);
-            height: calc((100% - 1.25rem) / 3);
+            height: calc((100% - 0.5rem - (var(--slot-count, 3) - 1) * 0.375rem) / var(--slot-count, 3));
             transform: translateY(calc(var(--slot-index, 0) * (100% + 0.375rem)));
         }
 
