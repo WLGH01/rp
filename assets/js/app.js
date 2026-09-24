@@ -10340,8 +10340,14 @@ let removedProviderConfigCleared = false;
         const enforceSpecialRules = () => {
             const imageGenToken = settings.imageGenKey.trim();
             // 未填生图地址时不生成任何远程生图链接，避免请求流向未知服务。
+            //
+            // 但「留空」对 NovelAI 官方 API 是**合法配置**：它的地址留空 = 回落官方默认
+            // 地址（见 naiOfficialBaseUrl），下面官方分支拼 URL 用的就是那个函数，压根不读
+            // baseUrl。所以这里判断的是「有没有任何可用的目标地址」，而不是「baseUrl 是否为空」——
+            // 否则官方 + 留空的用户一条系统资产都拿不到（正则 / 自动生图 / 生图Tag词典全丢）。
             const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
-            if (!baseUrl) {
+            const hasImageTarget = Boolean(baseUrl) || isNaiOfficialProvider.value;
+            if (!hasImageTarget) {
                 // 启动时的清理见 loadData；此处兜底处理运行期被写入的旧条目。
                 const stale = regexScripts.value.filter(script => (
                     systemRegexNames.includes(script.name) && embedsRemovedProvider(script.replacement)
@@ -10665,6 +10671,23 @@ let removedProviderConfigCleared = false;
             }
             saveData();
             fetchQuota();
+        });
+
+        // 启用 / 关闭「生图 Tag 查询」工具后，「自动生图」世界书里那句
+        // 「不确定某个概念的准确 tag 时先调用 `tool_tag`」也要跟着出现 / 消失。
+        // activeTools 不在上面那个 watch 的依赖里，所以这里单独盯它。
+        //
+        // 只认「主模型自己调用」（mode !== 'aux'）的那条，与 getEnabledActiveTools 的过滤口径一致：
+        // aux 模式由站内自己跑，按设计不进主上下文，也就不该出现在世界书里。
+        // 依赖取 [callName, mode] 的 JSON：activeTools 是 ref([]) 且 normalizeActiveTools 会整体
+        // 重写它，直接依赖数组本身会反复触发；序列化成稳定字符串后，只有真正影响世界书的那几个
+        // 字段变了才会重建（enabled 的变化同样会改变这份签名）。
+        watch(() => JSON.stringify(
+            (Array.isArray(activeTools.value) ? activeTools.value : [])
+                .filter(tool => tool?.enabled !== false && isTagActiveTool(tool) && !isAuxTagLookupTool(tool))
+                .map(tool => [tool.callName, tool.mode])
+        ), () => {
+            enforceSpecialRules();
         });
 
         // 改了「历史图缓存保留条数」立刻按新上限整理一次：

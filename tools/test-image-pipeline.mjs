@@ -1811,4 +1811,57 @@ assertTrue('自动生图开关联动词典开关',
 assertTrue('网关请求体里的 tag 先归一化（字面 \\n 不再原样转发给 nai2api）',
     /tag: imageUtils\.normalizePromptText\(backendTag\)/.test(appJs));
 
+// --- 24. 系统资产重建：官方 API「地址留空」与 Tag 工具开关 ---
+// 两个真实出现过的 bug：
+//   A) enforceSpecialRules 在拼 URL 之前用「baseUrl 为空」整体 return，而官方 API 的地址
+//      留空是**合法配置**（回落 https://image.novelai.net，见 naiOfficialBaseUrl）。
+//      结果：官方 + 留空的用户一条 NAI画图正则 / 自动生图 / 生图Tag词典都拿不到。
+//   B) 「自动生图」世界书里的 tag 工具说明只在 enforceSpecialRules 被调用时重算，
+//      而 activeTools 不在触发它的 watch 依赖里 → 开关工具后世界书纹丝不动。
+section('24) 系统资产重建：官方 API 留空地址、Tag 工具开关');
+
+// 24a. 守卫必须从「baseUrl 为空」改成「没有任何可用目标地址」
+// 只看 enforceSpecialRules 自己的函数体：app.js 别处（fetchQuota / ComfyUI / SD）也有
+// `if (!baseUrl)`，全文件级断言会误伤。
+const enforceSpecialRulesBody = (() => {
+    const start = appJs.indexOf('const enforceSpecialRules = () => {');
+    return start === -1 ? '' : appJs.slice(start, start + 1400);
+})();
+assertTrue('定位到 enforceSpecialRules 函数体', enforceSpecialRulesBody.includes('const imageGenRegexName'));
+assertTrue('守卫变量由 baseUrl 与「是否官方 provider」共同决定',
+    /const baseUrl = normalizeServiceBaseUrl\(settings\.imageGenBaseUrl\);[\s\S]{0,600}const hasImageTarget = Boolean\(baseUrl\) \|\| isNaiOfficialProvider\.value;/.test(enforceSpecialRulesBody));
+assertTrue('整体 return 的条件是 !hasImageTarget（官方+空地址不再被拦）',
+    /if \(!hasImageTarget\) \{/.test(enforceSpecialRulesBody));
+assertTrue('enforceSpecialRules 内不再有「baseUrl 为空就整体 return」的旧守卫',
+    !/if \(!baseUrl\) \{/.test(enforceSpecialRulesBody));
+// 24b. 安全语义：无可用目标时照旧只做「清理内嵌旧网关正则」然后返回，不生成任何远程链接
+assertTrue('无可用目标时仍走「清理内嵌旧网关正则 + return」的安全分支',
+    /if \(!hasImageTarget\) \{[\s\S]{0,500}embedsRemovedProvider\(script\.replacement\)[\s\S]{0,500}return;/.test(enforceSpecialRulesBody));
+assertTrue('该安全分支里不含任何 URL 拼装（不生成远程生图链接）',
+    !/if \(!hasImageTarget\) \{[\s\S]{0,500}data-image-request/.test(enforceSpecialRulesBody));
+// 24c. 官方分支拼 URL 用 naiOfficialBaseUrl()，其余三条仍只用 baseUrl（空地址时不会拼出坏 URL）
+assertTrue('官方分支用 naiOfficialBaseUrl() 拼 URL（本身不依赖 baseUrl）',
+    /isNaiOfficialProvider\.value\s*\n?\s*\? `\$\{naiOfficialBaseUrl\(\)\}\/ai\/generate-image\?tag=\$1&provider=novelai-official/.test(appJs));
+assertTrue('ComfyUI 分支用 baseUrl 拼 /view（空地址时不会被走到）',
+    appJs.includes('? `${baseUrl}/view?tag=$1&provider=comfyui'));
+assertTrue('SD 分支用 baseUrl 拼 /sdapi/v1/txt2img（空地址时不会被走到）',
+    appJs.includes('? `${baseUrl}/sdapi/v1/txt2img?tag=$1&provider=stable-diffusion'));
+assertTrue('网关分支用 baseUrl 拼 /generate（空地址时不会被走到）',
+    appJs.includes('`${baseUrl}/generate?tag=$1&token='));
+assertTrue('naiOfficialBaseUrl 在留空时回落官方默认地址',
+    /return configured \|\| \(window\.RPHubConfig\?\.uiOptions\?\.novelaiOfficialBaseUrl \|\| 'https:\/\/image\.novelai\.net'\)/.test(appJs));
+
+// 24d. 新增 watch：启用/关闭 tag 工具（含 callName 与 mode）后重建系统资产
+assertTrue('新增 activeTools watch：tag 工具变化时调用 enforceSpecialRules',
+    /watch\(\(\) => JSON\.stringify\([\s\S]{0,700}isTagActiveTool\(tool\)[\s\S]{0,300}enforceSpecialRules\(\);/.test(appJs));
+assertTrue('watch 依赖取 [callName, mode]（稳定可比较，避免整体重写触发循环）',
+    /\.map\(tool => \[tool\.callName, tool\.mode\]\)/.test(appJs));
+assertTrue('watch 过滤掉 aux 模式（与 getEnabledActiveTools 口径一致，aux 不进世界书）',
+    /isTagActiveTool\(tool\) && !isAuxTagLookupTool\(tool\)/.test(appJs));
+assertTrue('watch 也要求工具已启用（enabled !== false）',
+    /tool\?\.enabled !== false && isTagActiveTool\(tool\) && !isAuxTagLookupTool\(tool\)/.test(appJs));
+// 24e. 世界书构建处仍然读的是「已启用的 tag 工具名」
+assertTrue('世界书构建处的工具名取自 getEnabledActiveTools().find(isTagActiveTool)',
+    /tagLookupTool: getEnabledActiveTools\(\)\.find\(isTagActiveTool\)\?\.callName \|\| ''/.test(appJs));
+
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);
