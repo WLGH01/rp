@@ -10602,9 +10602,15 @@ let removedProviderConfigCleared = false;
             // 2. 自动生图世界书
             // 模型相关的硬约束（token 预算 / 多角色写法 / 画面文字）随**当前生图模型**走：
             // 网关用 imageModel，官方 API 用 naiOfficialModel，切模型就重建这一条（见下方 watch）。
+            //
+            // SD（Forge）这一支的「模型」其实是**架构档位**（sdUiPreset）：
+            // SDXL 与 Anima 的提示词语法、预算、用词策略完全不同（前者 CLIP 认标签、
+            // 后者 Qwen3+T5 懂自然语言），所以这里按档位分流到两套世界书。
             const autoImageGenWIName = '自动生图';
             const imageGenCount = Math.min(8, Math.max(2, Number(settings.imageGenCount) || 2));
-            const autoImageGenModel = isNaiOfficialProvider.value
+            const autoImageGenModel = isSdProvider.value
+                ? String(settings.sdUiPreset || '')
+                : isNaiOfficialProvider.value
                 ? String(settings.naiOfficialModel || '')
                 : String(settings.imageModel || '');
             const autoImageGenWIContent = {
@@ -10861,6 +10867,10 @@ let removedProviderConfigCleared = false;
             settings.sdCustomSizeEnabled,
             settings.sdCustomWidth,
             settings.sdCustomHeight,
+            // Forge 架构档位（SDXL ↔ Anima）：它是 SD 链路的「生图模型」，
+            // 「自动生图」世界书与「生图Tag词典」都按它分流（见 enforceSpecialRules），
+            // 不进这里的话切完档位世界书还是上一个架构的那份 —— 语法正好相反。
+            settings.sdUiPreset,
             // 「附加正面提示词」会并进网关 URL 的 artist 参数（见 imageArtistsWithPrefix），
             // 改它必须重建正则，否则老 URL 里还是旧前缀。
             settings.sdPromptPrefix

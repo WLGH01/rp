@@ -2058,12 +2058,26 @@ section('23) 生图 tag 词典、MCP Tag 查询工具、网关换行归一化');
 const lexiconV45 = builtinPrompts.buildImageTagLexicon({ model: 'nai-diffusion-4-5-full', provider: 'novelai' });
 const lexiconV5 = builtinPrompts.buildImageTagLexicon({ model: 'nai-diffusion-5-full', provider: 'novelai' });
 const lexiconSd = builtinPrompts.buildImageTagLexicon({ model: 'mock-model', provider: 'stable-diffusion' });
+const lexiconSdXl = builtinPrompts.buildImageTagLexicon({ model: 'xl', provider: 'stable-diffusion' });
+const lexiconSdAnima = builtinPrompts.buildImageTagLexicon({ model: 'anima', provider: 'stable-diffusion' });
+const lexiconComfy = builtinPrompts.buildImageTagLexicon({ model: 'mock-model', provider: 'comfyui' });
 assertTrue('词典按【分类】行渲染', lexiconV45.includes('【人数 · 主体】') && lexiconV45.includes('【NSFW · 状态与体位】'));
 assertTrue('词典用 NovelAI 的空格写法（不是下划线）',
     lexiconV45.includes('long hair') && !lexiconV45.includes('long_hair'));
 assertTrue('V5 专属 tag 只出现在 V5 那份里',
     lexiconV5.includes('ultra complexity') && !lexiconV45.includes('ultra complexity'));
-assertEqual('SD / ComfyUI 不注入 NAI 词典', lexiconSd, '');
+assertEqual('ComfyUI 不注入词典（提示词由用户工作流决定）', lexiconComfy, '');
+assertTrue('SD 链路拿到的是 SD 词典（多一节「质量 · 年代 · 安全级别」）',
+    lexiconSd.includes('<image_tag_lexicon>') && lexiconSd.includes('【质量 · 年代 · 安全级别】'));
+assertTrue('SD 词典里不能出现 NovelAI 专属的 rating:* 写法',
+    !lexiconSd.includes('rating:explicit') && !lexiconSd.includes('rating:general'));
+assertTrue('SD 词典里不能出现 NAI 专属的权重 / 互动锚点语法',
+    !lexiconSd.includes('1.3::tag::') && !lexiconSd.includes('source#动作'));
+assertTrue('Anima 词典写明画师要加 @ 前缀（官方模型卡要求）',
+    lexiconSdAnima.includes('@') && lexiconSdAnima.includes('画师标签必须加'));
+assertTrue('Anima 词典写明权重要比 SDXL 更高', lexiconSdAnima.includes('更高的权重'));
+assertTrue('SDXL 词典不提 @ 画师前缀（那是 Anima 的要求）',
+    !lexiconSdXl.includes('画师标签必须加'));
 assertTrue('词典带互动锚点与权重语法说明（用 - 行，校验脚本只解析【】行）',
     lexiconV45.includes('source#动作') && lexiconV45.includes('1.3::tag::'));
 assertTrue('词典规模够大（≥400 个 tag）', (lexiconV45.match(/,/g) || []).length > 400);
@@ -2072,8 +2086,12 @@ const normalizerV45 = builtinPrompts.buildImageTagNormalizePrompt({ model: 'nai-
 assertTrue('另配模型用的规范器与词典同源', normalizerV45.includes('<tag_normalizer>') && normalizerV45.includes('【NSFW'));
 assertTrue('规范器要求：只输出一行、保留 | 分栏、不得臆造设定',
     normalizerV45.includes('只输出一行') && normalizerV45.includes('分栏') && normalizerV45.includes('不得臆造'));
-assertEqual('SD / ComfyUI 不生成规范器提示词',
-    builtinPrompts.buildImageTagNormalizePrompt({ model: 'mock-model', provider: 'stable-diffusion' }), '');
+assertTrue('SD 不生成规范器提示词（规范器规则与 SD 语法相反，会改坏提示词）',
+    builtinPrompts.buildImageTagNormalizePrompt({ model: 'mock-model', provider: 'stable-diffusion' }) === '' &&
+    builtinPrompts.buildImageTagNormalizePrompt({ model: 'anima', provider: 'stable-diffusion' }) === '' &&
+    builtinPrompts.buildImageTagNormalizePrompt({ model: 'xl', provider: 'stable-diffusion' }) === '');
+assertEqual('ComfyUI 也不生成规范器提示词',
+    builtinPrompts.buildImageTagNormalizePrompt({ model: 'mock-model', provider: 'comfyui' }), '');
 
 const worldbookWithTool = builtinPrompts.buildAutoImageGenPrompt({
     count: 2, model: 'nai-diffusion-4-5-full', provider: 'novelai', tagLookupTool: 'tool_tag'
@@ -2171,5 +2189,107 @@ assertTrue('watch 也要求工具已启用（enabled !== false）',
 // 24e. 世界书构建处仍然读的是「已启用的 tag 工具名」
 assertTrue('世界书构建处的工具名取自 getEnabledActiveTools().find(isTagActiveTool)',
     /tagLookupTool: getEnabledActiveTools\(\)\.find\(isTagActiveTool\)\?\.callName \|\| ''/.test(appJs));
+
+// --- 25. SD（Forge）链路：按架构档位分流的生图世界书 ---
+// 用户要求：切到 SD 时，SDXL 与 Anima 各自要有**对应自己**的自动生图世界书，
+// 因为两者的提示词最佳实践不同（SDXL 走 CLIP 认标签；Anima 是 Qwen3+T5，混合模式最优）。
+// 这一节守四件事：
+//   a) SD 走的是**另一套**世界书，不再套 NovelAI 的语法（| 分栏 / :: 权重 / rating:*）；
+//   b) 两个架构各自的关键事实都写进去了（Anima ≥200 token、@ 画师、混合模式；SDXL ≥120 token、BREAK）；
+//   c) 与生图模型无关的格式契约（image###…###）两套**逐字节一致**（渲染正则靠它匹配）；
+//   d) NAI 链路完全不受影响（分流只在 provider === 'stable-diffusion' 时生效）。
+section('25) SD（Forge）链路：SDXL 与 Anima 各自的自动生图世界书');
+
+const sdWorldbookAnima = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'stable-diffusion', model: 'anima' });
+const sdWorldbookXl = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'stable-diffusion', model: 'xl' });
+const sdWorldbookOther = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'stable-diffusion', model: 'qwen' });
+const comfyWorldbook = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'comfyui', model: 'mock' });
+const naiWorldbook = builtinPrompts.buildAutoImageGenPrompt({ count: 3, provider: 'novelai', model: 'nai-diffusion-4-5-full' });
+
+// 25a. 分流生效：SD 拿到的是 SD 那套，且不再是 NAI 那套
+assertTrue('Anima 世界书写明自己的架构', sdWorldbookAnima.includes('<模型约束 · Anima'));
+assertTrue('SDXL 世界书写明自己的架构', sdWorldbookXl.includes('<模型约束 · SDXL'));
+assertTrue('未专门适配的 SD 档位（qwen）回落到通用 SD 约束',
+    sdWorldbookOther.includes('<模型约束 · Stable Diffusion（Forge）>'));
+assertTrue('SD 世界书不再出现 NovelAI 的模型约束段',
+    !sdWorldbookAnima.includes('<模型约束 · NovelAI') && !sdWorldbookXl.includes('<模型约束 · NovelAI'));
+assertTrue('SD 世界书不再教 | 分栏（NAI 专属语法）',
+    !sdWorldbookAnima.includes('人数与场景 | 角色1') && sdWorldbookAnima.includes('一律不要写'));
+assertTrue('SD 世界书不再教 :: 权重（NAI 专属语法）',
+    !sdWorldbookAnima.includes('1.3::tag::（常用') && sdWorldbookAnima.includes('(tag:1.2)'));
+assertTrue('SD 世界书明确禁止写 NovelAI 的 rating:* 分级',
+    sdWorldbookAnima.includes('不是 `rating:*`'));
+assertTrue('ComfyUI 不套 SD 世界书（提示词由用户工作流决定）',
+    comfyWorldbook.includes('<模型约束 · NovelAI') || !comfyWorldbook.includes('<模型约束 · Anima'));
+
+// 25b. 两个架构各自的「最佳实践」事实必须写进去
+//
+// 下限只认「信息量下限」那一节里的**那一行**：模型约束段里也会提到预算，
+// 用 includes('200') 这种宽断言会连解释性文字一起命中，破坏之后照样通过。
+const floorLineOf = (text) => (text.split('\n').find(line => line.startsWith('- 每张图的提示词合计')) || '');
+assertTrue('Anima：信息量下限写的是 ≥200 token（用户要求）',
+    floorLineOf(sdWorldbookAnima).includes('不少于 200 个 token'));
+assertTrue('Anima：下限行同时说明 512 是保底上下文', floorLineOf(sdWorldbookAnima).includes('512'));
+assertTrue('SDXL：信息量下限写的是 ≥100 个 tag / 120 token',
+    floorLineOf(sdWorldbookXl).includes('不少于 100 个 tag') && floorLineOf(sdWorldbookXl).includes('120'));
+assertTrue('两个架构的下限确实不同（不是同一份模板）',
+    floorLineOf(sdWorldbookAnima) !== floorLineOf(sdWorldbookXl));
+assertTrue('Anima：写明 512 是保底上下文而非截断（本机 Forge 实测 max(512, token_count)）',
+    sdWorldbookAnima.includes('512') && sdWorldbookAnima.includes('不是截断'));
+assertTrue('Anima：写明混合模式（标签控结构 + 自然语言描述氛围）',
+    sdWorldbookAnima.includes('混合模式') && sdWorldbookAnima.includes('自然语言'));
+assertTrue('Anima：写明三层结构（硬锚点 / 视觉短语 / 自然语言叙事）',
+    sdWorldbookAnima.includes('硬锚点') && sdWorldbookAnima.includes('视觉短语') && sdWorldbookAnima.includes('自然语言叙事'));
+assertTrue('Anima：写明画师标签要加 @ 前缀', sdWorldbookAnima.includes('@big chungus'));
+assertTrue('Anima：写明纯自然语言至少 2 句', sdWorldbookAnima.includes('至少'));
+assertTrue('SDXL：写明 CLIP 认标签、主结构用标签',
+    sdWorldbookXl.includes('CLIP') && sdWorldbookXl.includes('标签'));
+assertTrue('SDXL：写明 75 token 分块（本机 Forge classic_engine chunk_length=75）',
+    sdWorldbookXl.includes('75'));
+assertTrue('SDXL：写明 BREAK 分段语法', sdWorldbookXl.includes('BREAK'));
+assertTrue('SDXL：写明角色名括号要转义（否则被当权重语法）',
+    sdWorldbookXl.includes('转义') && sdWorldbookXl.includes('\\('));
+assertTrue('两者都写明多人画面没有角色分栏、要靠标签相邻防串味',
+    sdWorldbookAnima.includes('没有角色分栏') && sdWorldbookXl.includes('没有角色分栏'));
+
+// 25c. 与模型无关的格式契约必须两套一致（渲染正则 image###…### 依赖它）
+//
+// ⚠️ 不能写成「SD 那段 === NAI 那段」——两套都从同一个 AUTO_IMAGE_GEN_MECHANICS 拼出来，
+// 那样比的是常量自己，改坏了它照样通过（反向验证实测过）。这里对着**冻结的字面量**断言。
+const FORMAT_CONTRACT = [
+    '<auto_image_gen>',
+    '用户已开启自动生图。每次回复都必须将3张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。',
+    '围绕当前剧情中的具体场景和人物生成3张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。',
+    '每个 image###…### 里只放**一行**英文 tag：不得换行、不得写 `\\n` 这类转义符号、不得写中文或 emoji、不得写 markdown 或解释。',
+    '强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。',
+    '',
+    '<生图提示词硬规则>'
+].join('\n');
+const mechanicsOf = (text) => text.slice(0, text.indexOf('\n\n<生图提示词硬规则>') + 2 + '<生图提示词硬规则>'.length);
+assertEqual('SD(Anima) 的机械约定段与冻结契约逐字节一致', mechanicsOf(sdWorldbookAnima), FORMAT_CONTRACT);
+assertEqual('SD(SDXL) 的机械约定段与冻结契约逐字节一致', mechanicsOf(sdWorldbookXl), FORMAT_CONTRACT);
+assertEqual('NAI 的机械约定段与冻结契约逐字节一致', mechanicsOf(naiWorldbook), FORMAT_CONTRACT);
+assertTrue('SD 世界书仍要求 image###…### 格式与分散穿插',
+    sdWorldbookAnima.includes('image###英文Tag###') && sdWorldbookAnima.includes('分散插入'));
+assertTrue('SD 世界书仍禁止换行与字面 \\n', sdWorldbookAnima.includes('不得换行'));
+assertTrue('SD 世界书仍带 Tag 查询工具说明', builtinPrompts
+    .buildAutoImageGenPrompt({ count: 2, provider: 'stable-diffusion', model: 'anima', tagLookupTool: 'tool_tag' })
+    .includes('tool_tag'));
+
+// 25d. 世界书不能把上下文撑爆（SD 那两套明显比 NAI 那份短）
+assertTrue('SD 世界书长度合理（<4500 字）',
+    sdWorldbookAnima.length < 4500 && sdWorldbookXl.length < 4500);
+assertTrue('NAI 世界书不受影响（仍含自己的模型约束段）',
+    naiWorldbook.includes('<模型约束 · NovelAI V4.5>') && !naiWorldbook.includes('<模型约束 · Anima'));
+
+// 25e. 接线：SD 下世界书按 sdUiPreset（架构档位）分流，且切档位会重建
+assertTrue('SD 下「生图模型」取的是 sdUiPreset（架构档位）',
+    /const autoImageGenModel = isSdProvider\.value[\s\S]{0,160}settings\.sdUiPreset/.test(appJs));
+assertTrue('sdUiPreset 进入重建世界书的 watch 依赖',
+    /settings\.sdUiPreset,[\s\S]{0,900}enforceSpecialRules\(\)/.test(appJs));
+assertTrue('NAI 两条链路仍各取自己的模型（官方 naiOfficialModel / 网关 imageModel）',
+    /isNaiOfficialProvider\.value[\s\S]{0,120}settings\.naiOfficialModel[\s\S]{0,120}settings\.imageModel/.test(appJs));
+assertTrue('词典也按同一档位分流（与自动生图世界书同源）',
+    /const tagLexiconContent = BUILTIN_PROMPTS\.buildImageTagLexicon\(\{[\s\S]{0,160}model: autoImageGenModel/.test(appJs));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

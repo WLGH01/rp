@@ -617,6 +617,37 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
         'visual novel chibi', 'meta:novel era', 'meta:golden era'
     ];
 
+    // ===== SD（Forge）链路共用的「质量 · 年代 · 安全级别」一节 =====
+    //
+    // SDXL（Illustrious / NoobAI 等）与 Anima 都把这一族当**提示词开头的元信息**用：
+    //   Anima 官方模型卡的 tag 顺序是 [quality/meta/year/safety] [人数] [角色] [作品] [画师] [一般 tag]，
+    //   并明确给出 `year 2025, newest, normal quality, score_5, highres, safe` 这种开头；
+    //   NoobAI-XL 官方模型卡的推荐前缀是 `masterpiece, best quality, newest, absurdres, highres, safe`，
+    //   并给出 date tags 对照表（old / early / mid / recent / newest）。
+    //
+    // ⚠️ 这一节里**不能出现已在通用词典里的 tag**（校验脚本会判重复）。例如 `nsfw`
+    // 已经在【NSFW · 状态与体位】里，这里就不再列；`official art` 也已在【画风 · 质感】里。
+    const IMAGE_TAG_LEXICON_QUALITY_SECTIONS = [
+        ['质量 · 年代 · 安全级别', [
+            'masterpiece', 'best quality', 'good quality', 'normal quality', 'low quality', 'worst quality',
+            'year 2025', 'year 2024', 'newest', 'recent', 'mid', 'early', 'old',
+            'highres', 'absurdres', 'anime screenshot',
+            'safe', 'sensitive', 'explicit'
+        ]]
+    ];
+
+    // 上面那一节里 Danbooru 自动补全语料**查不到**的元 tag。
+    // 语料只收「画什么」（内容 tag），基本不收「怎么评」（质量 / 年代 / 分级），
+    // 所以这些必须走白名单。逐条实测过：`highres` / `absurdres` / `anime screenshot` / `old`
+    // 语料里**有**，因此**不列在这里**（列了就会被校验脚本判成「重复登记」）。
+    // 每一条都在真实来源里核对过（Anima 官方模型卡 / NoobAI-XL 官方模型卡），
+    // **不要往里塞编造的词** —— 白名单一松，这条防线就废了。
+    const IMAGE_TAG_LEXICON_META_ONLY = [
+        'masterpiece', 'best quality', 'good quality', 'normal quality', 'low quality', 'worst quality',
+        'year 2025', 'year 2024', 'newest', 'recent', 'mid', 'early',
+        'safe', 'sensitive', 'explicit'
+    ];
+
     // 【分类】tag, tag, … 一行一类。校验脚本只解析【】行，所以解释性文字一律用 `- ` 开头。
     const renderImageTagLexiconSections = (list) => list
         .map(([title, tags]) => `【${title}】${tags.join(', ')}`)
@@ -625,6 +656,8 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
     // 渲染成世界书正文。非 NAI 链路（SD / ComfyUI）返回空串，不改它们的行为。
     const buildImageTagLexicon = ({ model = '', provider = '' } = {}) => {
         const name = String(model || '');
+        // SD 链路有自己的一份词典（多一节「质量 · 年代 · 安全级别」，且不含 NAI 专属语法）。
+        if (isSdImageProvider(provider)) return buildSdTagLexicon({ arch: name });
         const isNai = provider === 'novelai' || provider === 'novelai-official'
             || (!provider && name.startsWith('nai-diffusion'));
         if (!isNai) return '';
@@ -656,6 +689,10 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
     //
     // 与主模型拿到的世界书同源：同一份词典、同一套硬规则，只是这里只干一件事，所以更聚焦。
     const buildImageTagNormalizePrompt = ({ model = '', provider = '' } = {}) => {
+        // 规范化器**只服务 NAI 链路**：它的规则（`|` 分栏、T5 预算、画师串在前）
+        // 与 SD 的语法正好相反，套到 SD 上会把提示词改坏。
+        // SD 链路因此继续返回空串 → resolveBackendImageTag 直接原样出图（不多花一次请求）。
+        if (isSdImageProvider(provider)) return '';
         const lexicon = buildImageTagLexicon({ model, provider });
         if (!lexicon) return '';
         const isV5 = String(model || '').startsWith('nai-diffusion-5');
@@ -678,6 +715,181 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             lexicon.replace(/^<image_tag_lexicon>\s*/, '').replace(/\s*<\/image_tag_lexicon>$/, ''),
             '</tag_normalizer>'
         ].join('\n');
+    };
+
+    // ===== SD（Forge）链路：按架构档位分流的生图世界书 =====
+    //
+    // 为什么必须分流：本站原来的「自动生图」世界书是**为 NovelAI 写的**，里面全是 NAI 专属语法 ——
+    //   `1.3::tag::` 权重、`|` 角色分栏、`source#hug` 互动锚点、`rating:explicit` 分级。
+    // 这些在 SD 里**一个都不生效**：`|` 与 `::` 只是普通字符（白占 token），`rating:*` 不是 SD 的词，
+    // 而真正决定出图质量的差别（CLIP 认标签 / Anima 懂自然语言）反倒一句没写。
+    //
+    // 两套架构的底层逻辑不同（均据一手来源核实）：
+    //   SDXL 系（Illustrious / NoobAI 等）：文本编码器是 **CLIP**，在 Danbooru/e621 标签上训练，
+    //     对**标签**的亲和力最高；CLIP 每 75 个 token 分一块（不是截断），长提示词要 `BREAK` 分段。
+    //     来源：NoobAI-XL 官方模型卡（推荐前缀 `masterpiece, best quality, newest, absurdres, highres, safe`、
+    //     date tags 对照表、`<人数>, <角色>, <作品>, <画师>, <一般标签>` 的 caption 顺序）、
+    //     Illustrious XL 官方模型卡（「NLP + tag-based prompting」）；分块与 `BREAK` 见本机 Forge
+    //     `backend/text_processing/classic_engine.py`（`chunk_length=75`）与 `parsing.py`（`re_break`）。
+    //   Anima：文本编码器是 **Qwen3-0.6B + T5**（接近大语言模型），官方模型卡明确「在 Danbooru 标签、
+    //     自然语言描述以及两者的组合上训练」，并给出混合用法与自然语言要点（纯自然语言至少写 2 句）。
+    //     来源：huggingface.co/circlestone-labs/Anima 模型卡（tag 顺序 / 质量词 / `@` 画师前缀 /
+    //     权重需更高 / 推荐正负前缀 / dataset tag）。
+    //
+    // 预算这一条也按架构分开（用户要求「最少 200 token」，SDXL 按 CLIP 的真实特性降到 120）：
+    //   Anima：Forge 为其保留的最小上下文是 512 token，但**不是硬截断** —— 本机 Forge 的
+    //     `backend/diffusion_engine/anima.py` 里 `get_prompt_lengths_on_ui` 返回 `max(512, token_count)`，
+    //     且 `backend/text_processing/anima_engine.py` 的 tokenize 用的是 `truncation=False`。
+    //     所以世界书写的是「512 是保底上下文、要求 ≥200 token」，而不是「超过 512 会被截断」。
+    //   SDXL：CLIP 按 75 一段累加，写长了会稀释单个标签的权重，因此下限取 120 token / 100 个 tag。
+
+    // 本站专门写过世界书的 SD 架构档位（其余档位走通用那一份）。
+    const SD_PROMPT_ARCHES = Object.freeze(['xl', 'anima']);
+    const normalizeSdPromptArch = (arch) => {
+        const key = String(arch || '').trim().toLowerCase();
+        return key || '';
+    };
+    // SD / Forge 链路判定：只有 stable-diffusion 这一支走 SD 世界书。
+    // ComfyUI 的提示词由用户自己的工作流决定，不在这里分流。
+    const isSdImageProvider = (provider) => String(provider || '') === 'stable-diffusion';
+
+    // SD 链路的 Tag 词典。与 NAI 那份**同源**（同一批真实 Danbooru tag），
+    // 但开头多一节「质量 · 年代 · 安全级别」（SDXL/Anima 都把这一族当提示词开头的元信息用），
+    // 且**不含任何 NAI 专属语法行**（`1.3::tag::` / `source#动作` / 下划线写法都不出现）。
+    const buildSdTagLexicon = ({ arch = '' } = {}) => {
+        const key = normalizeSdPromptArch(arch);
+        // 通用词典里混着 NovelAI 专属写法：`rating:explicit` 这一族**SD 完全不认**
+        // （SD 的安全级别是 safe / sensitive / nsfw / explicit 四个独立词）。
+        // 直接原样渲染会让 AI 抄到一个无效 tag，所以这里按前缀剔除。
+        // 注意只剔 `rating:*`：`nsfw` 虽然是 NAI 白名单里的词，但在 SDXL / Anima 里同样合法。
+        const dropNaiOnly = (list) => list
+            .map(([title, tags]) => [title, tags.filter(tag => !/^rating:/i.test(tag))])
+            .filter(([, tags]) => tags.length);
+        const render = (list) => renderImageTagLexiconSections(dropNaiOnly(list));
+        const lines = [
+            '<image_tag_lexicon>',
+            '下面每一类都是**绘图模型真正认得的 Danbooru 常用 tag**（一律用空格写法：long hair，不要下划线 long_hair）。'
+            + '写提示词时逐类到这里挑；挑不到就换一个同类里意思最接近的，**不要自己造词**。',
+            render(IMAGE_TAG_LEXICON_QUALITY_SECTIONS),
+            render(IMAGE_TAG_LEXICON_SECTIONS)
+        ];
+        if (key === 'anima') {
+            lines.push('- 画师标签必须加 `@` 前缀（如 `@big chungus`）——官方模型卡明说：不加 `@` 效果会非常弱。');
+        }
+        lines.push('- 权重用括号语法 `(tag:1.2)`；需要让后面的内容重新起一段时写 `BREAK`。'
+            + (key === 'anima' ? 'Anima 要**比 SDXL 更高的权重**才明显（例：`(chibi:2)`）。' : ''));
+        lines.push('- 安全级别写 `safe` / `sensitive` / `nsfw` / `explicit`；**不要写 NovelAI 的 `rating:*`**（SD 不认这个词）。');
+        lines.push('</image_tag_lexicon>');
+        return lines.join('\n');
+    };
+
+    // SD 链路的「模型硬约束」段（与 NAI 的 buildImageModelPromptRules 并列，互不干扰）。
+    const buildSdImageModelPromptRules = ({ arch = '' } = {}) => {
+        const key = normalizeSdPromptArch(arch);
+        if (key === 'anima') {
+            return [
+                '<模型约束 · Anima（Forge 架构档位 anima）>',
+                '- 文本编码器是 Qwen3-0.6B + T5（接近大语言模型），**天生更懂自然语言**：官方模型卡明确它在「标签、自然语言、以及两者的组合」上训练。最优解是**混合模式** —— 用标签控制结构与精度，用自然语言描述氛围与构图。',
+                '- 三层结构：① 硬锚点（真实 Danbooru 标签：人数、角色名、作品名、发色瞳色、服装、姿势）② 视觉短语（cherry blossom blizzard 这类短词组）③ 自然语言叙事（完整英文句子写空间关系、互动动作、光影与构图取景）。',
+                '- 预算：Forge 为 Anima 保留的**最小上下文是 512 token**（写超了不是截断，上下文会跟着变长）；数量下限见上方「信息量下限」一节，纯自然语言至少写满 2 句，太短会出意外结果，也不要为凑数堆词。',
+                '- 标签顺序：[质量/元信息/年代/安全级别] → [人数] → [角色] → [作品] → [画师] → [一般标签]；同一段内的顺序随意。',
+                '- 画师标签必须加 `@` 前缀（如 `@big chungus`）——官方明说不加 `@` 效果会非常弱。本站画师串由系统自动拼在最前面，你只写剧情需要的画面标签。',
+                '- 权重用 `(tag:2)` 这类括号语法，**需要比 SDXL 更高的权重**才明显；不要用 NovelAI 的 `1.3::tag::`（在 SD 里只是普通字符）。',
+                '- 安全级别用 `safe` / `sensitive` / `nsfw` / `explicit`（不是 `rating:*`）；质量词用 `masterpiece, best quality` 或 `score_7` 这一族（score 系列是全小写加下划线的唯一例外；Aesthetic 版官方建议不要用 score 词）。',
+                '- 训练时做过随机 tag dropout：不必把每个相关标签都写满，宁可把关键信息写清楚。',
+                '- 多人画面**没有角色分栏**：不要写 `|`。用 `2girls` / `1boy` 这类人数标签，并且**每个角色都要写出外观**（只写角色名模型会串味）。'
+            ].join('\n');
+        }
+        if (key === 'xl') {
+            return [
+                '<模型约束 · SDXL（Forge 架构档位 xl）>',
+                '- 文本编码器是 CLIP，在 Danbooru / e621 标签上训练，对**标签**的亲和力最高：主结构一律用标签，不要写成段英文。',
+                '- 分块：CLIP 每 75 个 token 一段，超出部分会**另起一段**（不是截断），所以最关键的标签要写在最前面；数量下限见上方「信息量下限」一节。',
+                '- 长提示词想让后面的内容重新起一段时写 `BREAK`（本站归一化会保留它）。',
+                '- 权重用括号语法 `(tag:1.2)` 加权、`(tag:0.8)` 减权；**不要用 NovelAI 的 `1.3::tag::`**（SD 里只是普通字符）。不要全篇加权。',
+                '- 标签顺序：人数 → 角色名（同人角色）→ 作品 → 画师 → 一般标签；NoobAI 系的推荐前缀是 `masterpiece, best quality, newest, absurdres, highres, safe` 这一类，但质量词与画师串由本站参数控制，不要自己重复堆。',
+                '- 角色名里的括号必须转义成 `\\(` `\\)`（如 `hatsune miku \\(vocaloid\\)`），否则会被当成权重语法。',
+                '- 多人画面**没有角色分栏**：不要写 `|`。用 `2girls` / `1boy` 这类人数标签，并把**同一个角色的外观标签连在一起**写（先写 A 的头发/瞳色/服装，再写 B 的），靠标签相邻防止串味。',
+                '- 安全级别用 `safe` / `sensitive` / `nsfw` / `explicit`（不是 `rating:*`）。成人向要显式写身体与状态标签（nude / nipples / spread legs 等），不要用含蓄说法。'
+            ].join('\n');
+        }
+        return [
+            '<模型约束 · Stable Diffusion（Forge）>',
+            '- 提示词用英文：主结构用 Danbooru 标签，可以用自然语言补充氛围与构图，两者可以混写。',
+            '- 权重用括号语法 `(tag:1.2)`；长提示词想让后面的内容重新起一段时写 `BREAK`。**不要用 NovelAI 的 `1.3::tag::`**（SD 里只是普通字符）。',
+            '- 角色名里的括号必须转义成 `\\(` `\\)`，否则会被当成权重语法。',
+            '- 不要写 `|` 分栏（那是 NovelAI 的语法）。多人画面用 `2girls` / `1boy` 这类人数标签，并把每个角色的外观标签连在一起写。',
+            '- 安全级别用 `safe` / `sensitive` / `nsfw` / `explicit`（不是 `rating:*`）。'
+        ].join('\n');
+    };
+
+    // 「自动生图」世界书里**与生图模型无关**的那段机械约定（输出格式 + 穿插顺序）。
+    //
+    // 抽出来的唯一目的是让 SD 链路复用同一套契约：AI 侧只认一种写法
+    // （`image###…###`），换架构时**格式绝不能变**，否则渲染正则会匹配不上。
+    // 注意：这里**必须与 NAI 那条逐字节一致**（含开头的 `<auto_image_gen>\n`），
+    // 因此两边都写成 `${AUTO_IMAGE_GEN_MECHANICS(n)}\n\n<生图提示词硬规则>`。
+    const AUTO_IMAGE_GEN_MECHANICS = (imageGenCount) => `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
+围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。
+每个 image###…### 里只放**一行**英文 tag：不得换行、不得写 \`\\n\` 这类转义符号、不得写中文或 emoji、不得写 markdown 或解释。
+强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。`;
+
+    // SD 链路的「自动生图」世界书正文。
+    //
+    // 与 NAI 那条**共用同一套输出格式契约**（image###…###、分散穿插、一行不换行），
+    // 差别在硬规则：NAI 那条教的是 `|` 分栏与 `::` 权重，这条教的是 SD 真实语法。
+    const buildSdAutoImageGenPrompt = ({ count: imageGenCount, arch = '', tagLookupTool = '' } = {}) => {
+        const key = normalizeSdPromptArch(arch);
+        const archRules = buildSdImageModelPromptRules({ arch: key });
+        // 信息量下限按架构给（Anima 200 token；SDXL / 其余 SD 按 CLIP 的真实特性）。
+        const floorLine = key === 'anima'
+            ? '- 每张图的提示词合计**不少于 200 个 token**（约 120～200 个标签；纯自然语言至少 2 句）；Forge 给 Anima 的保底上下文是 512 token，够用就好，不要为凑数堆词。'
+            : '- 每张图的提示词合计**不少于 100 个 tag（约 120 个 token 以上）**；CLIP 每 75 个 token 分一段，写长了会稀释单个标签的权重，宁可精炼也不要灌水。';
+        return `${AUTO_IMAGE_GEN_MECHANICS(imageGenCount)}
+
+<生图提示词硬规则>
+# 一、信息量下限（达不到就是糊图，必须重写到达标再输出）
+${floorLine}
+- 画面里**看得见的**一项都不许省：① 有几个人、分别是谁 ② 每个人的固定外貌 ③ 每个人此刻穿什么、脱到哪一步 ④ 姿势与手部动作 ⑤ 表情与视线 ⑥ 人物之间/人物与物品的交互 ⑦ 镜头 ⑧ 地点与背景结构 ⑨ 时间、天气、光线 ⑩ 剧情特有状态（伤、汗、湿、凌乱、道具位置）。
+
+# 二、多人画面：没有角色分栏，禁止写 |
+- **一律不要写 \`|\`**：SD 链路不解析它，写进去只是一个普通字符，白白占额度还会干扰构图。
+- 用人数 tag（1girl / 2girls / 1boy / 2boys / multiple girls）说明人数。
+- 每个角色都要写出**可辨识的外观**（发色发型、瞳色、体型、此刻的服装），并把同一个角色的标签**连在一起**写；只写角色名或只写人数，模型会把人物特征混在一起。
+- 角色的先后顺序 = 画面里的位置顺序（先左到右、再上到下），要与剧情里的站位一致。
+- 互动写成画面里看得见的动作标签（hug / holding hands / hand on another's shoulder / carrying）；谁对谁做了什么，Anima 用一句自然语言补清楚，SDXL 靠标签相邻表达。
+- 单人画面或空镜（风景 / 静物）不必强调人数。
+
+# 三、用词：优先抄《生图Tag词典》里的真实 tag
+- 每张图的标签尽量来自随本条一起注入的 <image_tag_lexicon>；词典里没有的，换一个**词典里有的、意思最接近**的 tag。
+- 不要写下划线（写 long hair，不写 long_hair）；不要写画师名（画师串由本站自动拼在最前面）。
+- 质量词（masterpiece / best quality 之类）由本站参数控制，除非用户明确要求，不要自己重复堆。
+- 同义词只留一个：写了 holding hands 就不要再写 hand in hand。
+
+# 四、权重与排除（SD / Forge 语法）
+- 加权：\`(tag:1.2)\`；减权：\`(tag:0.8)\`。**不要用 NovelAI 的 \`1.3::tag::\`**。
+- 需要让后面的内容重新起一段时写 \`BREAK\`（长提示词尤其有用）。
+- 容易被顺带画出来的东西用反向标签明确排除：no bra、no panties、no text；其余交给本站的负面提示词。
+
+# 五、输出前自检（逐条过，删掉互斥项）
+- 取景只留一个：close-up / upper body / lower body / full body / cowboy shot。
+- 机位方向只留一个：from above / from below / from behind / from side / facing viewer（人物回头时可以再加 looking back）。
+- 同一角色不要同时 sitting 与 standing、不要同时 nude 与 dressed。
+- 单人画面里不要出现第二人的部位 tag（如 another's hand）。
+- 提示词里**没有 \`|\`、没有 \`::\`、没有中文、没有换行、没有 markdown**。
+- 只写画面里**看得见**的东西：不要写内心、回忆、幻想、声音、气味、比喻、台词原文和下一步计划。
+</生图提示词硬规则>
+
+注意：如为 nsfw 场景，必须显式写 explicit / nsfw 与身体状态标签（nude、nipples、spread legs、cum 之类），不要用含蓄说法；同人/已有作品角色的官方角色名放在角色标签最前面。
+${tagLookupTool ? `\n不确定某个概念的准确 tag 时，先调用 \`${tagLookupTool}\` 工具查它的真实拼写与别称，拿到结果再写提示词；查不到就用词典里最接近的 tag，**不要编**。\n` : ''}
+${archRules}
+### 提示词生成指导
+先结合当前正文还原画面，再逐项检查人物数量与身份、固定外貌、当下服装、姿势、动作细节、表情与视线、人物/物品/环境交互、镜头构图、地点背景、时间光线及剧情状态；即使画面简单，也不得省略决定人物形象、动作、构图和场景的必要信息。
+镜头必须写明观察方向、取景范围与视觉焦点【如：from below, lower body, between legs；from above, upper body, looking at viewer】，并写明地点【如：dining room, gym, bedroom, indoors, home, beach】、时间【morning, noon, night】及对应光线。
+**稳定身份特征必须保持一致**；只根据场景、构图和实际可见范围临时移除不可见或冲突的 tag，不得改动角色本身的设定。剧情未明确换地点或推进时间时，重复相同的地点、时段、天气、光线与背景结构等核心环境 tag。
+
+特别提示：出现 user 或主角参与时，禁止出现主角的脸部和头部；必须使用第一视角（POV）相关提示词。禁止出现用户/主角名字（包括中文、英文、拼音和 {{user}}）；同人角色本人的官方角色名仍按上方规则放在最前面。
+</auto_image_gen>`;
     };
 
     // ===== 按「当前生图模型」给的硬约束（第 82 条）=====
@@ -747,10 +959,13 @@ year 2025, textless version, {{petite,loli}}, Petite figure, no text, The image 
             ? options
             : { count: options };
         const modelRules = buildImageModelPromptRules({ model, provider });
-        return `<auto_image_gen>\n用户已开启自动生图。每次回复都必须将${imageGenCount}张图片作为正文插图，按剧情先后分散插入各自对应段落之后，禁止连续输出多个图片或集中放在正文开头、结尾及同一位置。格式为：image###英文Tag###，不得只输出文字正文。
-围绕当前剧情中的具体场景和人物生成${imageGenCount}张画面，每张图选择明确的剧情瞬间、视觉焦点和镜头。
-每个 image###…### 里只放**一行**英文 tag：不得换行、不得写 \`\\n\` 这类转义符号、不得写中文或 emoji、不得写 markdown 或解释。
-强制按“对应正文段落 → 该段图片 → 后续正文段落”的顺序穿插。第一张图片前、任意两张图片之间及最后一张图片后都必须有非空正文；严禁相邻输出图片、写完正文后再统一补图，或让图片成为整次回复的结尾。输出前必须检查并重排不符合此顺序的图片。
+        // SD 链路（provider: 'stable-diffusion'）走**另一套按架构分流**的世界书：
+        // 它的语法与 NAI 完全不同（`|` 分栏 / `::` 权重在 SD 里都不生效）。
+        // 判定放在最前面，避免 NAI 那套规则被套到 SD 上。
+        if (isSdImageProvider(provider)) {
+            return buildSdAutoImageGenPrompt({ count: imageGenCount, arch: model, tagLookupTool });
+        }
+        return `${AUTO_IMAGE_GEN_MECHANICS(imageGenCount)}
 
 <生图提示词硬规则>
 # 一、信息量下限（达不到就是糊图，必须重写到达标再输出）
@@ -958,6 +1173,10 @@ image###英文Tag###
             sections: IMAGE_TAG_LEXICON_SECTIONS,
             v5Sections: IMAGE_TAG_LEXICON_V5_SECTIONS,
             naiOnlyTags: IMAGE_TAG_LEXICON_NAI_ONLY,
+            // SD 链路专用的「质量 · 年代 · 安全级别」一节与它自己的元信息白名单。
+            // 与 naiOnlyTags **分开**：混成一个集合就查不出「SD 词典里混进 NAI 专属词」。
+            qualitySections: IMAGE_TAG_LEXICON_QUALITY_SECTIONS,
+            metaOnlyTags: IMAGE_TAG_LEXICON_META_ONLY,
             render: renderImageTagLexiconSections
         })
     });
