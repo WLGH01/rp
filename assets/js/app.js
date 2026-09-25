@@ -224,6 +224,7 @@ const app = createApp({
             sdSizeLimits: sdSizeLimitConfig,
             sdSamplers,
             sdSchedulers,
+            sdUiPresets: sdUiPresetFallbackOptions,
             comfyRoles,
             popularModelFamilies,
             presetRoleDisplayLabels,
@@ -714,6 +715,16 @@ const app = createApp({
             // VAE：留空 = 不使用（即不下发 sd_vae，沿用模型自带的 VAE）。
             // 有的底模已内置 VAE、有的必须外挂，所以默认不使用，由用户按需选。
             sdVae: '',
+            // Forge 专属：UI Preset = 架构档位（SD1.5 / SDXL / Anima / Qwen-Image…）。
+            // 留空 = 不干预，沿用服务端当前档位。选它才能让 Anima 这类架构真正跑起来
+            // （只换底模不够：Anima 还要 VAE + text_encoder）。
+            sdUiPreset: '',
+            // text_encoder 多选：Anima / Qwen-Image 必需（Forge 该下拉本身就是 multiselect）。
+            // 以前这个列表被代码主动剔除，界面上根本选不到。
+            sdTextEncoders: [],
+            // Shift / Distilled CFG Scale：Forge 同一个滑杆，语义按架构变。
+            // 留空 = 不干预（不让本站改写服务端这个值）。
+            sdPresetExtra: '',
             sdSteps: 28,
             sdCfgScale: 6,
             sdSampler: 'DPM++ 2M SDE Karras',
@@ -2436,6 +2447,19 @@ let removedProviderConfigCleared = false;
                 }
                 // VAE 同理：老存档没有 sdVae，收敛成空串 = 不使用 VAE。
                 settings.sdVae = String(settings.sdVae || '').trim();
+                // Forge 专属三项：老存档没有这些键，收敛成「不干预」。
+                // UI Preset：空串 = 不切档位（沿用服务端当前架构）。
+                settings.sdUiPreset = String(settings.sdUiPreset || '').trim();
+                // Text Encoder：必须是字符串数组，坏值（对象/数字）一律丢掉。
+                settings.sdTextEncoders = (Array.isArray(settings.sdTextEncoders) ? settings.sdTextEncoders : [])
+                    .map(item => String(item || '').trim())
+                    .filter(Boolean);
+                // Shift / Distilled CFG：留空 = 不干预；有值则夹进合法区间。
+                const presetExtraLimits = uiOptions.sdPresetExtraLimits || { min: 0, max: 24 };
+                settings.sdPresetExtra = settings.sdPresetExtra === '' || settings.sdPresetExtra === null
+                    || settings.sdPresetExtra === undefined
+                    ? ''
+                    : String(Math.max(presetExtraLimits.min, Math.min(presetExtraLimits.max, Number(settings.sdPresetExtra) || 0)));
                 if (!(sdSizePresets || []).some(item => item.value === settings.sdSizePreset)) {
                     settings.sdSizePreset = 'portrait-2-3';
                 }
@@ -3799,26 +3823,32 @@ let removedProviderConfigCleared = false;
             return payload;
         };
 
-        // 拉取 VAE 列表。两个服务端的端点与取值格式都不同（均已实测）：
+        // 拉取 VAE / text_encoder 模块列表。
+        //
+        // 两个服务端的端点与取值格式都不同（均已实测）：
         //   - 标准 A1111: GET /sdapi/v1/sd-vae  → [{model_name, filename}]
-        //                 sd_vae 传【VAE 名称】即可
+        //                 sd_vae 传【VAE 名称】即可；A1111 没有「附加模块」概念，
+        //                 因此它只有 VAE，text_encoder 列表恒为空。
         //   - Forge neo : 没有 /sdapi/v1/sd-vae（404），改用 GET /sdapi/v1/sd-modules
         //                 该接口把 VAE 与 text_encoder 混在一起返回（Forge 源码里的函数名就是
-        //                 get_sd_vaes_and_text_encoders），需要按目录过滤掉 text_encoder；
-        //                 且 sd_vae 必须传【绝对路径】，传名称会 500「Model is corrupt or invalid」
-        // 返回统一的 [{value, label}]，value 就是应当下发给服务端的值。
-        const fetchSdVaeList = async () => {
+        //                 get_sd_vaes_and_text_encoders），需要按目录名分成两组；
+        //                 且值必须传【绝对路径】，传名称会 500「Model is corrupt or invalid」
+        // 返回 { vaes, textEncoders, isForge }，value 就是应当下发给服务端的值。
+        const fetchSdModuleLists = async () => {
             try {
                 const list = await fetchSdJson('/sdapi/v1/sd-vae');
-                return imageUtils.parseSdVaeList(list, { usePath: false });
+                const parsed = imageUtils.parseSdModuleList(list, { usePath: false });
+                // A1111 没有附加模块机制，text_encoder 恒为空。
+                return { vaes: parsed.vaes, textEncoders: [], isForge: false };
             } catch (error) {
                 // 端点不存在（Forge）或临时失败都走这里，继续尝试 Forge 的模块接口。
                 const modules = await fetchSdJson('/sdapi/v1/sd-modules');
-                return imageUtils.parseSdVaeList(modules, { usePath: true });
+                const parsed = imageUtils.parseSdModuleList(modules, { usePath: true });
+                return { vaes: parsed.vaes, textEncoders: parsed.textEncoders, isForge: true };
             }
         };
 
-        // 拉取服务端可用的模型 / 采样器，用于设置页下拉。
+        // 拉取服务端可用的模型 / 采样器 / 架构档位，用于设置页下拉。
         const refreshSdCapabilities = async (isManual = false) => {
             const baseUrl = normalizeServiceBaseUrl(settings.imageGenBaseUrl);
             if (!baseUrl || !isSdProvider.value) {
@@ -3828,11 +3858,13 @@ let removedProviderConfigCleared = false;
             try {
                 if (isManual) showToast('正在从 SD 服务拉取模型与采样器...', 'info');
                 const models = await fetchSdJson('/sdapi/v1/sd-models');
-                const [samplers, schedulers, vaeList] = await Promise.all([
+                const [samplers, schedulers, moduleLists, rawOptions] = await Promise.all([
                     fetchSdJson('/sdapi/v1/samplers').catch(() => []),
                     fetchSdJson('/sdapi/v1/schedulers').catch(() => []),
-                    // VAE 列表：两个服务端的端点不一样，见 fetchSdVaeList 的说明。
-                    fetchSdVaeList().catch(() => [])
+                    // VAE / text_encoder：两个服务端的端点不一样，见 fetchSdModuleLists 的说明。
+                    fetchSdModuleLists().catch(() => ({ vaes: [], textEncoders: [], isForge: false })),
+                    // UI Preset 清单：只有 Forge 有（A1111 的 options 里没有 <arch>_t2i_sampler）。
+                    fetchSdJson('/sdapi/v1/options').catch(() => null)
                 ]);
                 sdCapabilities.models = Array.isArray(models)
                     ? models.map(item => ({ value: item.title || item.model_name, label: item.model_name || item.title }))
@@ -3843,10 +3875,23 @@ let removedProviderConfigCleared = false;
                 sdCapabilities.schedulers = Array.isArray(schedulers)
                     ? schedulers.map(item => ({ value: item.name, label: item.label || item.name }))
                     : [];
-                sdCapabilities.vaes = Array.isArray(vaeList) ? vaeList : [];
+                sdCapabilities.vaes = Array.isArray(moduleLists.vaes) ? moduleLists.vaes : [];
+                sdCapabilities.textEncoders = Array.isArray(moduleLists.textEncoders) ? moduleLists.textEncoders : [];
+                // 服务端自报的 UI Preset 清单；为空表示这不是 Forge（或版本太老），
+                // 此时界面上隐藏这一块，不拿本站的硬编码清单去假装服务端能力。
+                const serverPresets = imageUtils.parseSdUiPresetList(rawOptions);
+                sdCapabilities.uiPresets = serverPresets;
+                sdCapabilities.isForge = moduleLists.isForge || serverPresets.length > 0;
+                // 服务端 options 原样留着：切 UI Preset 时要用它读该架构存好的底模与 VAE/TE。
+                sdCapabilities.options = rawOptions && typeof rawOptions === 'object' ? rawOptions : null;
                 sdCapabilities.loaded = true;
                 sdCapabilities.error = '';
-                if (isManual) showToast(`成功获取 ${sdCapabilities.models.length} 个 SD 模型、${sdCapabilities.vaes.length} 个 VAE`, 'success');
+                if (isManual) {
+                    const presetHint = sdCapabilities.uiPresets.length
+                        ? `、${sdCapabilities.uiPresets.length} 个 UI Preset`
+                        : '';
+                    showToast(`成功获取 ${sdCapabilities.models.length} 个 SD 模型、${sdCapabilities.vaes.length} 个 VAE、${sdCapabilities.textEncoders.length} 个 Text Encoder${presetHint}`, 'success');
+                }
                 return { ok: true, ...sdCapabilities };
             } catch (error) {
                 sdCapabilities.error = error.message || '拉取失败';
@@ -3859,10 +3904,15 @@ let removedProviderConfigCleared = false;
         const sdCapabilities = reactive({
             loaded: false,
             error: '',
+            // 是否为 Forge（有 UI Preset / 附加模块这套机制）。A1111 为 false。
+            isForge: false,
             models: [],
             samplers: [],
             schedulers: [],
-            vaes: []
+            vaes: [],
+            textEncoders: [],
+            uiPresets: [],
+            options: null
         });
 
         // 设置页下拉用的选项：内置列表 + 从服务端动态拉到的项（去重）。
@@ -4135,6 +4185,104 @@ let removedProviderConfigCleared = false;
             return list;
         });
 
+        // ===== Forge 专属：UI Preset（架构档位）=====
+        //
+        // 为什么需要它：SDXL 与 Anima 在 Forge 里是两套**架构档位**，
+        // 各自有独立的底模、VAE/TE 与采样器/步数/CFG。只换底模是跑不起来的
+        // （Anima 还需要 VAE + text_encoder，且采样器是 ER SDE）。
+        // 这里让用户能像在 Forge 界面上一样直接切档位。
+        const sdUiPresetOptions = computed(() => {
+            // 首选服务端自报的清单（真实能力）；没拉到就用内置兜底清单。
+            const source = sdCapabilities.uiPresets.length ? sdCapabilities.uiPresets : (sdUiPresetFallbackOptions || []);
+            const seen = new Set(['']);
+            const list = [{ value: '', label: '不切换（沿用服务端当前档位）' }];
+            for (const item of source) {
+                const value = String(item?.value || '');
+                if (!value || seen.has(value)) continue;
+                seen.add(value);
+                list.push({ value, label: item.label || value });
+            }
+            const current = String(settings.sdUiPreset || '').trim();
+            if (current && !seen.has(current)) list.push({ value: current, label: `${current}（服务端未返回）` });
+            return list;
+        });
+
+        // 当前架构对应的 Shift / Distilled CFG 滑杆。返回 null = 该架构在 Forge 里
+        // 不显示这个滑杆（sd / qwen），界面上隐藏，也不下发。
+        const sdPresetExtraInfo = computed(() => imageUtils.describeSdPresetExtra(settings.sdUiPreset));
+
+        // Text Encoder 多选：Anima / Qwen-Image 必需。
+        // 用 value（Forge 要绝对路径）作为选中标识。
+        const sdTextEncoderOptions = computed(() => {
+            const list = [];
+            const seen = new Set();
+            for (const item of sdCapabilities.textEncoders) {
+                const value = String(item?.value || '');
+                if (!value || seen.has(value)) continue;
+                seen.add(value);
+                list.push({ value, label: item.label || value });
+            }
+            // 已选但不在列表里的（换过服务端 / 还没拉取）补上，避免静默丢掉选择。
+            for (const value of (Array.isArray(settings.sdTextEncoders) ? settings.sdTextEncoders : [])) {
+                const text = String(value || '').trim();
+                if (!text || seen.has(text)) continue;
+                seen.add(text);
+                list.push({ value: text, label: `${text}（未在服务端列表）` });
+            }
+            return list;
+        });
+
+        // 切换 UI Preset 时把 Shift / Distilled CFG 带成该架构的 Forge 默认值。
+        // 理由：这个值是架构强相关的（Anima 默认 3.0、SDXL 默认 9.0），
+        // 沿用上一个架构的值几乎一定不对；但用户改过之后仍可自由覆盖。
+        const sdUiPresetModel = computed({
+            get: () => settings.sdUiPreset || '',
+            set: (value) => {
+                const next = String(value || '').trim();
+                const previous = String(settings.sdUiPreset || '').trim();
+                settings.sdUiPreset = next;
+                if (next === previous) return;
+                const info = imageUtils.describeSdPresetExtra(next);
+                // 该架构没有这个滑杆（sd / qwen）就清空，避免下发一个服务端用不上的值。
+                settings.sdPresetExtra = info ? info.default : '';
+            }
+        });
+
+        // 切换 Text Encoder 的选中状态（多选）。
+        const toggleSdTextEncoder = (value) => {
+            const text = String(value || '').trim();
+            if (!text) return;
+            const current = Array.isArray(settings.sdTextEncoders) ? [...settings.sdTextEncoders] : [];
+            const index = current.findIndex(item => String(item) === text);
+            if (index >= 0) current.splice(index, 1);
+            else current.push(text);
+            settings.sdTextEncoders = current;
+        };
+
+        const isSdTextEncoderSelected = (value) => (
+            Array.isArray(settings.sdTextEncoders)
+            && settings.sdTextEncoders.some(item => String(item) === String(value))
+        );
+
+        // 把「服务端为这个架构存好的那套配置」一键填进当前设置
+        // （等价于在 Forge 界面上切到该档位时它自己做的那些事）。
+        const applySdPresetFromServer = () => {
+            const arch = String(settings.sdUiPreset || '').trim();
+            if (!arch) {
+                showToast('请先选择一个 UI Preset', 'warning');
+                return;
+            }
+            const snapshot = imageUtils.readSdPresetFromOptions(sdCapabilities.options, arch);
+            if (!snapshot || (!snapshot.checkpoint && !snapshot.vaes.length && !snapshot.textEncoders.length)) {
+                showToast(`服务端没有为「${arch}」保存底模或 VAE/Text Encoder，请先点右上角「拉取」`, 'warning');
+                return;
+            }
+            if (snapshot.checkpoint) settings.sdModel = snapshot.checkpoint;
+            if (snapshot.vaes.length) settings.sdVae = snapshot.vaes[0];
+            settings.sdTextEncoders = [...snapshot.textEncoders];
+            showToast(`已套用服务端「${arch}」的配置：底模 + ${snapshot.vaes.length} 个 VAE + ${snapshot.textEncoders.length} 个 Text Encoder`, 'success');
+        };
+
         // 调用 sdapi 生成一张图，返回 { imageUrl(data URL), info }
         const generateWithSd = async ({ tags }) => {
             const { width, height } = getSdSize();
@@ -4154,15 +4302,21 @@ let removedProviderConfigCleared = false;
                 send_images: true
             };
             // override_settings 不覆盖服务端全局配置（配合 restore_afterwards），
-            // 只在这一次请求里生效：底模与 VAE 都是「留空即不干预」。
-            const model = String(settings.sdModel || '').trim();
-            const vae = imageUtils.resolveSdVaeOverride(settings);
-            const overrideSettings = {};
-            if (model) overrideSettings.sd_model_checkpoint = model;
-            if (vae) overrideSettings.sd_vae = vae;
+            // 只在这一次请求里生效：底模 / VAE / Text Encoder / UI Preset / Shift 都是
+            // 「留空即不干预」。
+            //
+            // 组装逻辑放在 core-utils 的纯函数里（buildSdOverrideSettings），
+            // 那里有完整的取舍说明（尤其「什么时候走 sd_vae、什么时候走整份模块列表」）。
+            const overrideSettings = imageUtils.buildSdOverrideSettings(settings, {
+                isForge: sdCapabilities.isForge
+            });
             if (Object.keys(overrideSettings).length) payload.override_settings = overrideSettings;
+            // distilled_cfg_scale 是 sdapi 的顶层字段（不是 override_settings 里的键），
+            // Forge 在 processing.py 里按当前架构决定它是 Shift 还是 Distilled CFG。
+            const presetExtra = imageUtils.resolveSdPresetExtraOverride(settings);
+            if (presetExtra !== null) payload.distilled_cfg_scale = presetExtra;
             // 恢复时机沿用「保持宽高比（写入后恢复服务端设置）」这个开关：
-            // 默认开，因此选了 VAE 也不会把用户 Forge 里的全局 VAE 永久改掉。
+            // 默认开，因此选了 VAE / 切了档位也不会把用户 Forge 里的全局设置永久改掉。
             if (settings.sdKeepAspectRatio) payload.override_settings_restore_afterwards = true;
 
             const result = await fetchSdJson('/sdapi/v1/txt2img', {
@@ -12429,6 +12583,9 @@ let removedProviderConfigCleared = false;
             user, settings, apiProviderOptions, allApiProviders, customApiProviderOptions, selectedCustomApiProvider, selectedApiProvider, isCustomApiProvider, showApiProviderSelector, selectApiProvider, addCustomApiProvider, renameCustomApiProvider, removeCustomApiProvider, getApiProviderLabel, configuredChatModelSlotCount, modelProviderTags, activeModelProvider, currentModelSelectionValue, currentModelSelectionProviderId, characters, currentCharacter, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontFamilyOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
             // 生图方式与 SD 专用
             isSdProvider, imageProviderOptions, sdCapabilities, refreshSdCapabilities, sdModelOptions, sdVaeOptions, sdSamplerOptions, sdSchedulerOptions,
+            // Forge 专属：UI Preset（架构档位）+ Text Encoder 多选 + Shift/Distilled CFG
+            sdUiPresetOptions, sdUiPresetModel, sdTextEncoderOptions, sdPresetExtraInfo,
+            toggleSdTextEncoder, isSdTextEncoderSelected, applySdPresetFromServer,
             sdSizePresetOptions, sdSizePresetModel, sdSizeLimits: sdSizeLimitConfig, markSdSizeCustom, sdEffectiveSizeLabel, sdSizeOverBudget,
             // 生图方式与 ComfyUI 专用
             isComfyProvider, isNaiProvider, isNaiOfficialProvider,

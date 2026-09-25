@@ -67,9 +67,15 @@ http.createServer(async (request, response) => {
             // 正好用来断言「默认不使用 VAE 时请求体里没有这个键」。
             vae: payload.override_settings?.sd_vae,
             model: payload.override_settings?.sd_model_checkpoint,
+            // Forge 专属：架构档位与附加模块（VAE + text_encoder 整份替换）。
+            preset: payload.override_settings?.forge_preset,
+            modules: payload.override_settings?.forge_additional_modules,
+            // Shift / Distilled CFG 是 sdapi 的顶层字段。
+            dcfg: payload.distilled_cfg_scale,
+            restore: payload.override_settings_restore_afterwards,
             prompt: String(payload.prompt || '').slice(0, 200)
         });
-        console.log(`txt2img ← ${payload.width}x${payload.height} sampler=${payload.sampler_name} steps=${payload.steps} vae=${payload.override_settings?.sd_vae ?? '(未指定)'}`);
+        console.log(`txt2img ← ${payload.width}x${payload.height} sampler=${payload.sampler_name} steps=${payload.steps} vae=${payload.override_settings?.sd_vae ?? '(未指定)'} preset=${payload.override_settings?.forge_preset ?? '(未指定)'} modules=${payload.override_settings?.forge_additional_modules?.length ?? 0} dcfg=${payload.distilled_cfg_scale ?? '(未指定)'}`);
         if (DELAY_MS) await new Promise(resolve => setTimeout(resolve, DELAY_MS));
         json(response, 200, { images: [PNG], info: 'mock sdapi' });
         return;
@@ -101,6 +107,34 @@ http.createServer(async (request, response) => {
             { model_name: 'qwenimagevae_v7.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors' },
             { model_name: 'vae-ft-mse-840000-ema-pruned.safetensors', filename: 'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\vae-ft-mse-840000-ema-pruned.safetensors' }
         ]);
+        return;
+    }
+    if (url.pathname === '/sdapi/v1/options') {
+        // Forge 的 /sdapi/v1/options：本站从中读两件事
+        //   1) 有哪些 UI Preset（判据是 <arch>_t2i_sampler 键是否存在）
+        //   2) 每个档位在服务端存好的底模与 VAE/TE（forge_checkpoint_<arch> / forge_additional_modules_<arch>）
+        // 这里只保留必要键，模拟一台「SDXL 与 Anima 都配好了」的 Forge。
+        json(response, 200, {
+            forge_preset: 'xl',
+            sd_model_checkpoint: 'sdxl_base.safetensors',
+            forge_additional_modules: [],
+            sd_vae: 'Automatic',
+            xl_t2i_sampler: 'Euler a',
+            anima_t2i_sampler: 'ER SDE',
+            sd_t2i_sampler: 'Euler a',
+            qwen_t2i_sampler: 'LCM',
+            // qwen 在 Forge 里没有 dcfg 滑杆（core-utils 的 sdPresetExtras 里也没有它）
+            // → 用来验证「该架构不显示 Shift/Distilled CFG」。
+            forge_checkpoint_xl: 'sdxl_base.safetensors',
+            forge_additional_modules_xl: [],
+            forge_checkpoint_anima: 'anima-base-v1.0.safetensors',
+            forge_additional_modules_anima: [
+                'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors',
+                'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors'
+            ],
+            forge_checkpoint_qwen: '',
+            forge_additional_modules_qwen: []
+        });
         return;
     }
     if (url.pathname === '/sdapi/v1/samplers') {

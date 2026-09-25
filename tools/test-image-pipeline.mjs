@@ -283,6 +283,185 @@ assertEqual('重复项去重', imageUtils.parseSdVaeList([
     { model_name: 'same', filename: '/b/VAE/same.safetensors' }
 ], { usePath: false }).length, 1);
 
+// --- 7d. Forge UI Preset（架构档位）：SDXL → Anima 的切换 ---
+// 这是本次需求的核心：项目原先只能换底模，没有「切架构」的能力，
+// 于是 Anima 这类架构（还要 VAE + text_encoder）在界面上根本跑不起来。
+section('7d) Forge UI Preset：架构档位与附加模块');
+
+// text_encoder 判定：以前它被当成 VAE 的噪声一律剔除，现在要能单独认出来。
+assertTrue('识别 text_encoder（反斜杠）', imageUtils.isSdTextEncoderModulePath('D:\\m\\models\\text_encoder\\x.safetensors'));
+assertTrue('识别 text_encoder（正斜杠）', imageUtils.isSdTextEncoderModulePath('/m/models/text_encoder/x.safetensors'));
+assertTrue('识别 text_encoder（大小写混合）', imageUtils.isSdTextEncoderModulePath('/m/models/Text_Encoder/x.safetensors'));
+assertTrue('VAE 目录不算 text_encoder', !imageUtils.isSdTextEncoderModulePath('/m/models/VAE/x.safetensors'));
+assertTrue('无路径信息时不算 text_encoder', !imageUtils.isSdTextEncoderModulePath(''));
+
+// 模块列表拆分：VAE 与 text_encoder 各归各的
+const moduleSplit = imageUtils.parseSdModuleList([
+    { model_name: 'qwen_3_06b_base.safetensors', filename: 'D:\\m\\models\\text_encoder\\qwen_3_06b_base.safetensors' },
+    { model_name: 'qwenimagevae_v7.safetensors', filename: 'D:\\m\\models\\VAE\\qwenimagevae_v7.safetensors' },
+    { model_name: 'vae-ft-mse.safetensors', filename: 'D:\\m\\models\\VAE\\vae-ft-mse.safetensors' }
+], { usePath: true });
+assertEqual('拆出 1 个 text_encoder', moduleSplit.textEncoders.length, 1);
+assertEqual('text_encoder 的 value 是绝对路径', moduleSplit.textEncoders[0]?.value,
+    'D:\\m\\models\\text_encoder\\qwen_3_06b_base.safetensors');
+assertEqual('拆出 2 个 VAE', moduleSplit.vaes.length, 2);
+assertTrue('VAE 组里不含 text_encoder', !moduleSplit.vaes.some(i => i.value.includes('text_encoder')));
+assertEqual('非数组 → 两组都空', imageUtils.parseSdModuleList(null, { usePath: true }), { vaes: [], textEncoders: [] });
+
+// 服务端能力解析：判据是 <arch>_t2i_sampler 键
+const forgeOptions = {
+    forge_preset: 'xl',
+    xl_t2i_sampler: 'Euler a',
+    anima_t2i_sampler: 'ER SDE',
+    sd_t2i_sampler: 'Euler a',
+    // 有 _t2i_sampler 但值为空 → 视为该架构不可用
+    qwen_t2i_sampler: '',
+    sd_model_checkpoint: 'sdxl.safetensors',
+    // 各档位在服务端存好的配置（Forge 的 forge_checkpoint_<arch> / forge_additional_modules_<arch>）
+    forge_checkpoint_xl: 'sdxl.safetensors',
+    forge_additional_modules_xl: [],
+    forge_checkpoint_anima: 'anima-base-v1.0.safetensors',
+    forge_additional_modules_anima: [
+        'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors',
+        'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors'
+    ]
+};
+const parsedPresets = imageUtils.parseSdUiPresetList(forgeOptions);
+assertEqual('解析出 3 个可用 UI Preset（qwen 值为空被剔除）',
+    parsedPresets.map(i => i.value).sort(), ['anima', 'sd', 'xl']);
+assertTrue('anima 有可读标签', String(parsedPresets.find(i => i.value === 'anima')?.label || '').includes('Anima'));
+assertEqual('非对象 → 空数组', imageUtils.parseSdUiPresetList(null), []);
+assertEqual('A1111 的 options（没有 <arch>_t2i_sampler）→ 空数组',
+    imageUtils.parseSdUiPresetList({ sd_model_checkpoint: 'x', sd_vae: 'Automatic' }), []);
+
+// 读服务端为某个档位存好的配置（等价于在 Forge 界面切档位时它自己做的事）
+const animaPreset = imageUtils.readSdPresetFromOptions(forgeOptions, 'anima');
+assertEqual('anima 档位的底模', animaPreset.checkpoint, 'anima-base-v1.0.safetensors');
+assertEqual('anima 档位的 text_encoder', animaPreset.textEncoders, [
+    'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors'
+]);
+assertEqual('anima 档位的 VAE', animaPreset.vaes, [
+    'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors'
+]);
+assertEqual('未配置的档位 → 空清单', imageUtils.readSdPresetFromOptions(forgeOptions, 'nope').checkpoint, '');
+assertEqual('null options 安全', imageUtils.readSdPresetFromOptions(null, 'anima'), null);
+
+// Shift / Distilled CFG：同一个滑杆，语义按架构变
+assertEqual('anima 是 Shift', imageUtils.describeSdPresetExtra('anima')?.label, 'Shift');
+assertEqual('anima 的 Forge 默认 Shift 是 3.0', imageUtils.describeSdPresetExtra('anima')?.default, 3.0);
+assertEqual('xl 是 Shift 且默认 9.0', imageUtils.describeSdPresetExtra('xl')?.default, 9.0);
+assertEqual('flux 是 Distilled CFG', imageUtils.describeSdPresetExtra('flux')?.label, 'Distilled CFG Scale');
+assertEqual('flux 的默认是 3.0', imageUtils.describeSdPresetExtra('flux')?.default, 3.0);
+assertEqual('sd 架构没有这个滑杆 → null', imageUtils.describeSdPresetExtra('sd'), null);
+assertEqual('qwen 架构没有这个滑杆 → null', imageUtils.describeSdPresetExtra('qwen'), null);
+assertEqual('空档位 → null', imageUtils.describeSdPresetExtra(''), null);
+assertEqual('pid 取绝对值 1.5（Forge 原常量是负数）', imageUtils.describeSdPresetExtra('pid')?.default, 1.5);
+assertEqual('krea 取绝对值 1.15', imageUtils.describeSdPresetExtra('krea')?.default, 1.15);
+// 原型链防线：'constructor' / 'toString' / '__proto__' 不是架构名，
+// 但直接 table[name] 会命中 Object.prototype 上的成员，凭空返回一个「有 Shift 滑杆」的假结果。
+['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'].forEach(name => {
+    assertEqual(`${name} 不是架构，不得返回滑杆`, imageUtils.describeSdPresetExtra(name), null);
+});
+
+// 坏存档里的非字符串值：一律丢掉，不能让 String() 变成 "[object Object]" 发给 Forge
+assertEqual('sdVae 是对象 → 丢掉',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdVae: {} }), []);
+assertEqual('sdTextEncoders 里混 null/数字/对象 → 只留字符串',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdTextEncoders: [null, 1, {}, 'ok'] }), ['ok']);
+assertEqual('options 是数组 → 不当成服务端 options',
+    imageUtils.readSdPresetFromOptions([], 'anima'), null);
+assertEqual('options 是数组 → 解析出空档位清单',
+    imageUtils.parseSdUiPresetList([]), []);
+
+// 附加模块组装：VAE 在前、text_encoder 在后，去重、丢空值
+assertEqual('没选任何模块 → 空数组', imageUtils.resolveSdAdditionalModulesOverride({}), []);
+assertEqual('只选 VAE', imageUtils.resolveSdAdditionalModulesOverride({ sdVae: 'v' }), ['v']);
+assertEqual('VAE + 两个 text_encoder（顺序固定）',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdVae: 'v', sdTextEncoders: ['t1', 't2'] }), ['v', 't1', 't2']);
+assertEqual('只选 text_encoder',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdTextEncoders: ['t1'] }), ['t1']);
+assertEqual('重复项去重',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdVae: 'v', sdTextEncoders: ['v', 't1', 't1'] }), ['v', 't1']);
+assertEqual('空白值被丢掉',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdVae: '  ', sdTextEncoders: ['', '  ', 't1'] }), ['t1']);
+assertEqual('sdTextEncoders 不是数组也安全',
+    imageUtils.resolveSdAdditionalModulesOverride({ sdVae: 'v', sdTextEncoders: 'oops' }), ['v']);
+
+// override_settings 组装：这是「到底发了什么」的最终口径
+section('7e) override_settings 组装：Anima 能跑起来的关键');
+const animaModules = [
+    'D:\\Stable-diffusion\\sd-webui\\models\\VAE\\qwenimagevae_v7.safetensors',
+    'D:\\Stable-diffusion\\sd-webui\\models\\text_encoder\\qwen_3_06b_base.safetensors'
+];
+const animaSettings = {
+    sdUiPreset: 'anima',
+    sdModel: 'anima-base-v1.0.safetensors',
+    sdVae: animaModules[0],
+    sdTextEncoders: [animaModules[1]],
+    sdPresetExtra: 3.0
+};
+const animaOverrides = imageUtils.buildSdOverrideSettings(animaSettings, { isForge: true });
+assertEqual('Forge: 下发 forge_preset', animaOverrides.forge_preset, 'anima');
+assertEqual('Forge: 下发底模', animaOverrides.sd_model_checkpoint, 'anima-base-v1.0.safetensors');
+// 核心断言：选了 text_encoder 就必须走「整份模块列表」，不能只发 sd_vae。
+assertEqual('Forge: VAE + text_encoder 一起走附加模块', animaOverrides.forge_additional_modules, animaModules);
+assertEqual('Forge: 此时不再单独发 sd_vae（两者会打架）', animaOverrides.sd_vae, undefined);
+// distilled_cfg_scale 是 sdapi 的**顶层**字段，不是 Forge 的选项键。
+// 实测塞进 override_settings 会让 Forge 直接 500（set_config 拿它去 shared.opts.set → KeyError），
+// 所以它必须走 payload.distilled_cfg_scale（由 resolveSdPresetExtraOverride 取）。
+assertEqual('Shift/Distilled CFG 不进 override_settings（否则 Forge 500）',
+    animaOverrides.distilled_cfg_scale, undefined);
+assertEqual('Shift/Distilled CFG 由顶层字段下发', imageUtils.resolveSdPresetExtraOverride(animaSettings), 3.0);
+assertTrue('buildSdOverrideSettings 产出的键全是 Forge 的合法选项键',
+    Object.keys(animaOverrides).every(key => ['forge_preset', 'sd_model_checkpoint', 'forge_additional_modules', 'sd_vae'].includes(key)),
+    Object.keys(animaOverrides).join(','));
+
+// 只选 VAE（没选 text_encoder）时仍走 sd_vae —— 对 Anima 这种全局已挂 text_encoder 的机器最安全，
+// 因为 sd_vae 只替换一个 VAE、会保留服务端其它模块；而附加模块是整份替换。
+const vaeOnlyOverrides = imageUtils.buildSdOverrideSettings({
+    sdUiPreset: 'xl', sdModel: 'sdxl.safetensors', sdVae: 'sdxl_vae'
+}, { isForge: true });
+assertEqual('只选 VAE → 走 sd_vae（不整份替换模块）', vaeOnlyOverrides.sd_vae, 'sdxl_vae');
+assertEqual('只选 VAE → 不发附加模块', vaeOnlyOverrides.forge_additional_modules, undefined);
+
+// A1111：没有「附加模块」这个概念，只走 sd_vae
+const a1111Overrides = imageUtils.buildSdOverrideSettings({
+    sdUiPreset: 'anima', sdVae: 'v', sdTextEncoders: ['t1']
+}, { isForge: false });
+assertEqual('A1111: 不下发 forge_preset（它不认识）', a1111Overrides.forge_preset, 'anima');
+assertEqual('A1111: 只走 sd_vae', a1111Overrides.sd_vae, 'v');
+assertEqual('A1111: 不发附加模块', a1111Overrides.forge_additional_modules, undefined);
+
+// 留空 = 完全不干预（默认行为不能被这次改动破坏）
+assertEqual('全空 → 空对象（一个键都不发）', imageUtils.buildSdOverrideSettings({}, { isForge: true }), {});
+assertEqual('Shift 留空 → 顶层不下发', imageUtils.resolveSdPresetExtraOverride({ sdPresetExtra: '' }), null);
+assertEqual('Shift 是 0 也要下发（0 是合法值，不能被当成「没填」）',
+    imageUtils.resolveSdPresetExtraOverride({ sdPresetExtra: 0 }), 0);
+assertEqual('Shift 超上限被夹住',
+    imageUtils.resolveSdPresetExtraOverride({ sdPresetExtra: 999 }), 24);
+assertEqual('Shift 非法值 → 不下发',
+    imageUtils.resolveSdPresetExtraOverride({ sdPresetExtra: 'abc' }), null);
+assertEqual('Shift 不混进 override_settings',
+    imageUtils.buildSdOverrideSettings({ sdPresetExtra: 5 }, { isForge: true }), {});
+
+// 新字段必须随生图预设走（本地 Forge 跑 Anima 与远端 A1111 跑 SDXL 是两套配置）
+section('7f) Forge 新字段随生图预设切换');
+['sdUiPreset', 'sdTextEncoders', 'sdPresetExtra'].forEach(field => {
+    assertTrue(`${field} 在生图预设字段表里`, imageUtils.IMAGE_PROFILE_FIELDS.includes(field));
+});
+const forgeLive = { ...baseSettings, sdUiPreset: 'xl', sdModel: 'sdxl.safetensors', sdTextEncoders: [] };
+presetA.profile = imageUtils.captureImageProfile(forgeLive);
+assertEqual('A 的 profile 记住了 UI Preset', presetA.profile.sdUiPreset, 'xl');
+forgeLive.sdUiPreset = 'anima';
+forgeLive.sdTextEncoders = [animaModules[1]];
+const animaProfile = imageUtils.captureImageProfile(forgeLive);
+assertEqual('Anima 的 profile 记住 text_encoder', animaProfile.sdTextEncoders, [animaModules[1]]);
+imageUtils.applyImageProfile(forgeLive, presetA.profile);
+assertEqual('切回 SDXL 预设后 UI Preset 跟着回到 xl', forgeLive.sdUiPreset, 'xl');
+assertEqual('切回 SDXL 预设后 text_encoder 被清空（没串味）', forgeLive.sdTextEncoders, []);
+imageUtils.applyImageProfile(forgeLive, animaProfile);
+assertEqual('再切回 Anima 预设，text_encoder 恢复', forgeLive.sdTextEncoders, [animaModules[1]]);
+
 // 随预设保存：A 选了 VAE、B 没选，切换后互不影响
 const vaeLive = { ...baseSettings, sdVae: '' };
 imageUtils.applyImageProfile(vaeLive, presetA.profile);
@@ -369,12 +548,25 @@ assertTrue('参数变化回写当前预设', /IMAGE_PROFILE_FIELDS\.map[\s\S]{0,
 assertTrue('启动时为老预设补 profile', appSource.includes('seedEndpointProfiles(settings.savedImageEndpoints, settings)'));
 assertTrue('从 /sdapi/v1/sd-vae 拉取 VAE 列表', appSource.includes("fetchSdJson('/sdapi/v1/sd-vae')"));
 assertTrue('Forge 无 sd-vae 时回退 /sdapi/v1/sd-modules', appSource.includes("fetchSdJson('/sdapi/v1/sd-modules')"));
-assertTrue('Forge 分支用路径作 value', /parseSdVaeList\(modules, \{ usePath: true \}\)/.test(appSource));
-assertTrue('A1111 分支用名称作 value', /parseSdVaeList\(list, \{ usePath: false \}\)/.test(appSource));
-assertTrue('VAE 走 resolveSdVaeOverride 决定是否下发', appSource.includes('imageUtils.resolveSdVaeOverride(settings)'));
-assertTrue('VAE 写进 override_settings.sd_vae', /overrideSettings\.sd_vae\s*=\s*vae/.test(appSource));
+assertTrue('Forge 分支用路径作 value', /parseSdModuleList\(modules, \{ usePath: true \}\)/.test(appSource));
+assertTrue('A1111 分支用名称作 value', /parseSdModuleList\(list, \{ usePath: false \}\)/.test(appSource));
+// VAE / 附加模块 / UI Preset 的组装已收敛到 core-utils 的纯函数（上面 7d~7f 直接断言它），
+// 这里只检查 app.js 确实调用了它、且没有绕过去自己拼 override_settings。
+assertTrue('下发口径走 buildSdOverrideSettings 纯函数',
+    appSource.includes('imageUtils.buildSdOverrideSettings(settings'));
+assertTrue('app.js 不再自己拼 overrideSettings.sd_vae（口径已收口）',
+    !/overrideSettings\.sd_vae\s*=/.test(appSource));
+assertTrue('Shift/Distilled CFG 作为顶层字段下发', appSource.includes('payload.distilled_cfg_scale = presetExtra'));
+assertTrue('拉取时一并读 /sdapi/v1/options（UI Preset 清单）', appSource.includes("fetchSdJson('/sdapi/v1/options')"));
+assertTrue('UI Preset 清单来自服务端（parseSdUiPresetList）', appSource.includes('imageUtils.parseSdUiPresetList(rawOptions)'));
+assertTrue('可一键套用服务端档位配置', appSource.includes('applySdPresetFromServer'));
+assertTrue('Text Encoder 多选可切换', appSource.includes('toggleSdTextEncoder'));
 assertTrue('老存档的 sdVae 被收敛为字符串', appSource.includes('settings.sdVae = String(settings.sdVae || '));
+assertTrue('老存档的 sdTextEncoders 被收敛为字符串数组',
+    appSource.includes('settings.sdTextEncoders = (Array.isArray(settings.sdTextEncoders)'));
 assertTrue('VAE 下拉暴露给模板', appSource.includes('sdVaeOptions,'));
+assertTrue('UI Preset 下拉暴露给模板', appSource.includes('sdUiPresetOptions,'));
+assertTrue('Text Encoder 选项暴露给模板', appSource.includes('sdTextEncoderOptions,'));
 
 const syncSource = readFileSync(join(root, 'assets/js/sync-client.js'), 'utf8');
 assertTrue('快照里剔除以 base64 存的生图（413 防线）', syncSource.includes('compactImageCache'));
@@ -1331,6 +1523,41 @@ assertEqual('键顺序不影响比较结果（老存档字段顺序可能不同�
 assertEqual('没有指纹的老条目一律不算过期（升级不重跑）',
     imageUtils.isCachedImageJobOutdated({ status: 'done', imageUrl: 'x' }, fpVertical), false);
 assertEqual('非 JSON 指纹不会炸，也不会误判', imageUtils.isCachedImageJobOutdated({ imageFingerprint: 'v1' }, 'v1'), false);
+
+// 后加的「留空 = 不干预」字段不能把老存档的历史图判成过期。
+// 这是升级即回归的经典形态：老指纹里没有这些键，若照常参与比较，
+// 两边永远不相等 → 所有历史图都被标成「按旧参数出的」（官方 API 一张图就是一次消耗）。
+const fpLegacySd = imageUtils.resolveImageCacheFingerprint({
+    settings: { imageProvider: 'stable-diffusion', imageGenBaseUrl: 'http://f:7860', sdModel: 'a', sdVae: '' }
+});
+const fpNewSd = imageUtils.resolveImageCacheFingerprint({
+    settings: {
+        imageProvider: 'stable-diffusion', imageGenBaseUrl: 'http://f:7860', sdModel: 'a', sdVae: '',
+        sdUiPreset: '', sdTextEncoders: [], sdPresetExtra: ''
+    }
+});
+assertEqual('老存档（无新字段）与新存档（新字段空）指纹一致 → 历史图不重跑',
+    fpLegacySd === fpNewSd, true);
+assertEqual('但用户真选了值就要参与比较：换 UI Preset → 判为按旧参数出的',
+    imageUtils.isCachedImageJobOutdated(
+        { imageFingerprint: fpNewSd },
+        imageUtils.resolveImageCacheFingerprint({
+            settings: {
+                imageProvider: 'stable-diffusion', imageGenBaseUrl: 'http://f:7860', sdModel: 'a', sdVae: '',
+                sdUiPreset: 'anima', sdTextEncoders: [], sdPresetExtra: ''
+            }
+        })
+    ), true);
+assertEqual('换 Text Encoder 同理 → 判为按旧参数出的',
+    imageUtils.isCachedImageJobOutdated(
+        { imageFingerprint: fpNewSd },
+        imageUtils.resolveImageCacheFingerprint({
+            settings: {
+                imageProvider: 'stable-diffusion', imageGenBaseUrl: 'http://f:7860', sdModel: 'a', sdVae: '',
+                sdUiPreset: '', sdTextEncoders: ['t1'], sdPresetExtra: ''
+            }
+        })
+    ), true);
 
 // --- 16. 角色卡管理：批量导入接线 ---
 // 主应用（index.html + app.js + ui-components.js）里「添加角色卡」菜单下的批量入口。

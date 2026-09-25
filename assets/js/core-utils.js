@@ -1332,6 +1332,49 @@ window.RPHubUtils = {
             sdSchedulers: Object.freeze([
                 'Automatic', 'Karras', 'Exponential', 'Polyexponential', 'SGM Uniform', 'Simple', 'Normal', 'DDIM', 'Beta'
             ]),
+            // Forge 的「UI Preset」= 架构档位（Forge 源码 modules_forge/presets.py 的 PresetArch）。
+            // 服务端可用时，用 /sdapi/v1/options 里真实存在的 <arch>_t2i_sampler 键动态生成；
+            // 这里是拉不到服务端时的兜底清单（顺序与 Forge 的 PresetArch 一致）。
+            // value 必须原样是 Forge 认识的小写名字 —— 它会被写进 override_settings.forge_preset，
+            // 而 Forge 正是按这个名字去读 forge_checkpoint_<arch> / <arch>_t2i_* 一整套选项。
+            sdUiPresets: Object.freeze([
+                { value: 'sd', label: 'SD 1.5（sd）' },
+                { value: 'xl', label: 'SDXL（xl）' },
+                { value: 'flux', label: 'Flux.1（flux）' },
+                { value: 'klein', label: 'Flux.2（klein）' },
+                { value: 'qwen', label: 'Qwen-Image（qwen）' },
+                { value: 'lumina', label: 'Lumina-Image 2.0（lumina）' },
+                { value: 'zit', label: 'Z-Image-Turbo（zit）' },
+                { value: 'wan', label: 'Wan 2.2（wan）' },
+                { value: 'anima', label: 'Anima（anima）' },
+                { value: 'ernie', label: 'Ernie-Image（ernie）' },
+                { value: 'pid', label: 'PiD（pid）' },
+                { value: 'krea', label: 'Krea 2（krea）' }
+            ]),
+            // Forge 的 <arch>_t2i_dcfg 这一个滑杆在不同架构下语义不同
+            // （见 Forge 源码 main_entry.py 的 on_preset_change）：
+            //   - use_shift 的架构（xl / lumina / zit / wan / anima / ernie / pid / krea）→ 标签 "Shift"
+            //   - DISTILL 的架构（flux / klein）→ 标签 "Distilled CFG Scale"
+            //   - 其余（sd / qwen）→ 滑杆隐藏，不该下发
+            // 两条路径在 Forge 里都落到 sdapi 的同一个 distilled_cfg_scale 字段
+            // （processing.py 按 p.sd_model.use_distilled_cfg_scale / use_shift 分支取值），
+            // 所以这里统一用一个字段承载，只是界面上按架构换标签。
+            // 注意：Forge 的滑杆值取的是 abs(shift)（pid/krea 的原始常量是负数），
+            // 所以这里的兜底默认值也一律取绝对值。
+            sdPresetExtras: Object.freeze({
+                xl: { kind: 'shift', default: 9.0 },
+                lumina: { kind: 'shift', default: 6.0 },
+                zit: { kind: 'shift', default: 9.0 },
+                wan: { kind: 'shift', default: 5.0 },
+                anima: { kind: 'shift', default: 3.0 },
+                ernie: { kind: 'shift', default: 3.0 },
+                pid: { kind: 'shift', default: 1.5 },
+                krea: { kind: 'shift', default: 1.15 },
+                flux: { kind: 'distill', default: 3.0 },
+                klein: { kind: 'distill', default: 3.0 }
+            }),
+            // Shift / Distilled CFG 滑杆的取值范围（与 Forge 的 OptionInfo 一致）。
+            sdPresetExtraLimits: Object.freeze({ min: 0, max: 24, step: 0.5 }),
             imageCounts: Object.freeze([2, 3, 4, 5, 6, 7, 8].map(count => ({
                 value: count,
                 label: `${count} 张`
@@ -1472,6 +1515,39 @@ window.RPHubUtils = {
         return !/(^|\/)text_encoder\//.test(normalized);
     };
 
+    // text_encoder 的判定（isSdVaeModulePath 的补集）。
+    // 单独抽出来是因为它现在**另有用途**：Anima / Qwen-Image 这类架构必须同时挂
+    // VAE 与 text_encoder，以前这里一律剔除，导致 text_encoder 在界面上根本选不到。
+    const isSdTextEncoderModulePath = (filepath) => {
+        const normalized = String(filepath || '').replace(/\\/g, '/').toLowerCase();
+        if (!normalized) return false;
+        return /(^|\/)text_encoder\//.test(normalized);
+    };
+
+    // 把服务端返回的模块列表拆成「VAE」与「text_encoder」两组，各自转成下拉选项。
+    //
+    // 与 parseSdVaeList 的关系：后者是「只要 VAE」的老口径（保留给 A1111 的 /sdapi/v1/sd-vae
+    // 与既有测试）；这个函数是「两类都要」，供设置页的两个下拉分别使用。
+    const parseSdModuleList = (items, options = {}) => {
+        const usePath = options.usePath === true;
+        const vaes = [];
+        const textEncoders = [];
+        const seenVae = new Set();
+        const seenTe = new Set();
+        for (const item of (Array.isArray(items) ? items : [])) {
+            const filepath = item && typeof item === 'object' ? String(item.filename || item.path || '') : '';
+            const label = normalizeSdVaeEntry(item);
+            if (!label) continue;
+            const value = usePath && filepath ? filepath : label;
+            const target = isSdTextEncoderModulePath(filepath) ? textEncoders : vaes;
+            const seen = target === vaes ? seenVae : seenTe;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            target.push({ value, label });
+        }
+        return { vaes, textEncoders };
+    };
+
     // 把服务端返回的 VAE 列表统一成下拉选项 [{value, label}]。
     //
     // 两个服务端的差异（都实测过）：
@@ -1497,6 +1573,162 @@ window.RPHubUtils = {
         return list;
     };
 
+    // ===== Forge 专属：UI Preset（架构档位）与附加模块 =====
+    //
+    // 背景（Anima 之前根本切不过去）：
+    //   Forge 的「UI Preset」= 架构档位（modules_forge/presets.py 的 PresetArch）。
+    //   切档位在 Forge 界面上是 Gradio 回调 on_preset_change，它会顺手把
+    //   forge_checkpoint_<arch> / forge_additional_modules_<arch> / <arch>_t2i_* 一整套
+    //   写进全局选项。但 sdapi 的 /sdapi/v1/options 只走 sysinfo.set_config，
+    //   而 forge_preset 这个 OptionInfo **没有 onchange 回调**，所以单发 forge_preset
+    //   只会改一个字符串：底模、VAE/TE、采样器全都不会跟着换。
+    //   结论：想真正从 SDXL 切到 Anima，必须一次把这三样都下发：
+    //     forge_preset + sd_model_checkpoint + forge_additional_modules
+    //   （采样器/步数/CFG 由本站自己的 sdSampler/sdSteps/sdCfgScale 决定。）
+
+    // UI Preset 覆盖值：留空 = 不干预（沿用服务端当前档位）。
+    // 不能下发空串：Forge 会拿它当架构名去查 <name>_t2i_* 选项。
+    const resolveSdUiPresetOverride = (settings = {}) => {
+        const raw = String(settings?.sdUiPreset || '').trim();
+        return raw || null;
+    };
+
+    // 附加模块（forge_additional_modules）：Forge 用它挂「非底模自带」的权重，
+    // Anima / Qwen-Image 这类架构的 VAE 与 text_encoder 都走这里。
+    //
+    // 为什么不能只用 sd_vae：
+    //   Forge 的 sd_vae 只能承载**一个 VAE**（processing.py 里是从 forge_additional_modules
+    //   里挑一个替换掉），text_encoder 完全没法通过它下发。Anima 两样都要，所以必须走模块列表。
+    // 顺序：VAE 在前、text_encoder 在后，与 Forge 自己界面的勾选顺序一致（便于两边对照）。
+    // 这些值一律是文件路径，所以只收非空字符串：坏存档里的对象/数字直接丢掉，
+    // 免得 String() 成 "[object Object]" 被原样发给 Forge。
+    const resolveSdAdditionalModulesOverride = (settings = {}) => {
+        const list = [];
+        const seen = new Set();
+        const push = (value) => {
+            if (typeof value !== 'string') return;
+            const text = value.trim();
+            if (!text || seen.has(text)) return;
+            seen.add(text);
+            list.push(text);
+        };
+        push(settings?.sdVae);
+        // text_encoder 允许选多个（Forge 的该下拉本身就是 multiselect）。
+        for (const item of (Array.isArray(settings?.sdTextEncoders) ? settings.sdTextEncoders : [])) push(item);
+        return list;
+    };
+
+    // Shift / Distilled CFG Scale：Forge 里同一个滑杆（<arch>_t2i_dcfg），
+    // 语义按架构分两种（见 uiOptions.sdPresetExtras 的说明），sdapi 侧统一叫 distilled_cfg_scale。
+    // 返回 null = 不干预（不让服务端这个值被本站改写）。
+    const resolveSdPresetExtraOverride = (settings = {}) => {
+        const raw = settings?.sdPresetExtra;
+        if (raw === '' || raw === null || raw === undefined) return null;
+        const number = Number(raw);
+        if (!Number.isFinite(number)) return null;
+        const { min, max } = (uiOptions().sdPresetExtraLimits || { min: 0, max: 24 });
+        return Math.max(min, Math.min(max, number));
+    };
+
+    // 当前架构下这个滑杆叫什么、默认多少。
+    // 返回 null 表示该架构在 Forge 里根本不显示这个滑杆（sd / qwen），界面上应当隐藏。
+    // 必须用 hasOwnProperty 查表：直接 table[name] 会让 'constructor' / 'toString' 这类
+    // 名字命中 Object.prototype 上的成员，凭空返回一个「有 Shift 滑杆」的假结果。
+    const describeSdPresetExtra = (arch) => {
+        const table = uiOptions().sdPresetExtras || {};
+        const key = String(arch || '').trim();
+        if (!key || !Object.prototype.hasOwnProperty.call(table, key)) return null;
+        const entry = table[key];
+        if (!entry) return null;
+        const limits = uiOptions().sdPresetExtraLimits || { min: 0, max: 24, step: 0.5 };
+        return {
+            kind: entry.kind,
+            label: entry.kind === 'shift' ? 'Shift' : 'Distilled CFG Scale',
+            default: entry.default,
+            ...limits
+        };
+    };
+
+    // 从 /sdapi/v1/options 的原始返回里解析出「这台 Forge 真正支持哪些 UI Preset」。
+    //
+    // 判据：Forge 会为每个架构注册 <arch>_t2i_sampler（presets.py 的 register）。
+    // 这样既拿到了准确的可用清单，又不会把本站硬编码的清单当成服务端事实
+    // （不同版本的 Forge 架构数不一样，老版本没有 anima/krea 这些）。
+    // 拿不到 options 时返回空数组，调用方回落到 uiOptions.sdUiPresets 兜底。
+    const parseSdUiPresetList = (options) => {
+        if (!options || typeof options !== 'object' || Array.isArray(options)) return [];
+        const labels = new Map((uiOptions().sdUiPresets || []).map(item => [item.value, item.label]));
+        const found = [];
+        for (const key of Object.keys(options)) {
+            const matched = /^([a-z0-9]+)_t2i_sampler$/.exec(key);
+            if (!matched) continue;
+            const arch = matched[1];
+            if (!options[key]) continue;
+            found.push({ value: arch, label: labels.get(arch) || arch });
+        }
+        return found;
+    };
+
+    // 从 /sdapi/v1/options 里读出某个架构「服务端存好的那套配置」。
+    // 用途：用户选完 UI Preset 后点「套用服务端配置」，一键把底模与 VAE/TE 填成
+    // Forge 界面里为该架构保存的那一份（等价于在 Forge 界面上切档位）。
+    const readSdPresetFromOptions = (options, arch) => {
+        const name = String(arch || '').trim();
+        if (!options || typeof options !== 'object' || Array.isArray(options) || !name) return null;
+        const modules = options[`forge_additional_modules_${name}`];
+        const checkpoint = options[`forge_checkpoint_${name}`];
+        const list = Array.isArray(modules) ? modules.map(item => String(item || '')).filter(Boolean) : [];
+        return {
+            checkpoint: String(checkpoint || '').trim(),
+            vaes: list.filter(item => !isSdTextEncoderModulePath(item)),
+            textEncoders: list.filter(item => isSdTextEncoderModulePath(item))
+        };
+    };
+
+    // 组装这一次 sdapi 请求的 override_settings。
+    //
+    // 为什么单独抽成纯函数：这段决定「发什么」的逻辑最容易出回归
+    // （例如又有人把 text_encoder 顺手过滤掉，Anima 就又加载不起来），
+    // 放在这里可以被 tools/test-image-pipeline.mjs 直接断言。
+    //
+    // 各字段的下发条件（都是「留空/未选 = 完全不干预服务端」）：
+    //   forge_preset              ← sdUiPreset（空则不发）
+    //   sd_model_checkpoint       ← sdModel（空则不发）
+    //   forge_additional_modules  ← 仅当**选了 text_encoder** 时发（见下）
+    //   sd_vae                    ← 选了 VAE 且没有发模块列表时发（见下）
+    //
+    // 注意 distilled_cfg_scale（Shift / Distilled CFG）**不在这里**：
+    //   它是 sdapi 的顶层请求字段，不是 Forge 的选项键。实测把它塞进 override_settings
+    //   会直接 500（Forge 的 set_config 拿它去 shared.opts.set，键不存在就抛 KeyError）。
+    //   因此由调用方写成 payload.distilled_cfg_scale，见 resolveSdPresetExtraOverride。
+    //
+    // VAE 为什么要分两条路：
+    //   Forge 的 sd_vae 覆盖（processing.py 里 _vae_override 那段）只挑一个 VAE 替换，
+    //   **会保留服务端其它模块**；而 forge_additional_modules 是整份替换。
+    //   因此：只选 VAE 时走 sd_vae（对 Anima 这种全局已挂 text_encoder 的机器最安全，
+    //   不会把 text_encoder 弄丢）；一旦选了 text_encoder，就必须走整份模块列表 ——
+    //   sd_vae 根本承载不了 text_encoder。A1111 没有模块列表这个概念，只走 sd_vae。
+    const buildSdOverrideSettings = (settings = {}, options = {}) => {
+        const isForge = options.isForge === true;
+        const overrides = {};
+        const preset = resolveSdUiPresetOverride(settings);
+        if (preset) overrides.forge_preset = preset;
+        const model = String(settings?.sdModel || '').trim();
+        if (model) overrides.sd_model_checkpoint = model;
+
+        const modules = resolveSdAdditionalModulesOverride(settings);
+        const hasTextEncoder = modules.some(item => isSdTextEncoderModulePath(item));
+        const vae = resolveSdVaeOverride(settings);
+        if (isForge && hasTextEncoder && modules.length) {
+            // Anima / Qwen-Image 这类：VAE 与 text_encoder 一起挂。
+            overrides.forge_additional_modules = modules;
+        } else if (vae) {
+            overrides.sd_vae = vae;
+        }
+        return overrides;
+    };
+
+
     // 每个生图预设各自携带的「出图参数」：决定画面长什么样。
     // 刻意不含 imageGenBaseUrl / imageProvider / imageGenKey（那是「连哪儿」，本来就按预设存），
     // 也不含 imageGenCount（期望张数属于这一次生成的操作习惯，不该被切预设改掉）。
@@ -1510,6 +1742,10 @@ window.RPHubUtils = {
         'sdModel', 'sdVae', 'sdSteps', 'sdCfgScale', 'sdSampler', 'sdScheduler',
         'sdLoras', 'sdPromptPrefix', 'sdNegativePrompt', 'sdKeepAspectRatio',
         'sdCustomSizeEnabled', 'sdSizePreset', 'sdCustomWidth', 'sdCustomHeight',
+        // Forge 专属：UI Preset（架构档位）、text_encoder 多选、Shift/Distilled CFG。
+        // 必须随预设走 —— 「本地 Forge 跑 Anima」与「远端 A1111 跑 SDXL」本来就是
+        // 两套互不相干的配置，切预设时这三样要一起换过去。
+        'sdUiPreset', 'sdTextEncoders', 'sdPresetExtra',
         // ComfyUI：工作流与绑定属于「这个服务上的这套配置」，随预设走。
         'comfyWorkflow', 'comfyBindings', 'comfyAutoDetect',
         'comfyPrompt', 'comfyNegativePrompt', 'comfySteps', 'comfyCfg',
@@ -1564,6 +1800,26 @@ window.RPHubUtils = {
     // 请求 URL 里同样代表画布尺寸的参数（各链路拼 URL 时都带上了）。
     const IMAGE_CACHE_SIZE_PARAMS = Object.freeze(['size', 'w', 'h']);
 
+    // 「留空 = 完全不干预服务端」的字段：它们的空值对画面**没有任何影响**，
+    // 因此空着的时候不进指纹。
+    //
+    // 起因（必须修，否则升级即回归）：这些字段是后加的，老存档里压根没有这些键。
+    // 若把它们照常算进指纹，升级后老指纹（缺键）与新指纹（空值）就永远不相等，
+    // 于是**所有历史图**都会被判成「按旧参数出的」——正是文档里「升级不重跑」要避免的事
+    // （官方 API 一张图就是一次实打实的消耗）。
+    // 反过来，只要用户真的选了值（非空），它就该参与比较：换了架构/Text Encoder
+    // 本来就会改变画面，提示「按旧参数出的」是正确的。
+    const IMAGE_CACHE_NEUTRAL_FIELDS = Object.freeze([
+        'sdUiPreset', 'sdTextEncoders', 'sdPresetExtra'
+    ]);
+
+    // 值是否等于「不干预」（空串 / 空数组 / null / undefined）。
+    const isNeutralCacheValue = (value) => {
+        if (value === undefined || value === null || value === '') return true;
+        if (Array.isArray(value)) return value.length === 0;
+        return false;
+    };
+
     // 键排序后的稳定序列化：老存档里的指纹是按「旧字段表 + 旧过滤规则」算出来的字符串，
     // 升级后若直接比字符串，历史图会被判成「参数变了」而全部重跑一遍（正是这次要修的现象）。
     // 所以比较前先把两边都归一化（解析 → 丢掉尺寸类字段 → 键排序 → 再比），
@@ -1583,6 +1839,10 @@ window.RPHubUtils = {
         if (!parsed || typeof parsed !== 'object') return parsed;
         if (parsed.profile && typeof parsed.profile === 'object') {
             IMAGE_CACHE_SIZE_FIELDS.forEach(field => { delete parsed.profile[field]; });
+            // 「留空 = 不干预」的字段在空值时整个丢掉，让新老指纹能对上（见上方说明）。
+            IMAGE_CACHE_NEUTRAL_FIELDS.forEach(field => {
+                if (isNeutralCacheValue(parsed.profile[field])) delete parsed.profile[field];
+            });
         }
         // 老版本的指纹里，URL 参数直接铺在顶层（没有 request 这一层包着）。
         IMAGE_CACHE_SIZE_PARAMS.forEach(param => { delete parsed[param]; });
@@ -3197,7 +3457,16 @@ window.RPHubUtils = {
         resolveSdVaeOverride,
         normalizeSdVaeEntry,
         isSdVaeModulePath,
+        isSdTextEncoderModulePath,
         parseSdVaeList,
+        parseSdModuleList,
+        resolveSdUiPresetOverride,
+        resolveSdAdditionalModulesOverride,
+        resolveSdPresetExtraOverride,
+        describeSdPresetExtra,
+        parseSdUiPresetList,
+        readSdPresetFromOptions,
+        buildSdOverrideSettings,
         captureImageProfile,
         applyImageProfile,
         seedEndpointProfiles,
