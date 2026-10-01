@@ -275,6 +275,25 @@ const extractApiErrorMessage = (payload, fallbackStatus = '') => {
     return detail ? formatApiErrorMessage(status, detail) : '';
 };
 
+// 推理强度（reasoning_effort）的归一。
+//
+// 背景（实测 CLIProxyAPI v8.0.5，OpenAI 兼容 /v1/chat/completions）：Gemini 系模型
+// **不传 reasoning_effort** 时 reasoning_content 恒为 null，而 reasoning_tokens 照常消耗
+// ——即「思考照跑，只是不回传」，界面上的「默认」因此静默变成「看不到思考过程」。
+// 同一条地址上 DeepSeek 系不传也会正常回传，于是现象看起来像「换了 API 地址就没思考」，
+// 实际是 Gemini 侧对缺省值取了 none。实测各档位（同一网关、同一提示词）：
+//   不传 → 无    none → 无    low → 视模型而定    medium / high / max → 有
+// 界面「默认」的语义是「不干预」，不是「关闭思考」，故对 Gemini 缺省补 medium
+// （实测能稳定吐出 reasoning_content 的最低档）；其余情况一律原样透传，
+// 用户显式选的 none / low 不会被改写。
+const REASONING_EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'max'];
+const DEFAULT_GEMINI_REASONING_EFFORT = 'medium';
+const resolveRequestReasoningEffort = (model, effort) => {
+    const explicit = String(effort ?? '').trim().toLowerCase();
+    if (REASONING_EFFORT_VALUES.includes(explicit)) return explicit;
+    return /gemini/i.test(String(model ?? '')) ? DEFAULT_GEMINI_REASONING_EFFORT : '';
+};
+
 window.RPHubUtils = {
     AVATAR_MAX_WIDTH,
     AVATAR_QUALITY,
@@ -289,6 +308,7 @@ window.RPHubUtils = {
     isAvatarWorthShrinking,
     normalizeApiUsage,
     parseCot,
+    resolveRequestReasoningEffort,
     shrinkAvatarDataUrl,
     stringifyErrorDetail
 };

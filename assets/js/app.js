@@ -45,6 +45,7 @@ const {
     getImageTagRegex,
     normalizeApiUsage,
     parseCot,
+    resolveRequestReasoningEffort,
     shrinkAvatarDataUrl,
     stringifyErrorDetail
 } = window.RPHubUtils;
@@ -1968,7 +1969,13 @@ let removedProviderConfigCleared = false;
         const requestTrackedChatCompletion = (options, type) => {
             const { providerId, ...rest } = options || {};
             const target = resolveProviderRequestTarget(rest.model, providerId);
-            const request = { url: buildApiEndpoint(target.url, 'chat/completions'), apiKey: target.apiKey, ...rest };
+            // 「默认」这一档对 Gemini 补 medium：缺省时该网关不回传思考（见 core-utils 的
+            // resolveRequestReasoningEffort）。用户显式选的档位原样透传。
+            const reasoningEffort = resolveRequestReasoningEffort(rest.model, rest.reasoningEffort);
+            const request = {
+                url: buildApiEndpoint(target.url, 'chat/completions'), apiKey: target.apiKey, ...rest,
+                ...(reasoningEffort ? { reasoningEffort } : {})
+            };
             return requestChatCompletion({ ...request, onUsage: (usage, metrics) => recordApiUsage(usage, {
                 type, model: request.model, apiUrl: target.url, apiKey: target.apiKey, ...metrics
             }) });
@@ -3171,11 +3178,14 @@ let removedProviderConfigCleared = false;
             if (!String(target.url || '').trim() || !String(target.apiKey || '').trim()) {
                 throw new Error('请先在「API 连接与服务」里配置主模型（地址 + Key）');
             }
+            // 与 requestTrackedChatCompletion 同一口径：Gemini 缺省档补 medium。
+            const reasoningEffort = resolveRequestReasoningEffort(settings.model, settings.reasoningEffort);
             const result = await requestChatCompletion({
                 url: buildApiEndpoint(target.url, 'chat/completions'),
                 apiKey: target.apiKey,
                 model: settings.model,
                 temperature,
+                ...(reasoningEffort ? { reasoningEffort } : {}),
                 messages: [
                     { role: 'system', content: system },
                     { role: 'user', content: prompt }
