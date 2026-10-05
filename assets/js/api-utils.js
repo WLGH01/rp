@@ -274,10 +274,19 @@
         };
         try {
             const tools = [...(options.tools || []), ...(options.replyInTool && !options.requireTool ? [replyTool] : [])];
+            // 采样参数：只有调用方明确给了值才下发。
+            // 酒馆预设导入后 top_p / 惩罚项 / max_tokens 才有值；不导入时这里什么都不加，
+            // 请求体与改造前逐字段一致（不会因为「多传了一个 null」被网关当成显式设置）。
+            const sampling = {};
+            if (Number.isFinite(options.topP)) sampling.top_p = options.topP;
+            if (Number.isFinite(options.frequencyPenalty)) sampling.frequency_penalty = options.frequencyPenalty;
+            if (Number.isFinite(options.presencePenalty)) sampling.presence_penalty = options.presencePenalty;
+            if (Number.isFinite(options.maxTokens) && options.maxTokens > 0) sampling.max_tokens = options.maxTokens;
             return await withApiResponse({ ...options, onErrorResponse: text => {
                 if (logResponse) rawResponse = text;
             }, body: {
                 model: options.model, messages: options.messages, temperature: options.temperature,
+                ...sampling,
                 ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
                 ...(tools.length ? {
                     tools,

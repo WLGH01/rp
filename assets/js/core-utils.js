@@ -1145,6 +1145,441 @@ window.RPHubUtils = {
     };
 })();
 
+// --- Chat preset sets (多预设集合 + 酒馆预设导入) ---
+//
+// 背景：本站的「预设」原本只是**一组**提示词条目（破限 / 防抢话 / 文风 / COT…），
+// 存成 `presets` 数组，随聊天一起生效。酒馆（SillyTavern）那边「预设」是一整套
+// **可切换的集合**：prompts + prompt_order + 采样参数 + 自带正则。
+// 于是这里把预设升级成「预设集」：
+//
+//   - 默认预设（id = default，builtin）由代码每次启动重建，界面上不可修改，只保留开关；
+//   - 用户/导入的预设集各自保存自己的条目与采样参数，切换即整套生效；
+//   - 导入酒馆预设时按 prompt_order 还原顺序与开关，并读走采样参数与自带正则。
+//
+// 本模块只做纯函数（解析/归一化），不碰 Vue 状态，便于 Node 侧单测直接覆盖。
+(function () {
+    const DEFAULT_PRESET_SET_ID = 'default';
+    const DEFAULT_PRESET_SET_NAME = '默认预设';
+    const PRESET_SET_LIMIT = 60;
+    const PRESET_SET_NAME_MAX = 60;
+    const PRESET_ENTRY_ROLES = Object.freeze(['system', 'user', 'assistant']);
+    // 采样参数白名单：null = 未设置（请求里不下发该字段）。
+    // 与酒馆字段的对应关系：
+    //   temperature → temperature        top_p → topP
+    //   frequency_penalty → frequencyPenalty   presence_penalty → presencePenalty
+    //   openai_max_tokens → maxTokens    reasoning_effort → reasoningEffort
+    // 酒馆还有 top_k / min_p / top_a / repetition_penalty，OpenAI 兼容的
+    // chat/completions 没有对应字段，导入时忽略（不猜、也不塞进 URL）。
+    const PRESET_PARAM_KEYS = Object.freeze([
+        'temperature', 'topP', 'frequencyPenalty', 'presencePenalty', 'maxTokens', 'reasoningEffort'
+    ]);
+    // 酒馆的 openai_max_tokens 默认值是 65535，语义接近「不限制」。原样下发会让多数网关
+    // 直接 400（超过模型自身上限，DeepSeek 只有 8192），因此高于阈值一律视为「不下发」。
+    const MAX_TOKENS_UNLIMITED_THRESHOLD = 32000;
+    // 与上方 resolveRequestReasoningEffort 的档位保持一致；那边是另一个闭包，这里另存一份。
+    const PRESET_REASONING_EFFORT_VALUES = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'max']);
+
+    const toFiniteNumber = (value) => {
+        if (value === null || value === undefined || value === '') return null;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+    };
+    const clampNumber = (value, min, max) => {
+        const number = toFiniteNumber(value);
+        if (number === null) return null;
+        return Math.min(max, Math.max(min, number));
+    };
+    // 酒馆的 65535（不限制）与负数/0 都收敛成 null；其余夹到 1..32000。
+    const normalizeMaxTokens = (value) => {
+        const number = toFiniteNumber(value);
+        if (number === null || number <= 0) return null;
+        if (number >= MAX_TOKENS_UNLIMITED_THRESHOLD) return null;
+        return Math.max(1, Math.round(number));
+    };
+    const normalizePresetParams = (params = {}) => {
+        const source = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+        const effort = String(source.reasoningEffort ?? '').trim().toLowerCase();
+        return {
+            temperature: clampNumber(source.temperature, 0, 2),
+            topP: clampNumber(source.topP, 0, 1),
+            frequencyPenalty: clampNumber(source.frequencyPenalty, -2, 2),
+            presencePenalty: clampNumber(source.presencePenalty, -2, 2),
+            maxTokens: normalizeMaxTokens(source.maxTokens),
+            reasoningEffort: PRESET_REASONING_EFFORT_VALUES.includes(effort) ? effort : ''
+        };
+    };
+    const normalizePresetEntry = (entry = {}) => {
+        const source = entry && typeof entry === 'object' ? entry : {};
+        return {
+            name: String(source.name || '').trim() || '未命名条目',
+            content: String(source.content || ''),
+            enabled: source.enabled !== false,
+            role: PRESET_ENTRY_ROLES.includes(source.role) ? source.role : 'system'
+        };
+    };
+    // 「代码上一次发出去的条目内容」快照：{ 条目名 → content }。
+    // 用途见 syncBuiltinPresetEntries —— 它让「用户改过的条目」与「用户没碰过的条目」分开处理。
+    const normalizePresetBaseline = (baseline) => {
+        const source = baseline && typeof baseline === 'object' && !Array.isArray(baseline) ? baseline : {};
+        const out = {};
+        for (const [key, value] of Object.entries(source)) {
+            const name = String(key || '').trim();
+            if (!name || typeof value !== 'string') continue;
+            out[name] = value;
+        }
+        return out;
+    };
+    /**
+     * 把「代码内置的默认预设条目」合并进默认预设。
+     *
+     * 需求（用户明确）：默认预设**可以修改**，只是不能删除。
+     * 于是这里不能像过去那样每次启动都拿代码内容覆盖一遍（那等于「改了也没用」），
+     * 而是按「用户有没有动过这一条」分开处理：
+     *
+     *   - 用户改过的条目：内容与顺序原样保留，代码永不覆盖；
+     *   - 用户没动过的条目：内容跟随代码升级（新版本改了内置提示词能自动生效）；
+     *   - 用户删掉的条目：不再补回来（记进 removed 持久化）；
+     *   - 代码新增的条目：补进来；
+     *   - 用户自己新增的条目：原样保留。
+     *
+     * 「用户动过」的判据是 baseline —— 代码上一次发出去的内容快照。
+     * 现内容 ≠ 快照，说明是用户改的；相等则说明还没碰过。
+     *
+     * @param {object} input
+     * @param {Array} input.prompts   当前默认预设的条目
+     * @param {Array} input.defaults  代码内置条目 [{ name, content, role, enabled? }]
+     * @param {object} input.baseline 上次代码内容快照 { 条目名: content }
+     * @param {Array} input.removed   用户删掉的条目名
+     * @returns {{ prompts: Array, baseline: object, removed: Array, changed: boolean }}
+     */
+    const syncBuiltinPresetEntries = ({ prompts, defaults, baseline, removed } = {}) => {
+        const current = (Array.isArray(prompts) ? prompts : []).map(normalizePresetEntry);
+        const builtinList = (Array.isArray(defaults) ? defaults : [])
+            .filter(item => item && String(item.name || '').trim())
+            .map(item => normalizePresetEntry(item));
+        const prevBaseline = normalizePresetBaseline(baseline);
+        const removedSet = new Set((Array.isArray(removed) ? removed : []).map(item => String(item || '').trim()).filter(Boolean));
+        const defaultByName = new Map(builtinList.map(item => [item.name, item]));
+        const before = JSON.stringify(current.map(item => [item.name, item.content, item.enabled, item.role]));
+
+        const out = [];
+        const presentNames = new Set();
+        for (const entry of current) {
+            presentNames.add(entry.name);
+            const builtin = defaultByName.get(entry.name);
+            if (!builtin) {
+                // 用户自己新增的条目：原样保留。
+                out.push(entry);
+                continue;
+            }
+            // 用户把它删过，但现在又存在（可能是手动加回来的）：撤销删除标记，按普通条目处理。
+            removedSet.delete(entry.name);
+            const untouched = prevBaseline[entry.name] !== undefined
+                && prevBaseline[entry.name] === entry.content;
+            if (!untouched) {
+                // 用户改过：内容、顺序、角色一律尊重用户的。
+                out.push(entry);
+                continue;
+            }
+            // 没动过：跟随代码升级，只保留用户对开关的选择。
+            out.push({ ...builtin, enabled: entry.enabled });
+        }
+
+        // 补上代码新增的条目（用户删过的除外），插在它前面那个内置条目之后。
+        builtinList.forEach((builtin) => {
+            if (presentNames.has(builtin.name) || removedSet.has(builtin.name)) return;
+            const canonicalIndex = builtinList.findIndex(item => item.name === builtin.name);
+            let insertAt = out.length;
+            for (let index = canonicalIndex - 1; index >= 0; index -= 1) {
+                const anchor = out.findIndex(entry => entry.name === builtinList[index].name);
+                if (anchor !== -1) { insertAt = anchor + 1; break; }
+            }
+            out.splice(insertAt, 0, { ...builtin });
+            presentNames.add(builtin.name);
+        });
+
+        // 记录「上次代码发出去的内容」，供下次判断用户是否改过。
+        const nextBaseline = {};
+        builtinList.forEach((item) => { nextBaseline[item.name] = item.content; });
+        const nextRemoved = [...removedSet];
+        const after = JSON.stringify(out.map(item => [item.name, item.content, item.enabled, item.role]));
+        return {
+            prompts: out,
+            baseline: nextBaseline,
+            removed: nextRemoved,
+            changed: before !== after
+                || JSON.stringify(prevBaseline) !== JSON.stringify(nextBaseline)
+                || JSON.stringify([...removedSet].sort()) !== JSON.stringify(nextRemoved.slice().sort())
+        };
+    };
+
+    const clonePresetParams = (params) => ({ ...normalizePresetParams(params) });
+
+    const normalizePresetSet = (set = {}, index = 0) => {
+        const source = set && typeof set === 'object' ? set : {};
+        const isBuiltin = source.builtin === true || source.id === DEFAULT_PRESET_SET_ID;
+        const fallbackName = isBuiltin ? DEFAULT_PRESET_SET_NAME : `预设 ${index + 1}`;
+        const name = String(source.name || '').trim() || fallbackName;
+        return {
+            id: String(source.id || '').trim() || (isBuiltin ? DEFAULT_PRESET_SET_ID : `set-${index + 1}`),
+            name: name.slice(0, PRESET_SET_NAME_MAX),
+            builtin: isBuiltin,
+            prompts: (Array.isArray(source.prompts) ? source.prompts : []).map(normalizePresetEntry),
+            params: normalizePresetParams(source.params),
+            // 代码上次发出去的内容快照（只对默认预设有意义，见 syncBuiltinPresetEntries）。
+            builtinBaseline: normalizePresetBaseline(source.builtinBaseline),
+            // 动态生成条目（COT / 破限预注入）上次由代码生成的内容：
+            // 它们随设置变化，需要单独一份基准来判断用户有没有改过。
+            dynamicBaseline: normalizePresetBaseline(source.dynamicBaseline),
+            // 用户主动删掉的默认预设条目名：默认预设里「删了就别再补回来」。
+            removedBuiltinEntries: (Array.isArray(source.removedBuiltinEntries) ? source.removedBuiltinEntries : [])
+                .map(item => String(item || '').trim()).filter(Boolean),
+            source: source.source === 'sillytavern' ? 'sillytavern'
+                : source.source === 'rp-hub' ? 'rp-hub' : '',
+            importedAt: Number(source.importedAt) || 0
+        };
+    };
+
+    // 存档里的预设集列表按不可信输入处理：丢坏条目、去重 id、夹住数量上限。
+    // 默认预设一定存在且排在第一位（其余顺序保持用户拖动后的样子）。
+    // 注意：条目「空数组」是合法状态（用户把某套预设的条目全删了），要保留；
+    // 只有根本不是对象的条目（null / 字符串 / 数字）才丢掉。
+    const normalizePresetSets = (sets) => {
+        const list = Array.isArray(sets) ? sets : [];
+        const seen = new Set();
+        const out = [];
+        const push = (item, index) => {
+            const normalized = normalizePresetSet(item, index);
+            if (seen.has(normalized.id)) return;
+            seen.add(normalized.id);
+            out.push(normalized);
+        };
+        const builtin = list.find(item => item && typeof item === 'object'
+            && (item.builtin === true || item.id === DEFAULT_PRESET_SET_ID));
+        push(builtin || { id: DEFAULT_PRESET_SET_ID, name: DEFAULT_PRESET_SET_NAME, builtin: true }, 0);
+        for (const item of list) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+            if (item === builtin) continue;
+            if (item.builtin === true || item.id === DEFAULT_PRESET_SET_ID) continue;
+            if (out.length >= PRESET_SET_LIMIT) break;
+            push(item, out.length);
+        }
+        return out;
+    };
+
+    // 预设集重名会让人分不清哪套在生效，因此新增时统一走这里取一个不冲突的名字。
+    const uniquePresetSetName = (sets, base) => {
+        const taken = new Set((Array.isArray(sets) ? sets : []).map(item => String(item?.name || '').trim()));
+        const clean = String(base || '').trim().slice(0, PRESET_SET_NAME_MAX) || '新预设';
+        if (!taken.has(clean)) return clean;
+        for (let index = 2; index <= PRESET_SET_LIMIT + 1; index += 1) {
+            const candidate = `${clean} (${index})`.slice(0, PRESET_SET_NAME_MAX);
+            if (!taken.has(candidate)) return candidate;
+        }
+        return `${clean} (${Date.now()})`.slice(0, PRESET_SET_NAME_MAX);
+    };
+
+    const presetNameFromFileName = (fileName) => String(fileName || '')
+        .replace(/^.*[\\/]/, '')
+        .replace(/\.json$/i, '')
+        .trim();
+
+    // --- 酒馆预设解析 ---
+    const isSillyTavernPreset = (data) => !!data && typeof data === 'object' && !Array.isArray(data)
+        && Array.isArray(data.prompts)
+        && (Array.isArray(data.prompt_order)
+            || data.openai_max_context !== undefined
+            || data.temperature !== undefined
+            || data.top_p !== undefined);
+
+    const isRpHubPresetSet = (data) => !!data && typeof data === 'object' && !Array.isArray(data)
+        && data.type === 'rp-hub-preset-set';
+
+    // 酒馆把「顺序 + 开关」放在 prompt_order 里，且按角色分别存一份（角色卡 100000/100001…）。
+    // 取最长的那一份作为通用顺序：实测其余几份要么为空，要么是同一套的子集。
+    const resolveSillyTavernPromptOrder = (data) => {
+        const orders = Array.isArray(data?.prompt_order) ? data.prompt_order : [];
+        let best = [];
+        for (const order of orders) {
+            const list = Array.isArray(order?.order) ? order.order : [];
+            if (list.length > best.length) best = list;
+        }
+        return best;
+    };
+
+    const mapSillyTavernParams = (data = {}) => ({
+        temperature: data.temperature,
+        topP: data.top_p,
+        frequencyPenalty: data.frequency_penalty,
+        presencePenalty: data.presence_penalty,
+        maxTokens: data.openai_max_tokens,
+        // 酒馆的 auto 等于「不指定」，本站的「默认」也是空串，语义对齐。
+        reasoningEffort: String(data.reasoning_effort ?? '').trim().toLowerCase() === 'auto'
+            ? ''
+            : data.reasoning_effort
+    });
+
+    /**
+     * 把一份酒馆预设转成本站的「预设集」内容。
+     * 丢弃项：marker 占位（Char Description / Chat History 等由本站自己拼）、空内容条目。
+     * 说明：酒馆的 injection_position / injection_depth（按深度插进聊天历史）本站没有对应能力，
+     * 只按 role 落到 system / user / assistant 三档，顺序按 prompt_order 原样保留。
+     */
+    const parseSillyTavernPreset = (data, options = {}) => {
+        const source = data && typeof data === 'object' ? data : {};
+        const promptList = Array.isArray(source.prompts) ? source.prompts : [];
+        const byIdentifier = new Map();
+        promptList.forEach((prompt) => {
+            if (prompt?.identifier) byIdentifier.set(String(prompt.identifier), prompt);
+        });
+
+        const ordered = [];
+        const used = new Set();
+        resolveSillyTavernPromptOrder(source).forEach((item) => {
+            const identifier = String(item?.identifier ?? '');
+            const prompt = identifier ? byIdentifier.get(identifier) : null;
+            if (!prompt || used.has(identifier)) return;
+            used.add(identifier);
+            ordered.push({ prompt, orderEnabled: item.enabled });
+        });
+        // prompt_order 里没提到的条目照样保留（酒馆里它们只是没被排进当前角色）。
+        promptList.forEach((prompt) => {
+            const identifier = String(prompt?.identifier ?? '');
+            if (!identifier || used.has(identifier)) return;
+            used.add(identifier);
+            ordered.push({ prompt, orderEnabled: undefined });
+        });
+
+        const prompts = [];
+        let skippedMarkers = 0;
+        let skippedEmpty = 0;
+        ordered.forEach(({ prompt, orderEnabled }) => {
+            if (prompt.marker) { skippedMarkers += 1; return; }
+            const content = String(prompt.content || '');
+            if (!content.trim()) { skippedEmpty += 1; return; }
+            prompts.push(normalizePresetEntry({
+                name: String(prompt.name || '').trim() || '未命名条目',
+                content,
+                enabled: orderEnabled === undefined ? prompt.enabled !== false : orderEnabled !== false,
+                role: prompt.role
+            }));
+        });
+
+        const regexScripts = Array.isArray(source.extensions?.regex_scripts)
+            ? source.extensions.regex_scripts.filter(script => script && typeof script === 'object')
+            : [];
+        return {
+            name: presetNameFromFileName(options.fileName) || '酒馆预设',
+            prompts,
+            params: normalizePresetParams(mapSillyTavernParams(source)),
+            regexScripts,
+            stats: {
+                total: promptList.length,
+                imported: prompts.length,
+                enabled: prompts.filter(prompt => prompt.enabled).length,
+                skippedMarkers,
+                skippedEmpty,
+                regexScripts: regexScripts.length
+            }
+        };
+    };
+
+    /**
+     * 识别一份预设文件并归一化成统一的导入结果。
+     * 支持三种来源：
+     *   1. 酒馆预设（prompts + prompt_order + 采样参数 + extensions.regex_scripts）
+     *   2. 本站预设集（type = 'rp-hub-preset-set'）
+     *   3. 本站旧的条目数组（导出的 presets.json）
+     * @returns {{kind:'set'|'entries', name:string, prompts:Array, params:Object|null, regexScripts:Array, stats:Object}}
+     */
+    const parsePresetImport = (data, options = {}) => {
+        const fileName = options.fileName || '';
+        if (Array.isArray(data)) {
+            const prompts = data.map(normalizePresetEntry).filter(entry => entry.content.trim() || entry.name);
+            return {
+                kind: 'entries',
+                name: presetNameFromFileName(fileName) || '导入的预设',
+                prompts,
+                params: null,
+                regexScripts: [],
+                stats: { total: data.length, imported: prompts.length, enabled: prompts.filter(p => p.enabled).length, skippedMarkers: 0, skippedEmpty: 0, regexScripts: 0 }
+            };
+        }
+        if (!data || typeof data !== 'object') throw new Error('无法识别的预设格式');
+        if (isRpHubPresetSet(data)) {
+            const normalized = normalizePresetSet({ ...data, id: 'imported', builtin: false }, 0);
+            return {
+                kind: 'set',
+                name: String(data.name || '').trim() || presetNameFromFileName(fileName) || '导入的预设',
+                prompts: normalized.prompts,
+                params: clonePresetParams(normalized.params),
+                regexScripts: Array.isArray(data.regexScripts) ? data.regexScripts.filter(s => s && typeof s === 'object') : [],
+                stats: {
+                    total: normalized.prompts.length,
+                    imported: normalized.prompts.length,
+                    enabled: normalized.prompts.filter(p => p.enabled).length,
+                    skippedMarkers: 0,
+                    skippedEmpty: 0,
+                    regexScripts: Array.isArray(data.regexScripts) ? data.regexScripts.length : 0
+                }
+            };
+        }
+        if (isSillyTavernPreset(data)) return { kind: 'set', ...parseSillyTavernPreset(data, options) };
+        // 兜底：带了 prompts 数组就当酒馆预设处理（有些预设省掉了 prompt_order）。
+        if (Array.isArray(data.prompts)) return { kind: 'set', ...parseSillyTavernPreset(data, options) };
+        if (Array.isArray(data.presets)) {
+            const prompts = data.presets.map(normalizePresetEntry);
+            return {
+                kind: 'entries',
+                name: presetNameFromFileName(fileName) || '导入的预设',
+                prompts,
+                params: null,
+                regexScripts: [],
+                stats: { total: prompts.length, imported: prompts.length, enabled: prompts.filter(p => p.enabled).length, skippedMarkers: 0, skippedEmpty: 0, regexScripts: 0 }
+            };
+        }
+        throw new Error('无法识别的预设格式');
+    };
+
+    // 导出用：本站预设集的自有格式（导入时按 type 识别，不会和酒馆预设混淆）。
+    const toPresetSetExportEntry = (set = {}) => {
+        const normalized = normalizePresetSet(set, 0);
+        return {
+            type: 'rp-hub-preset-set',
+            version: 1,
+            name: normalized.name,
+            params: { ...normalized.params },
+            prompts: normalized.prompts.map(entry => ({ ...entry }))
+        };
+    };
+
+    window.RPHubChatPresets = Object.freeze({
+        DEFAULT_PRESET_SET_ID,
+        DEFAULT_PRESET_SET_NAME,
+        PRESET_SET_LIMIT,
+        PRESET_SET_NAME_MAX,
+        PRESET_PARAM_KEYS,
+        MAX_TOKENS_UNLIMITED_THRESHOLD,
+        clonePresetParams,
+        isRpHubPresetSet,
+        isSillyTavernPreset,
+        mapSillyTavernParams,
+        normalizeMaxTokens,
+        normalizePresetBaseline,
+        normalizePresetEntry,
+        normalizePresetParams,
+        normalizePresetSet,
+        normalizePresetSets,
+        parsePresetImport,
+        parseSillyTavernPreset,
+        presetNameFromFileName,
+        resolveSillyTavernPromptOrder,
+        syncBuiltinPresetEntries,
+        toPresetSetExportEntry,
+        uniquePresetSetName
+    });
+})();
+
 // --- Application configuration ---
 (function () {
     window.RPHubConfig = Object.freeze({

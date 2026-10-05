@@ -1564,6 +1564,7 @@ assertEqual('换 Text Encoder 同理 → 判为按旧参数出的',
 section('16) 角色卡管理 → 添加角色卡：批量导入接线');
 const mainIndex = readFileSync(join(root, 'index.html'), 'utf8');
 const appJs = readFileSync(join(root, 'assets/js/app.js'), 'utf8');
+const apiJs = readFileSync(join(root, 'assets/js/api-utils.js'), 'utf8');
 const uiJs = readFileSync(join(root, 'assets/js/ui-components.js'), 'utf8');
 
 assertTrue('菜单里新增「批量导入角色卡」', uiJs.includes('批量导入角色卡'));
@@ -2291,5 +2292,262 @@ assertTrue('NAI 两条链路仍各取自己的模型（官方 naiOfficialModel /
     /isNaiOfficialProvider\.value[\s\S]{0,120}settings\.naiOfficialModel[\s\S]{0,120}settings\.imageModel/.test(appJs));
 assertTrue('词典也按同一档位分流（与自动生图世界书同源）',
     /const tagLexiconContent = BUILTIN_PROMPTS\.buildImageTagLexicon\(\{[\s\S]{0,160}model: autoImageGenModel/.test(appJs));
+
+// --- 26. 预设集：多套预设、默认预设只读、酒馆预设导入 ---
+// 需求：兼容导入酒馆预设；支持多套预设保存/重命名/切换；内置的「默认预设」不可修改。
+const chatPresets = sandbox.window.RPHubChatPresets;
+assertTrue('core-utils 导出 RPHubChatPresets', Boolean(chatPresets));
+
+section('26) 预设集：归一化与默认预设不可变');
+assertEqual('默认预设 id 固定', chatPresets.DEFAULT_PRESET_SET_ID, 'default');
+// 空存档也要有一个默认预设，且排第一。
+const emptySets = chatPresets.normalizePresetSets([]);
+assertEqual('空存档也补出默认预设', emptySets.length, 1);
+assertEqual('补出来的是内置默认预设', emptySets[0].builtin, true);
+assertEqual('默认预设名固定', emptySets[0].name, '默认预设');
+// 存档里没有默认预设时，它被插到第一位，其余顺序保持。
+const withUsers = chatPresets.normalizePresetSets([
+    { id: 'a', name: '甲', prompts: [{ name: 'P', content: 'x' }] },
+    { id: 'b', name: '乙', prompts: [] }
+]);
+assertEqual('默认预设排第一', withUsers[0].id, 'default');
+assertEqual('用户预设顺序保持', withUsers.slice(1).map(s => s.id), ['a', 'b']);
+// 坏条目：非数组、缺 id、重名 id。注意：空条目数组是合法状态（用户可能把条目全删了），要保留。
+const messy = chatPresets.normalizePresetSets([
+    null, 'nope', { id: 'a', name: '甲' }, { id: 'a', name: '重复 id' }, { name: '' }
+]);
+assertEqual('坏条目被丢掉且 id 去重', messy.map(s => s.id), ['default', 'a', 'set-3']);
+assertTrue('缺内容的条目被归一成空数组', Array.isArray(messy[1].prompts) && messy[1].prompts.length === 0);
+assertTrue('字符串等非对象条目被丢弃', !messy.some(s => typeof s.name !== 'string' || !s.name));
+
+section('26b-2) 默认预设可修改：用户改过的不被覆盖、删掉的不复活');
+const syncInput = {
+    // 内置两条：A 用户改过、B 没碰过。
+    prompts: [
+        { name: 'A', content: '用户改过的 A', role: 'system', enabled: true },
+        { name: 'B', content: '旧的 B', role: 'system', enabled: false },
+        { name: '我的条目', content: '自己加的', role: 'user', enabled: true }
+    ],
+    defaults: [
+        { name: 'A', content: '代码的 A', role: 'system' },
+        { name: 'B', content: '新的 B', role: 'system' },
+        { name: 'C', content: '新增的 C', role: 'system' }
+    ],
+    baseline: { A: '代码的 A', B: '旧的 B' },
+    removed: []
+};
+const syncedEntries = chatPresets.syncBuiltinPresetEntries(syncInput);
+const byName = Object.fromEntries(syncedEntries.prompts.map(item => [item.name, item]));
+assertEqual('用户改过的条目内容被保留', byName.A.content, '用户改过的 A');
+assertEqual('没改过的条目跟随代码升级', byName.B.content, '新的 B');
+assertEqual('没改过的条目保留用户的开关', byName.B.enabled, false);
+assertEqual('用户自己加的条目原样保留', byName['我的条目'].content, '自己加的');
+assertEqual('代码新增的条目被补进来', byName.C.content, '新增的 C');
+assertEqual('新增条目插在被锚定条目之后（B 之后）', syncedEntries.prompts.map(p => p.name), ['A', 'B', 'C', '我的条目']);
+assertEqual('基线被更新为本次代码内容', syncedEntries.baseline, { A: '代码的 A', B: '新的 B', C: '新增的 C' });
+assertTrue('本次有变化时 changed 为真', syncedEntries.changed);
+
+// 用户删掉的内置条目不再补回来。
+const withRemoved = chatPresets.syncBuiltinPresetEntries({
+    prompts: [{ name: 'A', content: '代码的 A', role: 'system', enabled: true }],
+    defaults: [{ name: 'A', content: '代码的 A' }, { name: 'C', content: '新增的 C' }],
+    baseline: { A: '代码的 A' },
+    removed: ['C']
+});
+assertEqual('被删掉的内置条目不再补回', withRemoved.prompts.map(p => p.name), ['A']);
+assertEqual('删除记录被持久化', withRemoved.removed, ['C']);
+
+// 用户把删掉的条目又手动加回来 → 撤销删除标记。
+const readded = chatPresets.syncBuiltinPresetEntries({
+    prompts: [{ name: 'C', content: '新增的 C', role: 'system', enabled: true }],
+    defaults: [{ name: 'C', content: '新增的 C' }],
+    baseline: {},
+    removed: ['C']
+});
+assertEqual('手动加回后撤销删除标记', readded.removed, []);
+assertEqual('手动加回的条目保留', readded.prompts.map(p => p.name), ['C']);
+
+// 幂等：同样的输入跑两次，结果与基线都稳定（否则每次启动都会误判成「有变化」）。
+const twice = chatPresets.syncBuiltinPresetEntries({
+    prompts: syncedEntries.prompts,
+    defaults: syncInput.defaults,
+    baseline: syncedEntries.baseline,
+    removed: []
+});
+assertEqual('第二次同步不再改动条目', twice.prompts.map(p => [p.name, p.content]), syncedEntries.prompts.map(p => [p.name, p.content]));
+assertEqual('第二次同步无变化', twice.changed, false);
+assertEqual('基线格式可被归一化（坏值丢掉）',
+    chatPresets.normalizePresetBaseline({ A: 'x', B: 3, '': 'y' }), { A: 'x' });
+
+section('26b) 预设集：重名收敛与上限');
+assertEqual('不冲突时原名返回', chatPresets.uniquePresetSetName([{ name: '甲' }], '乙'), '乙');
+assertEqual('重名自动加序号', chatPresets.uniquePresetSetName([{ name: '甲' }], '甲'), '甲 (2)');
+assertEqual('连续重名继续递增',
+    chatPresets.uniquePresetSetName([{ name: '甲' }, { name: '甲 (2)' }], '甲'), '甲 (3)');
+assertEqual('空名兜底', chatPresets.uniquePresetSetName([], '   '), '新预设');
+
+section('26c) 酒馆预设：prompts + prompt_order + 采样参数 + 正则');
+// 造一份结构对齐真实酒馆预设的夹具（字段名逐个取自实测的 Reborn2.3 / 狐狐预设）。
+const stFixture = {
+    temperature: 1.08,
+    frequency_penalty: 0.25,
+    presence_penalty: -0.5,
+    top_p: 0.98,
+    top_k: 40,
+    min_p: 0.05,
+    openai_max_context: 2000000,
+    openai_max_tokens: 65535,
+    reasoning_effort: 'high',
+    prompts: [
+        { identifier: 'main', name: '主提示', role: 'system', system_prompt: true, content: '主提示内容', enabled: true },
+        { identifier: 'worldInfoBefore', name: 'World Info (before)', role: 'system', marker: true, system_prompt: true, content: '', enabled: true },
+        { identifier: 'chatHistory', name: 'Chat History', role: 'system', marker: true, system_prompt: true, content: '', enabled: true },
+        { identifier: 'p1', name: '条目一', role: 'system', content: '第一条', enabled: false },
+        { identifier: 'p2', name: '条目二', role: 'user', content: '第二条', enabled: true },
+        { identifier: 'p3', name: '空的', role: 'system', content: '   ', enabled: true },
+        { identifier: 'p4', name: '未被排序', role: 'assistant', content: '第四条', enabled: true }
+    ],
+    prompt_order: [
+        { character_id: 100000, order: [] },
+        { character_id: 100001, order: [
+            { identifier: 'main', enabled: true },
+            { identifier: 'worldInfoBefore', enabled: true },
+            { identifier: 'p2', enabled: true },
+            { identifier: 'p1', enabled: true },
+            { identifier: 'chatHistory', enabled: true },
+            { identifier: 'p3', enabled: true }
+        ] }
+    ],
+    extensions: {
+        regex_scripts: [
+            { id: 'r1', scriptName: '思维链隐藏', findRegex: '/<think>[\\s\\S]*?<\\/think>/g', replaceString: '', placement: [2], disabled: false, markdownOnly: true, promptOnly: false },
+            { id: 'r2', scriptName: '坏的', findRegex: '', replaceString: '' }
+        ]
+    }
+};
+assertTrue('识别为酒馆预设', chatPresets.isSillyTavernPreset(stFixture));
+const stParsed = chatPresets.parsePresetImport(stFixture, { fileName: 'Reborn2.3.json' });
+assertEqual('识别成预设集（不是散条目）', stParsed.kind, 'set');
+assertEqual('文件名去掉扩展名当预设名', stParsed.name, 'Reborn2.3');
+// marker 占位与空内容条目被丢弃：7 条 → 4 条（main / p2 / p1 / p4）。
+assertEqual('marker 与空条目被丢弃', stParsed.prompts.length, 4);
+assertEqual('丢弃的 marker 数被如实统计', stParsed.stats.skippedMarkers, 2);
+assertEqual('丢弃的空条目数被如实统计', stParsed.stats.skippedEmpty, 1);
+// 顺序按 prompt_order：main → p2 → p1，再补上没被排序的 p4。
+assertEqual('顺序按 prompt_order 还原', stParsed.prompts.map(p => p.name), ['主提示', '条目二', '条目一', '未被排序']);
+assertEqual('prompt_order 里的 enabled 覆盖 prompts 的 enabled', stParsed.prompts[2].enabled, true);
+assertEqual('prompt_order 未提到的条目保留自己的 enabled', stParsed.prompts[3].enabled, true);
+assertEqual('role 原样保留', stParsed.prompts.map(p => p.role), ['system', 'user', 'system', 'assistant']);
+
+section('26d) 酒馆预设：采样参数映射与「不限制」收敛');
+const stParams = stParsed.params;
+assertEqual('temperature 直传', stParams.temperature, 1.08);
+assertEqual('top_p → topP', stParams.topP, 0.98);
+assertEqual('frequency_penalty → frequencyPenalty', stParams.frequencyPenalty, 0.25);
+assertEqual('presence_penalty → presencePenalty（负值保留）', stParams.presencePenalty, -0.5);
+assertEqual('openai_max_tokens=65535（不限制）不下发', stParams.maxTokens, null);
+assertEqual('reasoning_effort=high 保留', stParams.reasoningEffort, 'high');
+assertEqual('auto 视为未指定', chatPresets.normalizePresetParams({ reasoningEffort: 'auto' }).reasoningEffort, '');
+assertEqual('未知档位被丢掉', chatPresets.normalizePresetParams({ reasoningEffort: 'turbo' }).reasoningEffort, '');
+// 越界值夹住：温度 0-2、top_p 0-1、惩罚项 ±2。
+const clamped = chatPresets.normalizePresetParams({ temperature: 9, topP: 5, frequencyPenalty: -9, presencePenalty: 9 });
+assertEqual('温度夹到 2', clamped.temperature, 2);
+assertEqual('top_p 夹到 1', clamped.topP, 1);
+assertEqual('频率惩罚夹到 -2', clamped.frequencyPenalty, -2);
+assertEqual('存在惩罚夹到 2', clamped.presencePenalty, 2);
+assertEqual('负数 max_tokens 收敛成 null', chatPresets.normalizePresetParams({ maxTokens: -5 }).maxTokens, null);
+assertEqual('超阈值 max_tokens 收敛成 null', chatPresets.normalizePresetParams({ maxTokens: 999999 }).maxTokens, null);
+assertEqual('正常 max_tokens 取整保留', chatPresets.normalizePresetParams({ maxTokens: 4096.7 }).maxTokens, 4097);
+assertEqual('缺省参数全是 null（不下发）',
+    chatPresets.normalizePresetParams({}),
+    { temperature: null, topP: null, frequencyPenalty: null, presencePenalty: null, maxTokens: null, reasoningEffort: '' });
+
+section('26e) 酒馆预设：自带正则一并带出');
+assertEqual('正则脚本被带出', stParsed.regexScripts.length, 2);
+assertEqual('正则名保留', stParsed.regexScripts[0].scriptName, '思维链隐藏');
+
+section('26f) 导入：本站预设集与旧条目数组');
+const rpHubSet = chatPresets.parsePresetImport({
+    type: 'rp-hub-preset-set',
+    name: '我的预设',
+    params: { temperature: 0.8, topP: 0.9 },
+    prompts: [{ name: 'A', content: 'a', enabled: true, role: 'system' }]
+});
+assertEqual('识别为预设集', rpHubSet.kind, 'set');
+assertEqual('名字取自文件内容', rpHubSet.name, '我的预设');
+assertEqual('条目原样载入', rpHubSet.prompts.length, 1);
+assertEqual('参数原样载入', rpHubSet.params.topP, 0.9);
+const legacyEntries = chatPresets.parsePresetImport([{ name: '旧条目', content: 'x' }]);
+assertEqual('旧条目数组识别为 entries', legacyEntries.kind, 'entries');
+assertEqual('旧条目保留', legacyEntries.prompts.length, 1);
+assertEqual('旧条目没有采样参数', legacyEntries.params, null);
+// 导出再导入必须闭环。
+const roundTrip = chatPresets.parsePresetImport(
+    chatPresets.toPresetSetExportEntry({ name: '往返', prompts: [{ name: 'A', content: 'a' }], params: { topP: 0.5 } })
+);
+assertEqual('导出→导入闭环：名字', roundTrip.name, '往返');
+assertEqual('导出→导入闭环：条目', roundTrip.prompts.length, 1);
+assertEqual('导出→导入闭环：参数', roundTrip.params.topP, 0.5);
+// 完全不认识的输入要抛错，而不是静默导成空预设。
+let unknownThrew = false;
+try { chatPresets.parsePresetImport({ hello: 'world' }); } catch (_) { unknownThrew = true; }
+assertTrue('不认识的格式抛错', unknownThrew);
+let nullThrew = false;
+try { chatPresets.parsePresetImport(null); } catch (_) { nullThrew = true; }
+assertTrue('null 输入抛错', nullThrew);
+
+section('26g) 预设集：接线检查（默认预设可改不可删 + 采样参数下发）');
+assertTrue('默认预设禁止删除整组（守卫）',
+    /const guardBuiltinPresetSetDelete = \(\) => \{/.test(appJs)
+    && /if \(guardBuiltinPresetSetDelete\(\)\) return;/.test(appJs));
+assertTrue('默认预设的条目仍可编辑/新增（不再拦截）',
+    !/guardBuiltinPresetSet\('编辑条目'\)/.test(appJs)
+    && !/guardBuiltinPresetSet\('新增条目'\)/.test(appJs)
+    && /const editPreset = \(index\) => \{/.test(appJs));
+assertTrue('删除内置条目会登记，避免下次启动补回',
+    /if \(isBuiltinEntry\) \{[\s\S]{0,200}removed\.push\(presetName\)/.test(appJs));
+assertTrue('启动时按基线区分「用户改过的」与「没碰过的」',
+    /const isPresetEntryModified = \(name, content\) => \{/.test(appJs)
+    && /content: modified \? existingPresetData\.content : preset\.content/.test(appJs));
+assertTrue('用户改过的条目不被覆盖、删掉的不复活',
+    /if \(isPresetEntryModified\(entry\.name, entry\.content\)\) return entry;/.test(appJs)
+    && /if \(removedBuiltinNames\.has\(spec\.name\)\) return null;/.test(appJs));
+assertTrue('基线在启动结束时落盘',
+    /activeSet\.builtinBaseline = \{ \.\.\.codePresetBaseline \};/.test(appJs)
+    && /activeSet\.removedBuiltinEntries = \[\.\.\.removedBuiltinNames\];/.test(appJs));
+assertTrue('动态条目（COT/预注入）用独立基线，用户改过就不再重生成',
+    /const isDynamicEntryModifiedByUser = \(name, content\) => \(/.test(appJs)
+    && /if \(isDynamicEntryModifiedByUser\(preset\.name, existingPreset\.content\)\) return;/.test(appJs));
+assertTrue('模板里只读态只禁用重命名/删除预设，不禁用新建与编辑',
+    mainIndex.includes('title="重命名当前预设"')
+    && mainIndex.includes('title="新建预设条目"')
+    && !mainIndex.includes('默认预设不可编辑，请先另存为'));
+assertTrue('预设集走 settings 持久化（不再单独写 presets 键）',
+    !/setStoredValue\('presets'/.test(appJs) && /presetSets/.test(appJs));
+assertTrue('老存档的 presets 键只读一次做迁移',
+    /const legacyPresets = await getStoredValue\('presets'\)/.test(appJs));
+assertTrue('启动不再强制把温度重置为 1.0',
+    !/settings\.temperature = 1\.0;/.test(appJs.slice(appJs.indexOf('onMounted'), appJs.indexOf('onMounted') + 3000)));
+assertTrue('采样参数随预设集载入 settings',
+    /const applyPresetSamplingParams = \(set\) => \{/.test(appJs) && /settings\[field\] = Number\.isFinite\(params\[field\]\) \? params\[field\] : null/.test(appJs));
+assertTrue('聊天请求带上采样参数',
+    /topP: settings\.topP,[\s\S]{0,200}maxTokens: settings\.maxTokens,/.test(appJs));
+assertTrue('api-utils 只在有值时才下发采样参数',
+    /if \(Number\.isFinite\(options\.topP\)\) sampling\.top_p = options\.topP;/.test(apiJs)
+    && /if \(Number\.isFinite\(options\.maxTokens\) && options\.maxTokens > 0\) sampling\.max_tokens = options\.maxTokens;/.test(apiJs));
+assertTrue('导入酒馆预设后立即切换生效并提示统计',
+    /applyPresetSetToLive\(set\);/.test(appJs) && /跳过 \$\{stats\.skippedMarkers\} 个占位标记/.test(appJs));
+assertTrue('导入预设自带的正则按作用域入库',
+    /cardUtils\.normalizeImportedRegexScript\(/.test(appJs) && /regexScripts\.value = \[\.\.\.regexScripts\.value, \.\.\.normalized\]/.test(appJs));
+assertTrue('导入/用户预设不覆盖同名条目（只补不改）',
+    /if \(keepImported\) return entry;/.test(appJs) && /const keepImported = !activeSet\.builtin;/.test(appJs));
+assertTrue('预设选择器与操作按钮已在预设页接线',
+    mainIndex.includes('@update:model-value="selectPresetSet"')
+    && mainIndex.includes('@click="savePresetSetAs"')
+    && mainIndex.includes('@click="renamePresetSet"')
+    && mainIndex.includes('@click="deletePresetSet"')
+    && mainIndex.includes('@click="exportPresetSet"'));
+assertTrue('预设集成员已暴露给模板',
+    /presetSets, activePresetSetId, activePresetSetName, presetSetOptions, isBuiltinPresetSetActive/.test(appJs));
 
 console.log(`\n结果: ${failures === 0 ? '通过' : '失败'} — ${checks - failures}/${checks} 项断言`);process.exit(failures === 0 ? 0 : 1);

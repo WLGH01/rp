@@ -1014,8 +1014,11 @@
                                                             <span class="font-bold text-gray-500">温度</span>
                                                             <span class="font-mono font-semibold text-gray-500 tabular-nums">{{ Number(settings.temperature).toFixed(2) }}</span>
                                                         </div>
-                                                        <input v-model.number="settings.temperature" type="range" min="0" max="1" step="0.01"
+                                                        <input v-model.number="settings.temperature" type="range" min="0" max="2" step="0.01"
                                                             class="compact-range block w-full appearance-none cursor-pointer accent-primary-500" aria-label="温度">
+                                                        <p class="mt-1 text-[10px] leading-relaxed text-gray-400">
+                                                            温度随当前预设走（{{ activePresetSetName }}）；内置默认预设固定 1.00
+                                                        </p>
                                                     </div>
                                                 </div>
                                                 <div class="flex flex-col gap-1 rounded-xl bg-gray-50">
@@ -3582,19 +3585,50 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path>
                         </svg>
                     </template>
-                    <button @click="openExportModal('presets')" class="settings-icon-button" title="导出">
+                    <button @click="exportPresetSet" class="settings-icon-button" title="导出当前预设">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor"><use href="#icon-export"></use></svg>
                     </button>
-                    <label class="settings-icon-button cursor-pointer" title="导入预设">
+                    <label class="settings-icon-button cursor-pointer" title="导入预设（支持酒馆预设 / 本站预设）">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
                         <input type="file" accept=".json" @change="importPresets" class="hidden">
                     </label>
-                    <button @click="createPreset" class="settings-create-button" title="新建预设">
+                    <button @click="createPreset" class="settings-create-button" title="新建预设条目">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                         </svg>
                     </button>
                 </settings-page-header>
+
+                <!-- 预设集：多套预设，随时切换 -->
+                <div class="mb-4 rounded-2xl border border-gray-200 bg-white p-4 md:p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div class="flex-1 min-w-0">
+                            <label class="mb-1.5 block text-xs font-bold uppercase tracking-wide text-gray-500">当前预设</label>
+                            <custom-select :model-value="activePresetSetId" @update:model-value="selectPresetSet"
+                                :options="presetSetOptions" button-class="font-medium"></custom-select>
+                        </div>
+                        <div class="flex flex-wrap gap-2 md:flex-none md:pt-5">
+                            <button @click="savePresetSetAs" class="modal-secondary-button" title="把当前预设复制成一套可修改的新预设">另存为</button>
+                            <button @click="renamePresetSet" class="modal-secondary-button"
+                                :class="isBuiltinPresetSetActive ? 'opacity-40 cursor-not-allowed' : ''"
+                                :disabled="isBuiltinPresetSetActive" title="重命名当前预设">重命名</button>
+                            <button @click="deletePresetSet" class="modal-secondary-button"
+                                :class="isBuiltinPresetSetActive ? 'opacity-40 cursor-not-allowed' : ''"
+                                :disabled="isBuiltinPresetSetActive" title="删除当前预设">删除预设</button>
+                        </div>
+                    </div>
+                    <div v-if="isBuiltinPresetSetActive"
+                        class="mt-3 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-700">
+                        「默认预设」是内置预设：<strong>条目可以修改</strong>（编辑 / 新增 / 拖动排序 / 切换开关都可以），
+                        只是这一整套预设<strong>不能删除</strong>。你改过的条目会被保留，不会被程序覆盖；
+                        没改过的条目会跟随版本升级自动更新。
+                    </div>
+                    <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-gray-500">
+                        <span v-for="item in activePresetSamplingSummary" :key="item.key">
+                            {{ item.label }}：<span class="font-mono font-semibold text-gray-600">{{ item.value }}</span>
+                        </span>
+                    </div>
+                </div>
 
                 <div id="presets-list" class="sortable-list">
                     <div v-for="(preset, index) in presets" :key="getSortableItemKey(preset)"

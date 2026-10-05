@@ -89,6 +89,7 @@ const {
     corePresets: BUILTIN_CORE_PRESETS,
     managedPresets: BUILTIN_PRESETS
 } = window.RPHubBuiltinPresets;
+const CHAT_PRESETS = window.RPHubChatPresets;
 const {
     applyUiTemplateUpdateListToTemplate,
     cloneUiObject,
@@ -626,6 +627,13 @@ const app = createApp({
             model: DEFAULT_API_CONFIG.qualityModel,
             contextSize: MAX_CONTEXT_SIZE,
             temperature: 1.0,
+            // 采样参数：由当前预设集载入（见 applyPresetSamplingParams）。
+            // null = 不下发该字段 —— 与酒馆预设里「没设」的语义一致，
+            // 也让默认预设的请求体与改造前逐字段相同。
+            topP: null,
+            frequencyPenalty: null,
+            presencePenalty: null,
+            maxTokens: null,
             reasoningEffort: '',
             stream: true,
             activeToolAggressiveness: 'adaptive',
@@ -776,6 +784,16 @@ const app = createApp({
             comfyTimeout: 600,
             // 是否在生成中显示「取消」按钮（走 /interrupt）。
             comfyAllowCancel: true,
+            // ===== 预设集（多套提示词预设，可切换）=====
+            // 背景：原先只有一组预设条目（破限 / 防抢话 / 文风 / COT…），存成 presets 数组。
+            // 现在升级成「预设集」：默认预设由代码重建、不可修改；用户可另存多套并随时切换。
+            // 预设集列表（多套提示词预设）与当前生效的那一套的 id。
+            presetSets: [],
+            // 当前生效的预设集 id。
+            activePresetSetId: CHAT_PRESETS.DEFAULT_PRESET_SET_ID,
+            // 采样参数（temperature / top_p / 惩罚项 / max_tokens）由当前预设集载入到下面这几个
+            // settings 字段里 —— 请求组装读的就是它们，因此不另开一份镜像，免得两处对不上。
+            // 未导入酒馆预设时 topP 等为 null（不下发，请求体与改造前逐字段一致）。
             qualityModel: DEFAULT_API_CONFIG.qualityModel,
             balancedModel: DEFAULT_API_CONFIG.balancedModel,
             fastModel: DEFAULT_API_CONFIG.fastModel,
@@ -1472,6 +1490,87 @@ let removedProviderConfigCleared = false;
         const isConversationBusy = computed(() => isGenerating.value || isRemoteGenerating.value || hasActiveToolInlineWork.value);
 
         const presets = ref([]);
+        // ===== 预设集（多套预设，可切换）=====
+        // presets.value 始终是「当前生效那一套」的条目，请求组装等处读它即可；
+        // 下面这组状态负责在切换时把 presets.value 与预设集存档对齐。
+        const presetSets = ref([]);
+        const activePresetSetId = ref(CHAT_PRESETS.DEFAULT_PRESET_SET_ID);
+        // 载入预设集时不要把它当成「用户改了条目」再写回去，否则切换会把目标集覆盖成源集。
+        let _applyingPresetSet = false;
+        // 采样参数（随预设集走）：temperature 一定有值，其余 null/空 = 不下发。
+        const PRESET_SAMPLING_FIELDS = Object.freeze(['topP', 'frequencyPenalty', 'presencePenalty', 'maxTokens']);
+        const DEFAULT_PRESET_TEMPERATURE = 1.0;
+        const getActivePresetSet = () => presetSets.value
+            .find(item => item.id === activePresetSetId.value) || null;
+        const isBuiltinPresetSetActive = computed(() => !!getActivePresetSet()?.builtin);
+        const presetSetOptions = computed(() => presetSets.value.map(item => ({
+            value: item.id,
+            label: item.builtin ? `${item.name}（内置·只读）` : item.name,
+            description: `${item.prompts.length} 条`
+        })));
+        const activePresetSetName = computed(() => getActivePresetSet()?.name || CHAT_PRESETS.DEFAULT_PRESET_SET_NAME);
+        // 当前预设集带来的采样参数：有值的显示出来，null 的显示「未设置」。
+        const activePresetSamplingSummary = computed(() => {
+            const params = getActivePresetSet()?.params || {};
+            const format = (value, digits = 2) => (value === null || value === undefined ? '未设置' : Number(value).toFixed(digits));
+            return [
+                { key: 'temperature', label: '温度', value: Number(settings.temperature).toFixed(2) },
+                { key: 'topP', label: 'Top P', value: format(params.topP) },
+                { key: 'frequencyPenalty', label: '频率惩罚', value: format(params.frequencyPenalty, 1) },
+                { key: 'presencePenalty', label: '存在惩罚', value: format(params.presencePenalty, 1) },
+                { key: 'maxTokens', label: '最大输出', value: params.maxTokens ? String(params.maxTokens) : '未设置' }
+            ];
+        });
+        // 把预设集里的采样参数落到 settings（请求实际读的就是 settings）。
+        // 规则：temperature 缺省回落 1.0（与本站旧行为一致），其余缺省清成 null/空（不下发）。
+        // reasoningEffort 也在这里：酒馆预设的 reasoning_effort 要真正生效。
+        const applyPresetSamplingParams = (set) => {
+            const params = set?.params || {};
+            settings.temperature = Number.isFinite(params.temperature) ? params.temperature : DEFAULT_PRESET_TEMPERATURE;
+            PRESET_SAMPLING_FIELDS.forEach((field) => {
+                settings[field] = Number.isFinite(params[field]) ? params[field] : null;
+            });
+            settings.reasoningEffort = CHAT_PRESETS.normalizePresetParams({ reasoningEffort: params.reasoningEffort }).reasoningEffort;
+        };
+        // 反向：用户拖了温度 / 改了推理强度 → 记到当前预设集上。
+        // 内置预设的采样参数固定为基线（温度 1.0、其余不下发），因此不参与回写。
+        const writeSamplingParamsToActivePresetSet = () => {
+            const set = getActivePresetSet();
+            if (!set || set.builtin) return;
+            set.params = {
+                ...set.params,
+                temperature: Number.isFinite(settings.temperature) ? settings.temperature : null,
+                reasoningEffort: settings.reasoningEffort || '',
+                ...Object.fromEntries(PRESET_SAMPLING_FIELDS.map(field => [
+                    field,
+                    Number.isFinite(settings[field]) ? settings[field] : null
+                ]))
+            };
+        };
+        const applyPresetSetToLive = (set) => {
+            _applyingPresetSet = true;
+            activePresetSetId.value = set.id;
+            settings.activePresetSetId = set.id;
+            presets.value = (set.prompts || []).map(preset => normalizePreset({ ...preset }));
+            applyPresetSamplingParams(set);
+            nextTick(() => { _applyingPresetSet = false; });
+        };
+        // presets.value → 当前预设集。内置预设也要回写：它的**内容**由代码重建，
+        // 但每条条目的开关状态是用户的选择，不写回去下次启动就丢了。
+        // 载入过程中跳过（否则会把刚载入的条目当成用户改动再写一遍）。
+        const syncActivePresetSetFromLive = () => {
+            if (_applyingPresetSet) return;
+            const set = getActivePresetSet();
+            if (!set) return;
+            const next = presets.value.map(preset => normalizePreset({ ...preset }));
+            if (JSON.stringify(set.prompts) === JSON.stringify(next)) return;
+            set.prompts = next;
+        };
+        watch(presets, syncActivePresetSetFromLive, { deep: true });
+        watch(() => [settings.temperature, settings.reasoningEffort, ...PRESET_SAMPLING_FIELDS.map(field => settings[field])], () => {
+            if (_applyingPresetSet) return;
+            writeSamplingParamsToActivePresetSet();
+        });
         // 抗截断只临时停用 COT，不改写用户保存的开关状态。
         const isPresetEnabled = preset => preset.enabled !== false
             && (preset.name !== 'COT' || !isTruncationEnabled.value);
@@ -1487,37 +1586,6 @@ let removedProviderConfigCleared = false;
             enabled: preset.enabled !== false,
             role: normalizePresetRole(preset.role || preset.presetRole || preset.type)
         });
-        const syncBuiltinPreset = ({
-            name,
-            content,
-            aliases = [],
-            role,
-            enabled = true,
-            syncEnabled = false,
-            before,
-            after,
-            move = false
-        }) => {
-            const names = new Set([name, ...aliases]);
-            let index = presets.value.findIndex(preset => names.has(preset?.name));
-            const preset = index === -1 ? { name, content, enabled } : presets.value[index];
-
-            preset.name = name;
-            preset.content = content;
-            if (role) preset.role = role;
-            if (syncEnabled) preset.enabled = enabled;
-
-            if (index === -1 || move) {
-                if (index !== -1) presets.value.splice(index, 1);
-                const beforeIndex = before ? presets.value.findIndex(item => item?.name === before) : -1;
-                const afterIndex = after ? presets.value.findIndex(item => item?.name === after) : -1;
-                index = beforeIndex !== -1
-                    ? beforeIndex
-                    : afterIndex !== -1 ? afterIndex + 1 : presets.value.length;
-                presets.value.splice(index, 0, normalizePreset(preset));
-            }
-            return preset;
-        };
         const getPresetRoleLabel = (preset) => {
             const role = normalizePresetRole(preset?.role);
             return presetRoleOptions.find(option => option.value === role)?.label || '系统提示词';
@@ -2234,7 +2302,8 @@ let removedProviderConfigCleared = false;
                 normalizeActiveToolAggressivenessSettings();
                 if (saveCharacters) await saveCharactersNow();
                 await setStoredValue('settings', settings);
-                await setStoredValue('presets', presets.value);
+                // 预设集随 settings 落盘（settings.presetSets），不再单独写 'presets' 键。
+                // 老键只在 loadData 里读一次做迁移，此后只写不读，避免删掉的预设被迁回来。
                 await setStoredValue('regex', regexScripts.value);
                 await setStoredValue('global_regex', globalRegexScripts.value);
                 await setStoredValue('worldinfo', worldInfo.value);
@@ -2534,8 +2603,28 @@ let removedProviderConfigCleared = false;
                 settings.stream = true;
                 normalizeActiveToolAggressivenessSettings();
 
-                const savedPresets = await getStoredValue('presets');
-                if (savedPresets) presets.value = savedPresets.map(normalizePreset);
+                // 预设集（多套预设）：存在 settings 里，随 settings 一起落盘与同步。
+                // 老存档只有单独一个 'presets' 键（一组条目）：它就是用户的「默认预设」，
+                // 因此直接搬进默认预设（而不是另开一套），保证升级后手上的预设原样还在、还能改。
+                // 迁移只在「settings 里还没有预设集」时跑一次，之后不再读老键——
+                // 否则用户删掉某套预设、下次启动又被老键迁回来（同第 15 条「只写不读」）。
+                if (!Array.isArray(settings.presetSets) || !settings.presetSets.length) {
+                    const legacyPresets = await getStoredValue('presets');
+                    if (Array.isArray(legacyPresets) && legacyPresets.length) {
+                        const migratedPrompts = legacyPresets.map(normalizePreset);
+                        // 不写 builtinBaseline：基线缺失时按「与当前代码内容比对」处理，
+                        // 于是老预设里与内置内容不同的条目（用户改过的、自己加的）一律原样保留。
+                        settings.presetSets = [{
+                            id: CHAT_PRESETS.DEFAULT_PRESET_SET_ID,
+                            name: CHAT_PRESETS.DEFAULT_PRESET_SET_NAME,
+                            builtin: true,
+                            prompts: migratedPrompts,
+                            params: { temperature: 1.0 }
+                        }];
+                        settings.activePresetSetId = CHAT_PRESETS.DEFAULT_PRESET_SET_ID;
+                        console.info(`已把旧的 ${migratedPrompts.length} 条预设迁入「${CHAT_PRESETS.DEFAULT_PRESET_SET_NAME}」`);
+                    }
+                }
 
                 const savedGlobalRegex = await getStoredValue('global_regex');
                 if (savedGlobalRegex) globalRegexScripts.value = savedGlobalRegex.map(script => normalizeRegexScript(script, 'global'));
@@ -8423,6 +8512,12 @@ let removedProviderConfigCleared = false;
                     tools: buildActiveToolDefinitions(requestTools),
                     requireTool: activeToolDepth === 0 && requestTools.length > 0 && getActiveToolAggressiveness() === 'force',
                     temperature: settings.temperature,
+                    // 采样参数随当前预设集（导入的酒馆预设会带 top_p / 惩罚项 / max_tokens）。
+                    // null 的字段在 api-utils 里被跳过，不下发。
+                    topP: settings.topP,
+                    frequencyPenalty: settings.frequencyPenalty,
+                    presencePenalty: settings.presencePenalty,
+                    maxTokens: settings.maxTokens,
                     reasoningEffort: settings.reasoningEffort,
                     stream: settings.stream,
                     signal: requestSignal,
@@ -12074,7 +12169,31 @@ let removedProviderConfigCleared = false;
             }
         };
 
-        // Preset Management
+        // ===== Preset Management =====
+        // 默认预设（内置）可以修改：条目可编辑、可新增、可拖动排序、开关可切换，
+        // **只有「删除」被禁止**（用户明确要求：默认预设可以修改，不能删除）。
+        //
+        // 「改了不会被启动逻辑覆盖」靠的是 core-utils 的 syncBuiltinPresetEntries：
+        // 它拿「代码上次发出去的内容快照」逐条比对，只有用户没碰过的条目才跟随代码升级，
+        // 改过的一律保留（详见那个函数的注释）。
+        const isBuiltinPresetSet = () => !!getActivePresetSet()?.builtin;
+        // 默认预设里被用户删掉的条目名（持久化，保证「删了不再补回来」）。
+        const getRemovedBuiltinEntries = () => {
+            const set = getActivePresetSet();
+            if (!set) return [];
+            if (!Array.isArray(set.removedBuiltinEntries)) set.removedBuiltinEntries = [];
+            return set.removedBuiltinEntries;
+        };
+        // 内置条目的名字集合：默认预设里这些条目被删时要登记，避免下次启动又补回来。
+        const BUILTIN_PRESET_ENTRY_NAMES = new Set([
+            ...BUILTIN_CORE_PRESETS.map(preset => preset.name),
+            ...Object.values(BUILTIN_PRESETS).flatMap(preset => [preset.name, ...(preset.aliases || [])]),
+            'COT'
+        ]);
+        // 模板用：某条是不是「默认预设里的内置条目」（决定删除按钮是否禁用）。
+        const isBuiltinPresetEntry = (preset) => isBuiltinPresetSet()
+            && BUILTIN_PRESET_ENTRY_NAMES.has(String(preset?.name || '').trim());
+
         const createPreset = () => {
             editingPreset.id = undefined;
             editingPreset.data = { name: 'New Preset', content: '', enabled: false, role: 'system' };
@@ -12098,10 +12217,135 @@ let removedProviderConfigCleared = false;
         };
 
         const deletePreset = (index) => {
-            confirmAction('确定要删除这个预设吗？此操作无法撤销。', () => {
-                presets.value.splice(index, 1);
-                showToast('预设已删除', 'success');
+            const preset = presets.value[index];
+            const presetName = String(preset?.name || '').trim();
+            // 默认预设是内置的基线，整组不允许删除（用户明确要求：可修改、不能删除）。
+            // 内置条目在默认预设里可以删，但要登记名字，否则下次启动又被补回来。
+            const isBuiltinEntry = isBuiltinPresetSet() && BUILTIN_PRESET_ENTRY_NAMES.has(presetName);
+            confirmAction(
+                isBuiltinEntry
+                    ? `「${presetName}」是内置条目，删除后默认预设将不再包含它（下次启动也不会自动补回）。确定删除吗？`
+                    : '确定要删除这个预设吗？此操作无法撤销。',
+                () => {
+                    if (isBuiltinEntry) {
+                        const removed = getRemovedBuiltinEntries();
+                        if (!removed.includes(presetName)) removed.push(presetName);
+                    }
+                    presets.value.splice(index, 1);
+                    saveData();
+                    showToast('预设已删除', 'success');
+                }
+            );
+        };
+
+        // 删除「默认预设」这一整套预设集：禁止。
+        const guardBuiltinPresetSetDelete = () => {
+            if (!isBuiltinPresetSet()) return false;
+            showToast(`「${CHAT_PRESETS.DEFAULT_PRESET_SET_NAME}」是内置预设，不能删除（条目可以修改）；如需新的一套请用「另存为」`, 'warning');
+            return true;
+        };
+
+        // --- 预设集：切换 / 另存为 / 重命名 / 删除 ---
+        const selectPresetSet = (id) => {
+            if (id === activePresetSetId.value) return;
+            const target = presetSets.value.find(item => item.id === id);
+            if (!target) return;
+            // 切走之前先把当前这套的改动（条目 + 采样参数）留在它自己身上。
+            syncActivePresetSetFromLive();
+            writeSamplingParamsToActivePresetSet();
+            applyPresetSetToLive(target);
+            saveData();
+            showToast(`已切换至预设「${target.name}」`, 'success');
+        };
+
+        const addPresetSet = (set) => {
+            if (presetSets.value.length >= CHAT_PRESETS.PRESET_SET_LIMIT) {
+                showToast(`最多保存 ${CHAT_PRESETS.PRESET_SET_LIMIT} 套预设`, 'warning');
+                return null;
+            }
+            presetSets.value.push(set);
+            return set;
+        };
+
+        // 「另存为」：把当前生效的这套（含采样参数）复制成一套新的、可修改的预设。
+        const savePresetSetAs = () => {
+            const baseName = getActivePresetSet()?.builtin
+                ? `${CHAT_PRESETS.DEFAULT_PRESET_SET_NAME} 副本`
+                : `${getActivePresetSet()?.name || '预设'} 副本`;
+            const name = window.prompt('请输入新预设的名称：', CHAT_PRESETS.uniquePresetSetName(presetSets.value, baseName));
+            if (!name || !name.trim()) return;
+            const set = CHAT_PRESETS.normalizePresetSet({
+                id: `set-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                name: CHAT_PRESETS.uniquePresetSetName(presetSets.value, name),
+                builtin: false,
+                source: 'rp-hub',
+                importedAt: Date.now(),
+                prompts: presets.value.map(preset => normalizePreset({ ...preset })),
+                params: {
+                    temperature: settings.temperature,
+                    reasoningEffort: settings.reasoningEffort || '',
+                    ...Object.fromEntries(PRESET_SAMPLING_FIELDS.map(field => [field, settings[field]]))
+                }
+            }, presetSets.value.length);
+            if (!addPresetSet(set)) return;
+            applyPresetSetToLive(set);
+            saveData();
+            showToast(`已保存为预设「${set.name}」，后续修改只影响这一套`, 'success');
+        };
+
+        const renamePresetSet = () => {
+            const set = getActivePresetSet();
+            if (!set) return;
+            if (set.builtin) {
+                showToast(`「${CHAT_PRESETS.DEFAULT_PRESET_SET_NAME}」是内置预设，名称不可修改`, 'warning');
+                return;
+            }
+            const name = window.prompt('请输入新的预设名称：', set.name);
+            if (!name || !name.trim()) return;
+            set.name = CHAT_PRESETS.uniquePresetSetName(
+                presetSets.value.filter(item => item.id !== set.id),
+                name
+            );
+            saveData();
+            showToast(`预设已重命名为「${set.name}」`, 'success');
+        };
+
+        const deletePresetSet = () => {
+            const set = getActivePresetSet();
+            if (!set) return;
+            if (guardBuiltinPresetSetDelete()) return;
+            confirmAction(`确定要删除预设「${set.name}」吗？此操作无法撤销。`, () => {
+                // 原地删除，不能 `presetSets.value = filter(...)`：
+                // 那样会换成一个新数组，切断与 settings.presetSets 的引用，改动就落不了盘。
+                const index = presetSets.value.findIndex(item => item.id === set.id);
+                if (index !== -1) presetSets.value.splice(index, 1);
+                const fallback = presetSets.value.find(item => item.builtin) || presetSets.value[0];
+                if (fallback) {
+                    applyPresetSetToLive(fallback);
+                } else {
+                    // 理论上不会走到这里（normalize 保证默认预设始终存在），留个兜底。
+                    activePresetSetId.value = CHAT_PRESETS.DEFAULT_PRESET_SET_ID;
+                    settings.activePresetSetId = CHAT_PRESETS.DEFAULT_PRESET_SET_ID;
+                }
+                saveData();
+                showToast(`已删除预设「${set.name}」`, 'success');
             });
+        };
+
+        const exportPresetSet = () => {
+            const set = getActivePresetSet();
+            if (!set) return;
+            const payload = CHAT_PRESETS.toPresetSetExportEntry({
+                ...set,
+                prompts: presets.value,
+                params: {
+                    temperature: settings.temperature,
+                    reasoningEffort: settings.reasoningEffort || '',
+                    ...Object.fromEntries(PRESET_SAMPLING_FIELDS.map(field => [field, settings[field]]))
+                }
+            });
+            downloadJsonFile(payload, `${set.name || 'preset'}.json`);
+            showToast(`已导出预设「${set.name}」`, 'success');
         };
 
         // Expose triggerSlash for character cards (Defined early)
@@ -12160,10 +12404,34 @@ let removedProviderConfigCleared = false;
                 showUserSetupModal.value = true;
             }
 
-            // 每次启动时强制重置温度为 1.0
-            settings.temperature = 1.0;
+            // 温度不再每次启动强制重置：它现在由当前预设集承载（默认预设 = 1.0），
+            // 否则导入的酒馆预设一刷新就被打回 1.0，预设里的采样参数形同虚设。
 
             // --- Enforce Defaults ---
+
+            // 0. 预设集：先归一出「默认预设」与用户/导入的预设集，再决定当前生效的是哪一套。
+            const normalizedPresetSets = CHAT_PRESETS.normalizePresetSets(settings.presetSets);
+            const builtinSet = normalizedPresetSets[0];
+            // 默认预设的采样参数固定为本站基线：温度 1.0，其余不下发。
+            // （历史上「每次启动强制 temperature = 1.0」的行为就落在这里。）
+            builtinSet.params = CHAT_PRESETS.normalizePresetParams({ temperature: DEFAULT_PRESET_TEMPERATURE });
+            presetSets.value = normalizedPresetSets;
+            // 关键：让 settings.presetSets 与 presetSets.value 指向同一个数组。
+            // settings 才是落盘/同步的真相（深 watcher + 防抖），若两者各持一份副本，
+            // 那么对预设集的增删改永远写不进存档 —— 表现为「改完一刷新全没了」。
+            settings.presetSets = presetSets.value;
+
+            const requestedSet = normalizedPresetSets.find(item => item.id === settings.activePresetSetId);
+            const activeSet = requestedSet || builtinSet;
+            activePresetSetId.value = activeSet.id;
+            settings.activePresetSetId = activeSet.id;
+            // 载入阶段不能让 watcher 把「刚载入的条目」当成用户改动写回预设集。
+            _applyingPresetSet = true;
+            // 用户/导入的预设：条目与采样参数原样载入，下面的内置条目只补它缺的那几条。
+            // 默认预设：条目同样原样载入（用户改过的东西必须留下来），
+            // 代码内置内容由 syncBuiltinPresetEntries 按「有没有被改过」合并进来。
+            presets.value = activeSet.prompts.map(preset => normalizePreset({ ...preset }));
+            applyPresetSamplingParams(activeSet);
 
             // 1. Enforce Default Preset (破限)
             const builtinPresetDefaults = BUILTIN_CORE_PRESETS;
@@ -12178,67 +12446,149 @@ let removedProviderConfigCleared = false;
                 existingBuiltinPresetMap.set(preset.name, normalizePreset(preset));
             });
 
+            // 代码内置内容的基线快照：本次启动结束时落盘，供下次判断「用户有没有改过这一条」。
+            // 只有默认预设用得上（用户/导入的预设不做任何内置合并）。
+            const codePresetBaseline = {};
+            builtinPresetDefaults.forEach(preset => { codePresetBaseline[preset.name] = preset.content; });
+            // 用户主动删掉的默认预设条目名：删了就不再补回来。
+            const removedBuiltinNames = new Set(
+                activeSet.builtin ? (activeSet.removedBuiltinEntries || []) : []
+            );
+            // 「这一条被用户改过吗」：与基线比对。基线缺失（首次运行/新加条目）视为没改过，
+            // 与旧版本「启动即重建」的行为一致，不会误判成用户改动。
+            const isPresetEntryModified = (name, content) => {
+                if (!activeSet.builtin) return true;
+                const base = codePresetBaseline[name] ?? activeSet.builtinBaseline?.[name];
+                return base !== undefined && base !== content;
+            };
+
             const existingDefaultPreset = existingBuiltinPresetMap.get(defaultPresetName);
             const fallbackBuiltinEnabled = existingDefaultPreset ? existingDefaultPreset.enabled !== false : true;
+            // 核心条目（破限一族）：内容跟随代码，但**用户改过的保留用户的**，开关一律接着用户上次的选择。
             const orderedBuiltinPresets = builtinPresetDefaults.map((preset) => {
                 const existingPresetData = existingBuiltinPresetMap.get(preset.name);
+                const modified = !!existingPresetData && isPresetEntryModified(preset.name, existingPresetData.content);
                 return normalizePreset({
                     ...existingPresetData,
                     name: preset.name,
                     role: preset.role,
-                    content: preset.content,
+                    content: modified ? existingPresetData.content : preset.content,
                     enabled: existingPresetData ? existingPresetData.enabled !== false : fallbackBuiltinEnabled
                 });
             });
 
-            presets.value = [
-                ...orderedBuiltinPresets,
-                ...presets.value.filter(preset => preset && !builtinPresetNameSet.has(preset.name))
-            ];
+            // 默认预设的条目 = 核心条目（排在最前）+ 用户自己加的条目。
+            // 用户删掉的核心条目不再补回来；用户/导入的预设则保留自己的条目，内置那几条只补缺。
+            const keepImported = !activeSet.builtin;
+            if (activeSet.builtin) {
+                presets.value = [
+                    ...orderedBuiltinPresets.filter(preset => !removedBuiltinNames.has(preset.name)),
+                    ...presets.value.filter(preset => preset && !builtinPresetNameSet.has(preset.name))
+                ];
+            } else {
+                const overriddenNames = new Set(presets.value.map(preset => preset?.name));
+                presets.value = [
+                    ...presets.value,
+                    ...orderedBuiltinPresets.filter(preset => !overriddenNames.has(preset.name))
+                ];
+            }
+
+            // 辅助约束条目（防抢话 / 文风 / NSFW…）：插入位置由各自的 before/after 锚点决定。
+            // 与旧实现的三点差别（对应新需求「默认预设可以修改」）：
+            //   1. 用户改过的条目一律保留，代码不再覆盖；
+            //   2. 用户删掉的条目不再补回来；
+            //   3. 其余条目内容跟随代码升级，只保留用户的开关选择。
+            const syncManagedPreset = (spec) => {
+                const names = new Set([spec.name, ...(spec.aliases || [])]);
+                const index = presets.value.findIndex(preset => names.has(preset?.name));
+                if (index !== -1) {
+                    const entry = presets.value[index];
+                    if (keepImported) return entry;
+                    removedBuiltinNames.delete(entry.name);
+                    if (isPresetEntryModified(entry.name, entry.content)) return entry;
+                    entry.content = spec.content;
+                    if (spec.role) entry.role = spec.role;
+                    if (spec.syncEnabled) entry.enabled = spec.enabled;
+                    if (spec.move) {
+                        presets.value.splice(index, 1);
+                        const beforeIndex = spec.before ? presets.value.findIndex(item => item?.name === spec.before) : -1;
+                        const afterIndex = spec.after ? presets.value.findIndex(item => item?.name === spec.after) : -1;
+                        const insertAt = beforeIndex !== -1 ? beforeIndex
+                            : afterIndex !== -1 ? afterIndex + 1 : presets.value.length;
+                        presets.value.splice(insertAt, 0, entry);
+                    }
+                    return entry;
+                }
+                if (removedBuiltinNames.has(spec.name)) return null;
+                const beforeIndex = spec.before ? presets.value.findIndex(item => item?.name === spec.before) : -1;
+                const afterIndex = spec.after ? presets.value.findIndex(item => item?.name === spec.after) : -1;
+                const insertAt = beforeIndex !== -1 ? beforeIndex
+                    : afterIndex !== -1 ? afterIndex + 1 : presets.value.length;
+                const entry = normalizePreset({
+                    name: spec.name,
+                    content: spec.content,
+                    role: spec.role,
+                    enabled: spec.enabled !== false
+                });
+                presets.value.splice(insertAt, 0, entry);
+                return entry;
+            };
             // 1.6 Enforce Default Preset (防抢话)
-            syncBuiltinPreset(BUILTIN_PRESETS.antiRobbery);
+            syncManagedPreset(BUILTIN_PRESETS.antiRobbery);
 
             // 1.6.1 Enforce Default Preset (防神化)
-            syncBuiltinPreset(BUILTIN_PRESETS.antiDeification);
+            syncManagedPreset(BUILTIN_PRESETS.antiDeification);
             // 1.7 Enforce Default Preset (防重复)
-            syncBuiltinPreset(BUILTIN_PRESETS.antiRepeat);
+            syncManagedPreset(BUILTIN_PRESETS.antiRepeat);
 
             // 1.7.2 Enforce Default Preset (人格内核)
-            syncBuiltinPreset(BUILTIN_PRESETS.personalityCore);
+            syncManagedPreset(BUILTIN_PRESETS.personalityCore);
 
             // 1.7.3 Enforce Default Preset (去User中心化)
-            syncBuiltinPreset(BUILTIN_PRESETS.deUserCentric);
+            syncManagedPreset(BUILTIN_PRESETS.deUserCentric);
 
             // 1.7.5 Enforce Default Preset (文风（抗八股）)
-            syncBuiltinPreset(BUILTIN_PRESETS.writingStyle);
-            syncBuiltinPreset(BUILTIN_PRESETS.storyPanels);
+            syncManagedPreset(BUILTIN_PRESETS.writingStyle);
+            syncManagedPreset(BUILTIN_PRESETS.storyPanels);
 
             // 1.7.5.1 固定 NSFW增强在文风预设之后
-            syncBuiltinPreset(BUILTIN_PRESETS.nsfw);
+            syncManagedPreset(BUILTIN_PRESETS.nsfw);
 
             // 1.7.6 Enforce Default Preset (时间戳)
-            syncBuiltinPreset(BUILTIN_PRESETS.timestamp);
+            syncManagedPreset(BUILTIN_PRESETS.timestamp);
 
             // 1.8 Enforce Default Preset (第二人称)
-            syncBuiltinPreset({
+            syncManagedPreset({
                 ...BUILTIN_PRESETS.secondPerson,
                 enabled: user.person !== 'third',
                 syncEnabled: true
             });
 
             // 1.7 Enforce Default Preset (第三人称)
-            syncBuiltinPreset({
+            syncManagedPreset({
                 ...BUILTIN_PRESETS.thirdPerson,
                 enabled: user.person === 'third',
                 syncEnabled: true
             });
 
             // 1.9 Enforce Default Preset (禁止规则)
-            syncBuiltinPreset(BUILTIN_PRESETS.prohibited);
+            syncManagedPreset(BUILTIN_PRESETS.prohibited);
+            Object.values(BUILTIN_PRESETS).forEach(preset => {
+                codePresetBaseline[preset.name] = preset.content;
+            });
 
             // 1.10 Enforce Default Preset (COT)
+            // COT 与两条预注入的内容由代码按「记忆 / UI 模板 / 剧情面板 / 模型」等运行时设置生成，
+            // 所以它们的内容天然会变，不能拿启动时那份基线去比对（会误判成「用户改过」）。
+            // 这里单独记一份「代码上次生成的内容」：与它不同 = 用户改过 → 保留用户的，不再重生成。
             const cotPresetName = 'COT';
+            const dynamicPresetNames = [cotPresetName, '破限预注入 · AI 1', '破限预注入 · AI 2'];
+            const dynamicBaseline = { ...(activeSet.dynamicBaseline || {}) };
+            const isDynamicEntryModifiedByUser = (name, content) => (
+                dynamicBaseline[name] !== undefined && dynamicBaseline[name] !== content
+            );
             const syncDynamicPresetContent = () => {
+                if (keepImported) return;
                 const useThinkingOpening = usesThinkingCotTag(settings.model);
                 const uiTemplateAnalysisEnabled = isUiTemplateAnalysisEnabled();
                 const cotPresetContent = buildCotPresetContent({
@@ -12249,17 +12599,23 @@ let removedProviderConfigCleared = false;
                 });
                 let existingCotPreset = presets.value.find(p => p.name === cotPresetName);
                 if (!existingCotPreset) {
-                    presets.value.push({
-                        name: cotPresetName,
-                        content: cotPresetContent,
-                        enabled: true
-                    });
-                    existingCotPreset = presets.value.find(p => p.name === cotPresetName);
-                } else if (existingCotPreset.content !== cotPresetContent) {
-                    existingCotPreset.content = cotPresetContent;
+                    if (!removedBuiltinNames.has(cotPresetName)) {
+                        presets.value.push({
+                            name: cotPresetName,
+                            content: cotPresetContent,
+                            enabled: true
+                        });
+                        existingCotPreset = presets.value.find(p => p.name === cotPresetName);
+                        dynamicBaseline[cotPresetName] = cotPresetContent;
+                    }
+                } else if (!isDynamicEntryModifiedByUser(cotPresetName, existingCotPreset.content)) {
+                    if (existingCotPreset.content !== cotPresetContent) {
+                        existingCotPreset.content = cotPresetContent;
+                    }
+                    dynamicBaseline[cotPresetName] = cotPresetContent;
                 }
 
-                const prefillEnabled = isPresetEnabled(existingCotPreset);
+                const prefillEnabled = !!existingCotPreset && isPresetEnabled(existingCotPreset);
                 BUILTIN_CORE_PRESETS.forEach(preset => {
                     const prefillPhase = preset.name === '破限预注入 · AI 1' ? 1
                         : preset.name === '破限预注入 · AI 2' ? 2
@@ -12267,7 +12623,9 @@ let removedProviderConfigCleared = false;
                     if (!prefillPhase) return;
                     const existingPreset = presets.value.find(item => item.name === preset.name);
                     if (!existingPreset) return;
-                    existingPreset.content = buildCotPresetContent({
+                    // 用户改过这条预注入：保留用户的，不再按设置重生成。
+                    if (isDynamicEntryModifiedByUser(preset.name, existingPreset.content)) return;
+                    const nextContent = buildCotPresetContent({
                         memoryEnabled: memorySettings.enabled,
                         uiTemplateAnalysisEnabled,
                         useThinkingOpening,
@@ -12275,6 +12633,8 @@ let removedProviderConfigCleared = false;
                         prefillEnabled,
                         prefillBaseContent: preset.content
                     });
+                    existingPreset.content = nextContent;
+                    dynamicBaseline[preset.name] = nextContent;
                 });
             };
             syncDynamicPresetContent();
@@ -12289,6 +12649,18 @@ let removedProviderConfigCleared = false;
                 () => presets.value.find(preset => preset.name === cotPresetName)?.enabled
             ], syncDynamicPresetContent);
             removeLegacyUserRegex();
+
+            // 内置条目补完：把当前条目写回当前预设集，然后解除「正在载入预设集」守卫。
+            // 守卫必须在 saveData 之前解除，否则这次落盘写进去的还是载入前的旧条目。
+            syncActivePresetSetFromLive();
+            // 记下「代码这次发出去的内容」：下次启动靠它区分「用户改过的条目」与「没碰过的条目」。
+            // 只有默认预设需要（用户/导入的预设不做内置合并）。
+            if (activeSet.builtin) {
+                activeSet.builtinBaseline = { ...codePresetBaseline };
+                activeSet.dynamicBaseline = { ...dynamicBaseline };
+                activeSet.removedBuiltinEntries = [...removedBuiltinNames];
+            }
+            _applyingPresetSet = false;
 
             // Save enforced defaults immediately (仅保存预设/正则等结构性数据)
             saveData({ saveMemories: false, saveCharacters: false });
@@ -12690,6 +13062,10 @@ let removedProviderConfigCleared = false;
             showBatchImportMenu, batchImportItems, batchImportRunning, batchImportSkipDuplicates,
             addBatchImportFiles, openBatchCharacterImport, clearBatchImportFiles, closeBatchImportMenu, startBatchCharacterImport,
             createPreset, editPreset, savePreset, deletePreset,
+            // 预设集（多预设）：切换 / 另存为 / 重命名 / 删除 / 导出
+            presetSets, activePresetSetId, activePresetSetName, presetSetOptions, isBuiltinPresetSetActive,
+            activePresetSamplingSummary, selectPresetSet, savePresetSetAs, renamePresetSet,
+            deletePresetSet, exportPresetSet, isBuiltinPresetEntry,
             renderMarkdown, messageUsesWideLayout, parseCot, closeCharacterEditor: () => showCharacterEditor.value = false,
             openExportModal: (type) => {
                 exportType.value = type;
@@ -12752,13 +13128,51 @@ let removedProviderConfigCleared = false;
                 showExportModal.value = false;
                 showToast(`成功导出 ${items.length} 个项目`, 'success');
             },
+            // 预设导入：兼容酒馆预设（prompts + prompt_order + 采样参数 + 自带正则）
+            // 与本站的预设集 / 旧条目数组。导入结果永远是一套**新的、可修改的**预设并立即生效，
+            // 不往内置预设里塞条目（那是只读的）。
             importPresets: (event) => readJsonFileInput(event, data => {
-                const items = Array.isArray(data) ? data : [data];
-                if (items.length > 0) {
-                    presets.value = [...presets.value, ...items.map(normalizePreset)];
-                    showToast(`成功导入 ${items.length} 条预设`, 'success');
+                const fileName = event?.target?.files?.[0]?.name || '';
+                let parsed;
+                try {
+                    parsed = CHAT_PRESETS.parsePresetImport(data, { fileName });
+                } catch (error) {
+                    showToast(`导入失败: ${error.message}`, 'error');
+                    return;
                 }
-            }, () => showToast('导入失败: 格式错误', 'error')),
+                if (!parsed.prompts.length) {
+                    showToast('导入失败: 预设里没有可用条目', 'warning');
+                    return;
+                }
+                const set = CHAT_PRESETS.normalizePresetSet({
+                    id: `set-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                    name: CHAT_PRESETS.uniquePresetSetName(presetSets.value, parsed.name),
+                    builtin: false,
+                    source: parsed.kind === 'set' ? 'sillytavern' : 'rp-hub',
+                    importedAt: Date.now(),
+                    prompts: parsed.prompts,
+                    params: parsed.params
+                }, presetSets.value.length);
+                if (!addPresetSet(set)) return;
+                applyPresetSetToLive(set);
+                // 酒馆预设常自带正则脚本（思维链隐藏、状态栏处理等），一并导成当前角色的正则。
+                let regexCount = 0;
+                if (parsed.regexScripts?.length) {
+                    const fallbackScope = currentCharacter.value ? 'character' : 'global';
+                    const normalized = parsed.regexScripts.map(script => cardUtils.normalizeImportedRegexScript(
+                        { ...script, scope: script.scope || fallbackScope },
+                        { fallbackScope, systemNames: systemRegexNames }
+                    ));
+                    regexScripts.value = [...regexScripts.value, ...normalized];
+                    regexCount = normalized.length;
+                }
+                saveData();
+                const stats = parsed.stats || {};
+                const parts = [`${parsed.prompts.length} 条提示词（${stats.enabled || 0} 条启用）`];
+                if (regexCount) parts.push(`${regexCount} 个正则`);
+                if (stats.skippedMarkers) parts.push(`跳过 ${stats.skippedMarkers} 个占位标记`);
+                showToast(`已导入预设「${set.name}」并切换生效：${parts.join('、')}`, 'success', 5000);
+            }, error => showToast(`导入失败: ${error.message}`, 'error')),
 
             // Regex Methods
             importRegex: (event) => readJsonFileInput(event, data => {
