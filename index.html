@@ -794,7 +794,8 @@
                                             </svg>
                                         </button>
                                     </div>
-                                    <div class="chat-model-slots relative grid auto-rows-fr gap-1.5 rounded-xl bg-gray-100/70 p-1">
+                                    <div class="chat-model-slots relative grid auto-rows-fr gap-1.5 rounded-xl bg-gray-100/70 p-1"
+                                        :style="{ '--slot-count': chatModelSlots.length }">
                                         <div class="segmented-switch__indicator flex items-center justify-end px-2.5 text-primary-600" aria-hidden="true"
                                             v-show="chatModelSlots.some(slot => slot.mode === modelMode && slot.model)"
                                             :style="{ '--slot-index': chatModelSlots.findIndex(slot => slot.mode === modelMode) }">

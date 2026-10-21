@@ -2677,11 +2677,13 @@ button.sortable-item-main:focus-visible { outline: 2px solid rgb(var(--primary-4
     transform: none;
 }
 
-/* --- 输入区模型槽位指示器：槽位数由 --slot-count 驱动（本机是 5 个，上游写死 3 个） --- */
+/* --- 输入区模型槽位指示器：槽位数由 --slot-count 驱动（本机是 5 个，上游写死 3 个）。
+       --slot-count 由 index.html 在 .chat-model-slots 上用内联 style 写入（值取 chatModelSlots.length），
+       这样槽位数增减时这里不用改；回退值 5 与当前 CHAT_MODEL_SLOT_MODES 长度一致。 --- */
 .chat-model-slots > .segmented-switch__indicator {
     inset-block-end: auto;
     width: calc(100% - 0.5rem);
-    height: calc((100% - 0.5rem - (var(--slot-count, 3) - 1) * 0.375rem) / var(--slot-count, 3));
+    height: calc((100% - 0.5rem - (var(--slot-count, 5) - 1) * 0.375rem) / var(--slot-count, 5));
     transform: translateY(calc(var(--slot-index, 0) * (100% + 0.375rem)));
 }
 
